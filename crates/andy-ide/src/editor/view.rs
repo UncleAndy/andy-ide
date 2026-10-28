@@ -20,6 +20,9 @@ const CARET_WIDTH: f32 = 1.5;
 
 const SELECTION_BG: Color32 = Color32::from_rgb(38, 79, 120);
 const CARET: Color32 = Color32::from_rgb(220, 220, 220);
+const GUTTER_BG: Color32 = Color32::from_rgb(30, 30, 30);
+const GUTTER_FG: Color32 = Color32::from_rgb(110, 110, 110);
+const GUTTER_FG_ACTIVE: Color32 = Color32::from_rgb(200, 200, 200);
 const DEFAULT_FG: Color32 = Color32::from_rgb(212, 212, 212);
 
 /// Draws the buffer and handles its input. Returns true when the text changed.
@@ -51,6 +54,9 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 Sense::click_and_drag(),
             );
             let origin = rect.min;
+            let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
+            let gutter_width = digits as f32 * char_w + 8.0;
+            let text_origin = Pos2::new(origin.x + gutter_width, origin.y);
 
             if response.clicked() || response.dragged() {
                 response.request_focus();
@@ -72,13 +78,38 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 .map(|highlighter| highlighter.spans_for_lines(first_line, last_line))
                 .unwrap_or_default();
 
+            paint_gutter(
+                ui,
+                &painter,
+                buffer,
+                rect,
+                origin,
+                gutter_width,
+                row_h,
+                first_line,
+                last_line,
+            );
             paint_selection(
-                &painter, buffer, origin, char_w, row_h, first_line, last_line,
+                &painter,
+                buffer,
+                text_origin,
+                char_w,
+                row_h,
+                first_line,
+                last_line,
             );
             paint_lines(
-                ui, &painter, buffer, &spans, &font, origin, row_h, first_line, last_line,
+                ui,
+                &painter,
+                buffer,
+                &spans,
+                &font,
+                text_origin,
+                row_h,
+                first_line,
+                last_line,
             );
-            let caret_pos = paint_caret(&painter, buffer, origin, char_w, row_h);
+            let caret_pos = paint_caret(&painter, buffer, text_origin, char_w, row_h);
 
             // Keep the caret on screen while moving with the keyboard.
             if !viewport.contains(caret_pos) {
@@ -93,7 +124,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             } else if (response.clicked() || response.dragged())
                 && let Some(pos) = response.interact_pointer_pos()
             {
-                let (line, col) = position_to_line_col(buffer, origin, pos, char_w, row_h);
+                let (line, col) = position_to_line_col(buffer, text_origin, pos, char_w, row_h);
                 let index = buffer.char_index(line, col);
                 if response.dragged() {
                     buffer.set_drag_caret(index);
@@ -104,6 +135,41 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
         });
 
     changed
+}
+
+/// Line numbers along the left edge, in a muted colour.
+#[allow(clippy::too_many_arguments)]
+fn paint_gutter(
+    _ui: &Ui,
+    painter: &egui::Painter,
+    buffer: &EditorBuffer,
+    rect: Rect,
+    origin: Pos2,
+    gutter_width: f32,
+    row_h: f32,
+    first_line: usize,
+    last_line: usize,
+) {
+    let gutter = Rect::from_min_max(origin, Pos2::new(origin.x + gutter_width, rect.max.y));
+    painter.rect_filled(gutter, CornerRadius::ZERO, GUTTER_BG);
+
+    let (caret_line, _) = buffer.line_col();
+    let font = FontId::monospace(row_h * 0.72);
+    for line in first_line..last_line {
+        let y = origin.y + (line as f32) * row_h;
+        let color = if line == caret_line {
+            GUTTER_FG_ACTIVE
+        } else {
+            GUTTER_FG
+        };
+        painter.text(
+            Pos2::new(origin.x + gutter_width - 4.0, y),
+            egui::Align2::RIGHT_TOP,
+            (line + 1).to_string(),
+            font.clone(),
+            color,
+        );
+    }
 }
 
 fn paint_selection(
