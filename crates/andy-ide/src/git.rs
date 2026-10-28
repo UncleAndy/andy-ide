@@ -284,7 +284,7 @@ impl GitState {
     }
 
     /// A tab's path, as the repository spells it.
-    fn repo_relative(&self, path: &Path) -> Option<PathBuf> {
+    pub(crate) fn repo_relative(&self, path: &Path) -> Option<PathBuf> {
         let root = self.root.as_ref()?;
         let repo_root = self.repo.as_ref()?.root()?;
         let full = root.join(path);
@@ -296,6 +296,24 @@ impl GitState {
     /// The branch name to put in the title, when there is one.
     pub fn branch(&self) -> Option<String> {
         self.repo.as_ref().map(Repo::head_label)
+    }
+
+    /// Starts a repository in the project root, when the project has none.
+    ///
+    /// The root is dropped first so that `follow` does real work: it exists to notice a
+    /// change of project, and the project has not changed — only become a repository.
+    pub fn init_repository(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let result = ide_git::init(&root);
+        self.root = None;
+        self.follow(Some(&root));
+        self.outcome = Some(match result {
+            Ok(said) => said,
+            Err(error) => format!("{error}"),
+        });
+        self.refresh(true);
     }
 
     /// Asks the remote what it has, without touching the work tree.

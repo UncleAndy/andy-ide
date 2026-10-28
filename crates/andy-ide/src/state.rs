@@ -77,6 +77,15 @@ impl TreeState {
 }
 
 /// Everything except the dock layout.
+/// The blame of one file, kept until it is asked to go or the file changes.
+#[derive(Clone, Debug)]
+pub struct BlameView {
+    /// The file the lines belong to.
+    pub path: PathBuf,
+    /// One entry per line, in file order.
+    pub lines: Vec<ide_git::BlameLine>,
+}
+
 pub struct AppState {
     pub config: Config,
     pub recent: Recent,
@@ -108,6 +117,8 @@ pub struct AppState {
     /// The project-symbol search (`Ctrl+Shift+F12`).
     pub symbols: crate::ui::symbols::SymbolSearch,
     pub hover: crate::ui::hover::Hover,
+    /// The blame of the active file, once asked for (`Ctrl+Shift+B`).
+    pub blame: Option<BlameView>,
     pub rename: crate::ui::rename::Rename,
     /// The terminal tab: a shell on a pseudo-terminal.
     pub terminal: crate::ui::terminal::Terminal,
@@ -179,6 +190,7 @@ impl AppState {
             results: crate::ui::results::Results::new(),
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
+            blame: None,
             rename: crate::ui::rename::Rename::new(),
             terminal: crate::ui::terminal::Terminal::new(),
             git: crate::git::GitState::default(),
@@ -1596,7 +1608,65 @@ impl AppState {
         })
     }
 
-    /// Name of the active buffer's language, if it has one.
+    /// Shows or hides the blame of the active file.
+    ///
+    /// The whole file is blamed once and kept: asking about another line of the same
+    /// file costs nothing, and asking again for the blame after it has been shown is a
+    /// request to hide it.
+    pub fn toggle_blame(&mut self) {
+        if self.blame.is_some() {
+            self.blame = None;
+            self.status = "blame hidden".to_owned();
+            return;
+        }
+        let Some(path) = self.active_buffer().map(|buffer| buffer.path.clone()) else {
+            self.status = "nothing to blame: no file is open".to_owned();
+            return;
+        };
+        let Some(relative) = self.git.repo_relative(&path) else {
+            self.status = "nothing to blame: this project is not a repository".to_owned();
+            return;
+        };
+        let Some(repo) = &self.git.repo else {
+            self.status = "nothing to blame: this project is not a repository".to_owned();
+            return;
+        };
+        match repo.blame(&relative) {
+            Ok(lines) if lines.is_empty() => {
+                self.blame = None;
+                self.status = "nothing to blame: the file is not committed".to_owned();
+            }
+            Ok(lines) => {
+                self.blame = Some(BlameView { path, lines });
+                self.status = "blame shown".to_owned();
+            }
+            Err(error) => {
+                self.blame = None;
+                self.status = format!("{error}");
+            }
+        }
+    }
+
+    /// The blame of the line the caret is on, when it has been asked for.
+    pub fn blame_at_caret(&self) -> Option<&ide_git::BlameLine> {
+        let view = self.blame.as_ref()?;
+        let (line, _) = self.caret_position()?;
+        // The blame describes the committed file: once the buffer has been edited the
+        // lines have moved and the answer would point at the wrong commits.
+        if self
+            .tabs
+            .active()
+            .is_some_and(|index| self.tabs.dirty(index))
+        {
+            return None;
+        }
+        if self.active_buffer().map(|buffer| &buffer.path) != Some(&view.path) {
+            return None;
+        }
+        view.lines.get(line.checked_sub(1)?)
+    }
+
+    /// Name of the active buffer.s language, if it has one.
     pub fn active_language(&self) -> Option<&'static str> {
         self.active_buffer()
             .and_then(|buffer| buffer.highlighter.as_ref())

@@ -3518,6 +3518,132 @@ mod the_git_panel {
     }
 
     #[test]
+    fn the_blame_names_the_commit_of_the_line_under_the_caret() {
+        let mut gui = managed(&[("a.txt", "one\ntwo\n")], Some("a.txt"));
+        // A second commit that only touches the second line, by another author.
+        std::fs::write(gui._project.path().join("a.txt"), "one\nsecond\n").unwrap();
+        let output = std::process::Command::new("git")
+            .args(["commit", "-q", "-am", "a later hand"])
+            .current_dir(gui._project.path())
+            .env("GIT_AUTHOR_NAME", "Second")
+            .env("GIT_AUTHOR_EMAIL", "second@example.com")
+            .env("GIT_COMMITTER_NAME", "Second")
+            .env("GIT_COMMITTER_EMAIL", "second@example.com")
+            .output()
+            .expect("git ran");
+        assert!(output.status.success(), "the second commit failed");
+        gui.settle();
+
+        // The caret goes to the second line, and the blame is asked for.
+        gui.app_mut().state.place_caret(Path::new("a.txt"), 4);
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::B);
+        gui.settle();
+
+        let line = gui
+            .app()
+            .state
+            .blame_at_caret()
+            .cloned()
+            .expect("the blame was not shown for the line under the caret");
+        assert_eq!(line.author, "Second");
+        assert_eq!(line.summary, "a later hand");
+        assert_eq!(line.line, 1, "the blame points at another line");
+        assert!(
+            gui.harness
+                .query_by_label_contains(&format!("{} Second", line.short))
+                .is_some(),
+            "the status bar does not show the blame"
+        );
+
+        // Asking again hides it.
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::B);
+        gui.settle();
+        assert!(
+            gui.app().state.blame.is_none(),
+            "the blame stayed after being asked to go"
+        );
+    }
+
+    #[test]
+    fn the_blame_of_an_uncommitted_file_says_there_is_none() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("new.txt"), "fresh\n").unwrap();
+        gui.app_mut().state.open_file(Path::new("new.txt"));
+        gui.settle();
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::B);
+        gui.settle();
+
+        assert!(
+            gui.app().state.blame.is_none(),
+            "an uncommitted file was given a blame"
+        );
+        assert!(
+            gui.app().state.status.contains("not committed"),
+            "the panel does not explain why there is no blame: {:?}",
+            gui.app().state.status
+        );
+    }
+
+    #[test]
+    fn an_edited_buffer_hides_the_blame() {
+        let mut gui = managed(&[("a.txt", "one\ntwo\n")], Some("a.txt"));
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::B);
+        gui.settle();
+        assert!(
+            gui.app().state.blame_at_caret().is_some(),
+            "there is no blame to hide"
+        );
+
+        gui.harness.event(egui::Event::Text("X".to_owned()));
+        gui.settle();
+        assert!(
+            gui.app().state.blame_at_caret().is_none(),
+            "the blame stayed on a buffer that has been edited"
+        );
+    }
+
+    #[test]
+    fn the_panel_can_start_a_repository() {
+        let mut gui = Gui::new(&[("a.txt", "one\n")], Some("a.txt"));
+        show_panel(&mut gui);
+        gui.harness.get_by_label("Initialise a repository").click();
+        gui.settle();
+
+        assert!(
+            gui._project.path().join(".git").is_dir(),
+            "the repository was not started"
+        );
+        assert!(
+            gui.app().state.git.repo.is_some(),
+            "the panel did not notice the repository it just made"
+        );
+        assert_eq!(
+            gui.app().state.git.branch().as_deref(),
+            Some("main"),
+            "the first branch is not main"
+        );
+        assert!(
+            gui.app()
+                .state
+                .git
+                .changes
+                .iter()
+                .any(|change| change.path == Path::new("a.txt")),
+            "the file that is already there is not listed as new"
+        );
+        assert!(
+            gui.app().state.git.error.is_none(),
+            "the panel still complains that this is not a repository"
+        );
+    }
+
+    #[test]
     fn alt_9_shows_the_branch_and_what_changed() {
         let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "two\n")], Some("a.txt"));
         std::fs::write(gui._project.path().join("a.txt"), "one\nedited\n").unwrap();

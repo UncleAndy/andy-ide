@@ -56,6 +56,16 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     if let Some(error) = &state.git.error {
         ui.add_space(6.0);
         ui.weak(error.clone());
+        // The one remedy worth offering here: a project that is not a repository can
+        // become one, and the alternative is telling the user to go and type it.
+        if state.git.repo.is_none()
+            && ui
+                .button("Initialise a repository")
+                .on_hover_text("git init -b main, in the project root")
+                .clicked()
+        {
+            state.git.init_repository();
+        }
         return;
     }
 

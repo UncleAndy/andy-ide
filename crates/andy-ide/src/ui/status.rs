@@ -17,6 +17,16 @@ pub fn bar(ui: &mut Ui, state: &AppState) {
         }
         ui.separator();
         ui.label(&state.status);
+        if let Some(line) = state.blame_at_caret() {
+            ui.separator();
+            let when = jiff::Timestamp::from_second(line.when)
+                .map(|at| at.strftime("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            ui.label(format!(
+                "{} {} {when} — {}",
+                line.short, line.author, line.summary
+            ));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(format!("{} tabs", state.tabs.len()));
             if let Some((line, col)) = state.caret_position() {

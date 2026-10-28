@@ -20,6 +20,26 @@ use crate::Branch;
 
 use crate::Repo;
 
+/// Starts a repository where there is none.
+///
+/// Not a method on `Repo`, because the whole point is that there is no repository yet.
+/// `main` is named as the first branch: `git`'s own default is a setting the user may
+/// never have written, and a panel that silently made `master` would be picking a side.
+pub fn init(root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(root)
+        .output()
+        .context("running git init")?;
+    if !output.status.success() {
+        bail!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim().to_owned()
+        );
+    }
+    Ok("An empty repository is ready.".to_owned())
+}
+
 impl Repo {
     /// Puts one file into the index, all of it.
     pub fn stage(&self, path: &Path) -> Result<String> {
@@ -550,6 +570,29 @@ mod remote_tests {
         assert!(
             said.contains("nowhere") || said.contains("does not appear"),
             "git's own complaint is not in the message: {said:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    #[test]
+    fn a_directory_becomes_a_repository_with_a_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Repo::discover(dir.path()).is_none(),
+            "a plain directory was already a repository"
+        );
+
+        init(dir.path()).expect("the init went through");
+
+        let repo = Repo::discover(dir.path()).expect("the new repository");
+        assert_eq!(repo.head_label(), "main");
+        assert!(
+            repo.changes().expect("changes").is_empty(),
+            "an empty repository has changes"
         );
     }
 }

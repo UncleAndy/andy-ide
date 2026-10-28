@@ -317,6 +317,9 @@ impl App {
         let terminal = KeyboardShortcut::new(Modifiers::ALT, Key::F12);
         // Alt+9 is the Git panel in IntelliJ.
         let git_panel = KeyboardShortcut::new(Modifiers::ALT, Key::Num9);
+        // The blame of the line under the caret, asked for and not shown by default:
+        // walking the history of a file is not something to do on every keystroke.
+        let blame = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::B);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
@@ -335,6 +338,7 @@ impl App {
         let git_pressed = ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&git_panel));
+        let blame_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&blame));
 
         if save_all_pressed {
             self.state.save_all();
@@ -347,6 +351,9 @@ impl App {
         }
         if git_pressed {
             bring_to_front(&mut self.dock, Tab::Git);
+        }
+        if blame_pressed {
+            self.state.toggle_blame();
         }
         if quick_open_pressed {
             self.state.quick_open.open();
@@ -3331,12 +3338,19 @@ mod real_highlight_tests {
         // A server is not started for decoration, so one is started the way the
         // user would start it: by asking for the file's symbols.
         app.state.file_symbols();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while std::time::Instant::now() < deadline && !app.state.results.open {
+        // A deadline of its own for each wait: the two are independent, and one clock
+        // running for both made the second phase inherit whatever the first spent —
+        // which is how a server that did answer was reported as never answering.
+        let answering = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < answering && !app.state.results.open {
             app.state.poll_lsp();
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(app.state.results.open, "the server never answered");
+        assert!(
+            app.state.results.open,
+            "the server never answered: {}",
+            app.state.status
+        );
         app.state.results.open = false;
 
         let declaration = SOURCE.find("Point").unwrap();
@@ -3346,7 +3360,8 @@ mod real_highlight_tests {
             .set_caret_byte(declaration);
 
         let mut now = 0.0;
-        while std::time::Instant::now() < deadline {
+        let highlight_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < highlight_deadline {
             now += 0.1;
             app.state.poll_lsp();
             app.state.track_highlights(now);

@@ -25,6 +25,7 @@ egui_commonmark = { version = "0.25", default-features = false }
 ide-term = { version = "0.1.0", path = "../ide-term" }
 vt100 = "0.18"
 ide-git = { version = "0.1.0", path = "../ide-git" }
+jiff = "0.2.38"
 
 [dev-dependencies]
 egui_kittest = "0.36"

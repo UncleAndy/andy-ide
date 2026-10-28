@@ -82,7 +82,11 @@ have yet — green for a line the file added, blue for one it changed, red where
 went away — and staging a file takes the stripes away. A repository with a remote gains
 `Fetch`, `Pull` and `Push`: they run on a thread of their own, so the window stays usable
 while the network thinks, and `Pull` refuses to do anything but move the branch forward —
-a panel with no conflict editor does not start a merge it cannot finish.
+a panel with no conflict editor does not start a merge it cannot finish. `Ctrl+Shift+B`
+blames the line under the caret — the whole file is walked once, natively, and the status
+bar names the commit, its author and its date until the buffer is edited or the chord is
+pressed again. A project that is not a repository yet is offered `Initialise a
+repository`, which runs `git init -b main` in the project root.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).
