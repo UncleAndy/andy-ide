@@ -214,6 +214,7 @@ dependencies = [
  "egui_kittest",
  "ide-buffer",
  "ide-core",
+ "ide-git",
  "ide-lsp",
  "ide-syntax",
  "ide-term",

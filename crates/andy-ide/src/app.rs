@@ -82,17 +82,26 @@ fn default_layout() -> DockState<Tab> {
 /// A saved layout can disagree with that in two ways, and both are tidied here: it
 /// may have no terminal tab at all, or it may have one in a pane of its own from a
 /// version that split the strip.
-fn with_terminal(mut dock: DockState<Tab>) -> DockState<Tab> {
+fn with_terminal(dock: DockState<Tab>) -> DockState<Tab> {
+    place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Git)
+}
+
+/// Puts `tab` in the bottom leaf, beside the problems, where it belongs.
+///
+/// A saved layout can disagree with that in two ways, and both are tidied here: it
+/// may have no such tab at all, or it may have one in a pane of its own from a
+/// version that split the strip.
+fn place_beside_problems(mut dock: DockState<Tab>, tab: Tab) -> DockState<Tab> {
     let Some(problems) = dock.find_tab(&Tab::Problems) else {
-        if dock.find_tab(&Tab::Terminal).is_none() {
-            dock.push_to_first_leaf(Tab::Terminal);
+        if dock.find_tab(&tab).is_none() {
+            dock.push_to_first_leaf(tab);
         }
         return dock;
     };
-    match dock.find_tab(&Tab::Terminal) {
-        Some(terminal) if terminal.node_path() == problems.node_path() => dock,
-        Some(terminal) => {
-            dock.move_tab(terminal, (problems.node_path(), TabInsert::Append));
+    match dock.find_tab(&tab) {
+        Some(found) if found.node_path() == problems.node_path() => dock,
+        Some(found) => {
+            dock.move_tab(found, (problems.node_path(), TabInsert::Append));
             // The problems were in front before the move and are in front after it.
             let _ = dock.set_active_tab(problems);
             dock
@@ -101,7 +110,7 @@ fn with_terminal(mut dock: DockState<Tab>) -> DockState<Tab> {
             // A new tab would otherwise land in the focused leaf, which is not
             // necessarily the bottom one.
             dock.set_focused_node_and_surface(problems.node_path());
-            dock.push_to_focused_leaf(Tab::Terminal);
+            dock.push_to_focused_leaf(tab);
             let _ = dock.set_active_tab(problems);
             dock
         }
@@ -191,6 +200,10 @@ impl App {
         }
 
         self.state.apply_pending();
+        // The panel is cheap to keep pointed at the right repository: only a change
+        // of project does any work here, and only the panel re-reads the status.
+        let root = self.state.project.as_ref().map(|project| project.root());
+        self.state.git.follow(root);
         self.handle_keys(ui);
         self.state.poll_fs_events();
         self.state.poll_lsp();
@@ -294,6 +307,8 @@ impl App {
         // Alt+F12 is the terminal in IntelliJ, and F12 alone is taken by "go to
         // definition".
         let terminal = KeyboardShortcut::new(Modifiers::ALT, Key::F12);
+        // Alt+9 is the Git panel in IntelliJ.
+        let git_panel = KeyboardShortcut::new(Modifiers::ALT, Key::Num9);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
@@ -309,6 +324,9 @@ impl App {
         let terminal_pressed = ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&terminal));
+        let git_pressed = ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&git_panel));
 
         if save_all_pressed {
             self.state.save_all();
@@ -318,6 +336,9 @@ impl App {
         }
         if terminal_pressed {
             bring_to_front(&mut self.dock, Tab::Terminal);
+        }
+        if git_pressed {
+            bring_to_front(&mut self.dock, Tab::Git);
         }
         if quick_open_pressed {
             self.state.quick_open.open();
@@ -433,6 +454,10 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 bring_to_front(dock, Tab::Terminal);
                 ui.close();
             }
+            if ui.button("git	Alt+9").clicked() {
+                bring_to_front(dock, Tab::Git);
+                ui.close();
+            }
             ui.separator();
             let mut dark = state.config.theme == ide_core::Theme::Dark;
             if ui.checkbox(&mut dark, "dark theme").changed() {
@@ -480,18 +505,15 @@ mod tests {
     }
 
     #[test]
-    fn default_layout_holds_the_three_panels() {
+    fn default_layout_holds_every_panel() {
         let dock = default_layout();
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(
-            tabs.len(),
-            4,
-            "the terminal is part of the layout: {tabs:?}"
-        );
+        assert_eq!(tabs.len(), 5, "every panel is part of the layout: {tabs:?}");
         assert!(tabs.contains(&Tab::Projects));
         assert!(tabs.contains(&Tab::Editor));
         assert!(tabs.contains(&Tab::Problems));
         assert!(tabs.contains(&Tab::Terminal));
+        assert!(tabs.contains(&Tab::Git));
     }
 
     #[test]
@@ -823,7 +845,7 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 4);
+        assert_eq!(back.iter_all_tabs().count(), 5);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
@@ -846,7 +868,7 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 4);
+        assert_eq!(restored.dock.iter_all_tabs().count(), 5);
         assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
     }
 
@@ -865,7 +887,7 @@ mod layout_persistence_tests {
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 4);
+        assert_eq!(app.dock.iter_all_tabs().count(), 5);
     }
 }
 
@@ -3730,7 +3752,13 @@ mod the_bottom_strip {
             terminal.node_path(),
             "the terminal still has a pane of its own"
         );
-        assert_eq!(tab_count_in_the_problems_leaf(&dock), 2);
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 3);
+        let git = dock.find_tab(&Tab::Git).expect("a git tab");
+        assert_eq!(
+            problems.node_path(),
+            git.node_path(),
+            "the git panel is not in the bottom strip"
+        );
     }
 
     /// The tab that is in front is the one that was in front before the change.
@@ -3765,10 +3793,27 @@ mod the_bottom_strip {
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(problems.node_path(), terminal.node_path());
+        assert_eq!(tidied.iter_all_tabs().count(), 4, "a tab was duplicated");
+    }
+
+    /// A layout written before the Git panel existed must gain one, not lose it.
+    #[test]
+    fn a_layout_without_a_git_panel_gets_one_beside_the_problems() {
+        let mut dock = DockState::new(vec![Tab::Editor]);
+        dock.split(
+            NodePath::MAIN_ROOT,
+            Split::Below,
+            0.72,
+            Node::leaf(Tab::Problems),
+        );
+        let tidied = with_terminal(dock);
+        let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
+        let git = tidied.find_tab(&Tab::Git).expect("a git tab");
+        assert_eq!(problems.node_path(), git.node_path());
         assert_eq!(
-            tidied.iter_all_tabs().count(),
-            3,
-            "the terminal was duplicated"
+            active_tab_in(&tidied, problems),
+            Some(Tab::Problems),
+            "the layout put something else in front"
         );
     }
 
@@ -3789,6 +3834,6 @@ mod the_bottom_strip {
             active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
             Some(Tab::Problems)
         );
-        assert_eq!(tidied.iter_all_tabs().count(), 3);
+        assert_eq!(tidied.iter_all_tabs().count(), 4);
     }
 }

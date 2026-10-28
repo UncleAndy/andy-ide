@@ -24,6 +24,7 @@ egui_dock = { version = "0.21.1", features = ["serde"] }
 egui_commonmark = { version = "0.25", default-features = false }
 ide-term = { version = "0.1.0", path = "../ide-term" }
 vt100 = "0.18"
+ide-git = { version = "0.1.0", path = "../ide-git" }
 
 [dev-dependencies]
 egui_kittest = "0.36"

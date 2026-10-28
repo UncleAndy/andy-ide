@@ -2,6 +2,7 @@
 
 mod app;
 mod editor;
+mod git;
 #[cfg(test)]
 mod gui_tests;
 mod lsp;

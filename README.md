@@ -59,6 +59,18 @@ the file at its line in the editor.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 
+Milestone M4 (git) is under way. `ide-git` reads the repository through `gix` — no
+process per repaint, and no lie when `git` is absent or wrapped: the branch, the dirty
+bit and the list of changes, with `git status`'s two halves kept apart (in the index
+against `HEAD`, on disk against the index), so a file staged and then edited shows
+twice. The `Git` panel sits beside `Problems` and `Terminal` in the bottom strip
+(`Alt+9`), names the branch, groups the changes under the two headings and opens a
+file when its line is clicked; a project that is not a repository says so instead of
+showing an empty list.
+
+Plan and state:
+[`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).
+
 ## Crates
 
 | Crate | Responsibility |

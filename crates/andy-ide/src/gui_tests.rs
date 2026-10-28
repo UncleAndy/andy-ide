@@ -3005,3 +3005,161 @@ mod the_terminal_links {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// The Git panel: the branch, the two halves of the status, and a click that opens
+/// the file.
+mod the_git_panel {
+    use super::*;
+
+    /// A window on a project that is a repository with one commit in it.
+    ///
+    /// The repository has to exist before the window is built: the panel looks for
+    /// one when it meets a project, not on every frame.
+    fn managed(files: &[(&str, &str)], open: Option<&str>) -> Gui {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        let mut gui = Gui {
+            harness: window(project.path(), config.path(), files, open),
+            _project: project,
+            _config: Some(config),
+        };
+        commit_all(gui._project.path(), "first");
+        gui.settle();
+        gui
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git ran");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_all(root: &Path, message: &str) {
+        git(root, &["add", "-A"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    /// `Alt+9`, the way a user opens the panel.
+    fn show_panel(gui: &mut Gui) {
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num9);
+        gui.settle();
+        gui.settle();
+    }
+
+    #[test]
+    fn a_click_on_a_change_opens_the_file() {
+        let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "two\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("b.txt"), "two\nedited\n").unwrap();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("M  b.txt").click();
+        gui.settle();
+
+        assert_eq!(
+            gui.active_tab(),
+            Some(PathBuf::from("b.txt")),
+            "a click on a change did not open the file"
+        );
+    }
+
+    #[test]
+    fn a_half_staged_file_appears_in_both_halves() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\nstaged\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        std::fs::write(root.join("a.txt"), "one\nstaged\nthen edited\n").unwrap();
+
+        show_panel(&mut gui);
+
+        let halves: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .changes
+            .iter()
+            .map(|change| {
+                let area = match change.area {
+                    ide_git::Area::Staged => "index",
+                    ide_git::Area::Worktree => "worktree",
+                };
+                format!("{area}:{}", change.path.display())
+            })
+            .collect();
+        assert_eq!(
+            halves,
+            vec!["index:a.txt".to_owned(), "worktree:a.txt".to_owned()],
+            "the two halves were not told apart"
+        );
+        assert!(
+            gui.harness.query_by_label("In the index").is_some()
+                && gui.harness.query_by_label("In the work tree").is_some(),
+            "the panel does not name the two halves"
+        );
+    }
+
+    #[test]
+    fn a_project_that_is_not_a_repository_says_so() {
+        let mut gui = Gui::new(&[("a.txt", "one\n")], Some("a.txt"));
+        show_panel(&mut gui);
+        assert!(
+            gui.harness
+                .query_by_label("This project is not a repository.")
+                .is_some(),
+            "the panel said nothing instead of explaining"
+        );
+    }
+
+    #[test]
+    fn alt_9_shows_the_branch_and_what_changed() {
+        let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "two\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\nedited\n").unwrap();
+        std::fs::write(gui._project.path().join("new.txt"), "fresh\n").unwrap();
+
+        show_panel(&mut gui);
+
+        assert_eq!(
+            gui.app().state.git.branch().as_deref(),
+            Some("main"),
+            "the panel does not know the branch"
+        );
+        let changes: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .changes
+            .iter()
+            .map(|change| format!("{} {}", change.kind.letter(), change.path.display()))
+            .collect();
+        assert_eq!(
+            changes,
+            vec!["M a.txt".to_owned(), "? new.txt".to_owned()],
+            "the panel lists the wrong changes"
+        );
+        assert!(
+            gui.harness.query_by_label("M  a.txt").is_some(),
+            "the changed file is not on screen"
+        );
+    }
+}

@@ -1,6 +1,7 @@
 //! Panels and the dock contents.
 
 pub mod editor;
+pub mod git;
 pub mod hover;
 pub mod preview;
 pub mod problems;
@@ -26,6 +27,7 @@ pub enum Tab {
     Editor,
     Problems,
     Terminal,
+    Git,
 }
 
 impl Tab {
@@ -35,6 +37,7 @@ impl Tab {
             Tab::Editor => "Editor",
             Tab::Problems => "Problems",
             Tab::Terminal => "Terminal",
+            Tab::Git => "Git",
         }
     }
 }
@@ -61,6 +64,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Editor => editor::panel(ui, self.state),
             Tab::Problems => problems::panel(ui, self.state),
             Tab::Terminal => self.state.terminal.show(ui),
+            Tab::Git => git::panel(ui, self.state),
         }
     }
 
@@ -69,7 +73,7 @@ impl TabViewer for Viewer<'_> {
     fn is_closeable(&self, tab: &Tab) -> bool {
         !matches!(
             tab,
-            Tab::Projects | Tab::Editor | Tab::Problems | Tab::Terminal
+            Tab::Projects | Tab::Editor | Tab::Problems | Tab::Terminal | Tab::Git
         )
     }
 }
