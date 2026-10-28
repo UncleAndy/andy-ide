@@ -91,6 +91,20 @@ repository`, which runs `git init -b main` in the project root.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).
 
+Milestone M5 (agents) is under way. `ide-agents` speaks the Agent Client Protocol over a
+child process's standard input and output — one JSON-RPC message per line, a deadline on
+every wait, two threads per agent so that nothing waits where the window is drawn. Which
+agents exist is `agents.toml`, not code: a second agent is a table in that file, and a
+project's copy wins over the user's. The client answers what an agent asks it for —
+`fs/read_text_file` inside the project and nowhere else, `fs/write_text_file` only after
+the editor has allowed it, permissions by policy or by a question in the panel — and
+refuses to claim a terminal it does not yet offer. `crates/ide-agents/src/bin/acp_test_agent.rs`
+is a stand-in agent the tests drive, so the client can be exercised without a model
+installed. The panel that shows a conversation is next.
+
+Plan and state:
+[`.hermes/plans/2026-10-28_andy-ide-m5.md`](.hermes/plans/2026-10-28_andy-ide-m5.md).
+
 ## Crates
 
 | Crate | Responsibility |

@@ -35,7 +35,10 @@ pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
 /// A running server and the pipe to it.
 pub struct ServerProcess {
     child: Child,
-    stdin: ChildStdin,
+    /// Shared, because the reader thread has to answer requests of the server's own:
+    /// a server that asked something and waits forever for the answer is a server
+    /// that stops answering everything else behind it.
+    stdin: Arc<Mutex<ChildStdin>>,
     next_id: i64,
     pending: Arc<Mutex<HashMap<i64, Sender<Response>>>>,
     notifications: Receiver<(String, Option<Value>)>,
@@ -68,7 +71,9 @@ impl ServerProcess {
             .spawn()
             .with_context(|| format!("cannot start {}", config.command))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?,
+        ));
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let stderr = child.stderr.take();
 
@@ -80,10 +85,19 @@ impl ServerProcess {
         let reader_pending = Arc::clone(&pending);
         let reader_notifications = notification_sender.clone();
         let reader_alive = Arc::clone(&alive);
+        let reader_stdin = Arc::clone(&stdin);
         let name = config.name;
         std::thread::Builder::new()
             .name(format!("{name}-reader"))
-            .spawn(move || read_loop(stdout, reader_pending, reader_notifications, reader_alive))?;
+            .spawn(move || {
+                read_loop(
+                    stdout,
+                    reader_pending,
+                    reader_notifications,
+                    reader_alive,
+                    reader_stdin,
+                )
+            })?;
 
         if let Some(stderr) = stderr {
             std::thread::Builder::new()
@@ -133,8 +147,18 @@ impl ServerProcess {
             .insert(id, sender);
 
         let message = serde_json::to_value(Request::new(id, method, params))?;
-        write_message(&mut self.stdin, &message)
-            .with_context(|| format!("cannot send {method}"))?;
+        // The lock covers the write and nothing else: held across the wait for the answer
+        // it would keep the reader thread from answering the server, and a server that
+        // asked us something waits before it answers anything else — a deadlock of our
+        // own making, which is how a request that works alone times out under load.
+        {
+            let mut stdin = self
+                .stdin
+                .lock()
+                .map_err(|_| anyhow!("the server's input is gone"))?;
+            write_message(&mut *stdin, &message)
+                .with_context(|| format!("cannot send {method}"))?;
+        }
 
         // The wait is taken in short steps so that a request cannot keep the caller
         // (and the window it is closing) for the whole patience: a server that is
@@ -177,7 +201,11 @@ impl ServerProcess {
     /// Sends a message that expects no answer.
     pub fn notify(&mut self, method: &str, params: Option<Value>) -> Result<()> {
         let message = serde_json::to_value(crate::rpc::Notification::new(method, params))?;
-        write_message(&mut self.stdin, &message).with_context(|| format!("cannot send {method}"))
+        let mut stdin = self
+            .stdin
+            .lock()
+            .map_err(|_| anyhow!("the server's input is gone"))?;
+        write_message(&mut *stdin, &message).with_context(|| format!("cannot send {method}"))
     }
 
     /// Takes one notification the server sent, if any.
@@ -214,7 +242,9 @@ impl ServerProcess {
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         // Dropping the stdin closes the pipe, which most servers treat as exit.
-        let _ = self.stdin.flush();
+        if let Ok(mut stdin) = self.stdin.lock() {
+            let _ = stdin.flush();
+        }
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -228,6 +258,7 @@ fn read_loop(
     pending: Arc<Mutex<HashMap<i64, Sender<Response>>>>,
     notifications: Sender<(String, Option<Value>)>,
     alive: Arc<AtomicBool>,
+    stdin: Arc<Mutex<ChildStdin>>,
 ) {
     // The flag goes down however the loop ends, including a panic in a parser.
     struct Lower(Arc<AtomicBool>);
@@ -248,7 +279,7 @@ fn read_loop(
                 return;
             }
         };
-        if !forward(value, &pending, &notifications) {
+        if !forward(value, &pending, &notifications, &stdin) {
             return;
         }
     }
@@ -259,6 +290,7 @@ fn forward(
     value: Value,
     pending: &Arc<Mutex<HashMap<i64, Sender<Response>>>>,
     notifications: &Sender<(String, Option<Value>)>,
+    stdin: &Arc<Mutex<ChildStdin>>,
 ) -> bool {
     match classify(value) {
         Some(Incoming::Response(response)) => {
@@ -273,11 +305,36 @@ fn forward(
         Some(Incoming::Notification { method, params }) => {
             notifications.send((method, params)).is_ok()
         }
-        Some(Incoming::ServerRequest { id, .. }) => {
-            // We implement no server-to-client requests; answering null keeps
-            // servers that ask politely (registration, progress) from waiting.
-            let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
-            tracing::debug!(target: "ide_lsp", %reply, "unhandled server request");
+        Some(Incoming::ServerRequest { id, method, params }) => {
+            // A request of the server's has to be answered, and answered *on the wire*.
+            // Building the reply and dropping it was the bug that made a server stall:
+            // rust-analyzer asks `workspace/configuration` the first time it needs a
+            // setting, and waits for the answer before it answers anything else — so
+            // every later request, highlights among them, was never served.
+            let reply = match method.as_str() {
+                // The protocol wants one entry per item asked about; `null` for each is
+                // "no configuration for this one", which is the truth here.
+                "workspace/configuration" => {
+                    let count = params
+                        .as_ref()
+                        .and_then(|params| params.get("items"))
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or_default();
+                    json!({"jsonrpc": "2.0", "id": id, "result": vec![Value::Null; count]})
+                }
+                _ => json!({"jsonrpc": "2.0", "id": id, "result": null}),
+            };
+            match stdin.lock() {
+                Ok(mut stdin) => {
+                    if let Err(error) = write_message(&mut *stdin, &reply) {
+                        tracing::debug!(target: "ide_lsp", %error, "cannot answer {method}");
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+            tracing::debug!(target: "ide_lsp", %method, "answered a server request");
             true
         }
         None => true,

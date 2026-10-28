@@ -95,6 +95,8 @@ pub enum Incoming {
     ServerRequest {
         id: Value,
         method: String,
+        /// What the server asked, when it asked with parameters.
+        params: Option<Value>,
     },
 }
 
@@ -110,7 +112,11 @@ pub fn classify(value: Value) -> Option<Incoming> {
     let id = value.get("id").cloned();
 
     match (method, id) {
-        (Some(method), Some(id)) => Some(Incoming::ServerRequest { id, method }),
+        (Some(method), Some(id)) => Some(Incoming::ServerRequest {
+            id,
+            method,
+            params: value.get("params").cloned(),
+        }),
         (Some(method), None) => Some(Incoming::Notification {
             method,
             params: value.get("params").cloned(),

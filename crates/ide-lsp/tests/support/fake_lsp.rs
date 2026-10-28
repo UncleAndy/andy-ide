@@ -164,6 +164,72 @@ fn main() {
                     serde_json::json!({"jsonrpc": "2.0", "id": id, "result": []}),
                 );
             }
+            "textDocument/documentHighlight" => {
+                // With `--ask` on the command line, this server behaves like one that needs a
+                // setting before it can answer: it asks the client and *waits*. A client
+                // that builds an answer and forgets to send it leaves this server
+                // waiting forever, which is exactly the bug this fixture exists to catch.
+                let mut setting = serde_json::Value::Null;
+                if std::env::args().any(|arg| arg == "--ask") {
+                    write_message(
+                        &mut out,
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 9001,
+                            "method": "workspace/configuration",
+                            "params": {"items": [{"section": "fake"}]}
+                        }),
+                    );
+                    loop {
+                        let Some(answer) = read_message(&mut input) else {
+                            return;
+                        };
+                        if answer.get("id").and_then(|id| id.as_i64()) == Some(9001)
+                            && answer.get("method").is_none()
+                        {
+                            setting = answer
+                                .get("result")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            break;
+                        }
+                    }
+                }
+
+                let uri = params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = documents.get(&uri).cloned().unwrap_or_default();
+                // One range per `main`, so a test can count what came back.
+                let mut highlights = Vec::new();
+                for (number, line) in text.lines().enumerate() {
+                    if let Some(at) = line.find("main") {
+                        highlights.push(serde_json::json!({
+                            "range": {
+                                "start": {"line": number, "character": at},
+                                "end": {"line": number, "character": at + 4}
+                            },
+                            "kind": 1
+                        }));
+                    }
+                }
+                let mut result = serde_json::Value::Array(highlights);
+                if setting.is_array() {
+                    // The setting came back, so it is worth saying so in the answer.
+                    result.as_array_mut().unwrap().push(serde_json::json!({
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0}
+                        },
+                        "kind": 3
+                    }));
+                }
+                write_message(
+                    &mut out,
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                );
+            }
             "shutdown" => {
                 write_message(
                     &mut out,

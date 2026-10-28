@@ -102,6 +102,10 @@ pub enum Outcome {
         line: u32,
         character: u32,
         spots: Vec<(u32, u32, u32, u32)>,
+        /// Set when the server did not answer, so the question can be asked again.
+        /// Without this the answer "no uses" and the answer "no answer" are the same
+        /// empty list, and a busy server silently ends the feature for that caret.
+        failed: bool,
     },
     /// The edits that rename a symbol: every file the server would change, and
     /// the ranges in it as protocol positions.
@@ -567,6 +571,7 @@ fn apply(
             Some(Outcome::Rename { new_name, changes })
         }
         Job::Highlights { path, position } => {
+            let mut failed = false;
             let spots = match session.document_highlights(&path, position) {
                 Ok(highlights) => highlights
                     .iter()
@@ -580,14 +585,20 @@ fn apply(
                     })
                     .collect(),
                 // A highlight is decoration: a server that cannot answer must not
-                // put an error in the status bar on every caret move.
-                Err(_) => Vec::new(),
+                // put an error in the status bar on every caret move — but the failure
+                // is still reported, so the next frame asks again instead of believing
+                // that the symbol has no uses.
+                Err(_) => {
+                    failed = true;
+                    Vec::new()
+                }
             };
             Some(Outcome::Highlights {
                 path,
                 line: position.line,
                 character: position.character,
                 spots,
+                failed,
             })
         }
         Job::WorkspaceSymbols { query } => Some(match session.workspace_symbols(&query) {

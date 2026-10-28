@@ -1419,7 +1419,15 @@ impl AppState {
                 line,
                 character,
                 spots,
-            } => self.apply_highlights(&path, line, character, &spots),
+                failed,
+            } => {
+                if failed {
+                    // Ask again after the usual pause: the server was busy, which is not
+                    // the same as "this symbol is used nowhere".
+                    self.highlight_asked = None;
+                }
+                self.apply_highlights(&path, line, character, &spots)
+            }
             crate::lsp::Outcome::Rename { new_name, changes } => {
                 self.preview_rename(changes, &new_name)
             }

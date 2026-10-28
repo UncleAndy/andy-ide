@@ -3263,6 +3263,7 @@ mod highlight_tests {
             line: 3,
             character: 4,
             spots: vec![(0, 3, 0, 7), (3, 4, 3, 8)],
+            failed: false,
         });
 
         assert_eq!(
@@ -3287,6 +3288,7 @@ mod highlight_tests {
             line: 2,
             character: 3,
             spots: vec![(0, 3, 0, 7)],
+            failed: false,
         });
 
         assert!(
@@ -3387,7 +3389,15 @@ mod real_highlight_tests {
             );
             return;
         }
-        panic!("no highlights came back in 120 s");
+        panic!(
+            "no highlights came back in 120 s; status {:?}, server {}, occurrences {}",
+            app.state.status,
+            app.state.lsp.is_some(),
+            app.state
+                .active_buffer()
+                .map(|buffer| buffer.occurrences.len())
+                .unwrap_or_default()
+        );
     }
 }
 

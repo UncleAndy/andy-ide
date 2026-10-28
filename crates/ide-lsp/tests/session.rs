@@ -207,3 +207,46 @@ fn positions_and_bytes_agree_on_a_real_document() {
     );
     assert_eq!(&text[byte..byte + 4], "main");
 }
+
+#[test]
+fn a_server_that_asks_a_question_before_answering_gets_an_answer() {
+    // The fixture asks `workspace/configuration` the first time it is asked for
+    // highlights, and waits for the reply. A client that builds the reply and forgets
+    // to send it leaves the server waiting, and this test times out — which is what a
+    // real `rust-analyzer` does under load, and how the bug was found.
+    // A second configuration of the same fixture, started with the flag that makes it
+    // ask a question first.
+    static ASKING: ServerConfig = ServerConfig {
+        name: "fake-lsp-asking",
+        command: env!("CARGO_BIN_EXE_fake-lsp"),
+        args: &["--ask"],
+        language_id: "rust",
+        extensions: &["rs"],
+    };
+    let dir = project();
+    let mut session = LspSession::start(&ASKING, dir.path()).unwrap();
+    // The fixture answers from the document it was given, so it has to be opened first.
+    session
+        .did_open(
+            std::path::Path::new("lib.rs"),
+            "// заголовок\nfn main() {}\n",
+        )
+        .expect("the document opened");
+    let highlights = session
+        .document_highlights(
+            std::path::Path::new("lib.rs"),
+            Position {
+                line: 1,
+                character: 3,
+            },
+        )
+        .expect("the server answered");
+
+    // Two `main` ranges and one marker that only a client which answered would get.
+    assert_eq!(
+        highlights.len(),
+        2,
+        "the server did not get its answer: {highlights:?}"
+    );
+    session.shutdown();
+}
