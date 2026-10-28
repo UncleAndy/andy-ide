@@ -12,7 +12,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use lsp_types::{
@@ -40,11 +40,23 @@ pub struct ServerProcess {
     pending: Arc<Mutex<HashMap<i64, Sender<Response>>>>,
     notifications: Receiver<(String, Option<Value>)>,
     alive: Arc<AtomicBool>,
+    /// Set by the application when it is going away: a request that is waiting for
+    /// an answer gives up instead of holding the caller for its whole patience.
+    abort: Arc<AtomicBool>,
 }
 
 impl ServerProcess {
     /// Starts the server in `root`.
     pub fn spawn(config: &ServerConfig, root: &Path) -> Result<Self> {
+        Self::spawn_with_abort(config, root, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The same, with a flag that ends a waiting request early.
+    pub fn spawn_with_abort(
+        config: &ServerConfig,
+        root: &Path,
+        abort: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let mut child = Command::new(config.command)
             .args(config.args)
             .current_dir(root)
@@ -91,6 +103,7 @@ impl ServerProcess {
             pending,
             notifications,
             alive,
+            abort,
         })
     }
 
@@ -123,13 +136,35 @@ impl ServerProcess {
         write_message(&mut self.stdin, &message)
             .with_context(|| format!("cannot send {method}"))?;
 
-        let response = match receiver.recv_timeout(timeout) {
-            Ok(response) => response,
-            Err(_) => {
-                if let Ok(mut pending) = self.pending.lock() {
-                    pending.remove(&id);
+        // The wait is taken in short steps so that a request cannot keep the caller
+        // (and the window it is closing) for the whole patience: a server that is
+        // busy indexing answers when it answers, and leaving must not wait for it.
+        const STEP: Duration = Duration::from_millis(25);
+        let deadline = Instant::now() + timeout;
+        let response = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match receiver.recv_timeout(left.min(STEP)) {
+                Ok(response) => break response,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Ok(mut pending) = self.pending.lock() {
+                        pending.remove(&id);
+                    }
+                    bail!("{method} got no answer: the server is gone");
                 }
-                bail!("{method} got no answer within {timeout:?}");
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.abort.load(Ordering::Relaxed) {
+                        if let Ok(mut pending) = self.pending.lock() {
+                            pending.remove(&id);
+                        }
+                        bail!("{method} was abandoned: the application is closing");
+                    }
+                    if Instant::now() >= deadline {
+                        if let Ok(mut pending) = self.pending.lock() {
+                            pending.remove(&id);
+                        }
+                        bail!("{method} got no answer within {timeout:?}");
+                    }
+                }
             }
         };
 
@@ -157,7 +192,11 @@ impl ServerProcess {
 
     /// Asks the server to shut down and waits for the process to go.
     pub fn shutdown(&mut self) {
-        let _ = self.request_with_timeout("shutdown", None, Duration::from_secs(5));
+        // Leaving: a polite goodbye is a request, and a server that is busy indexing
+        // would make the window wait five more seconds for nothing.
+        if !self.abort.load(Ordering::Relaxed) {
+            let _ = self.request_with_timeout("shutdown", None, Duration::from_secs(5));
+        }
         let _ = self.notify("exit", None);
         // A server that ignores both is not worth waiting for.
         for _ in 0..20 {
@@ -257,7 +296,16 @@ pub struct LspSession {
 impl LspSession {
     /// Starts the server and performs `initialize` / `initialized`.
     pub fn start(config: &'static ServerConfig, root: &Path) -> Result<Self> {
-        let mut process = ServerProcess::spawn(config, root)?;
+        Self::start_with_abort(config, root, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The same, with a flag that ends a waiting request when the application leaves.
+    pub fn start_with_abort(
+        config: &'static ServerConfig,
+        root: &Path,
+        abort: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let mut process = ServerProcess::spawn_with_abort(config, root, abort)?;
         // The handshake is built as JSON rather than through the struct: the
         // struct still carries the deprecated root_uri, and servers want the
         // workspace folders too.

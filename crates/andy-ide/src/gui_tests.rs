@@ -2059,3 +2059,105 @@ mod the_terminal_keys {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// The bottom of the window is one strip of tabs, not two panes side by side.
+mod the_bottom_strip_tabs {
+    use super::*;
+
+    fn terminal_path(gui: &Gui) -> egui_dock::TabPath {
+        gui.app()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab")
+    }
+
+    #[test]
+    fn the_panels_are_tabs_of_one_leaf() {
+        let gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let problems = gui
+            .app()
+            .dock
+            .find_tab(&crate::ui::Tab::Problems)
+            .expect("the problems tab");
+        assert_eq!(
+            problems.node_path(),
+            terminal_path(&gui).node_path(),
+            "the panels are still in separate panes"
+        );
+    }
+
+    #[test]
+    fn only_the_tab_in_front_is_drawn() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        assert!(
+            !gui.app().state.terminal.shown,
+            "the terminal was drawn behind the problems"
+        );
+
+        let path = terminal_path(&gui);
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+        assert!(
+            gui.app().state.terminal.shown,
+            "the terminal was not drawn after its tab came to the front"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_front_tab_uses_the_whole_width() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let path = terminal_path(&gui);
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        let window = gui.harness.ctx.viewport_rect();
+        println!("terminal {:?} of window {:?}", rect, window);
+        assert!(
+            rect.width() > window.width() * 0.95,
+            "the terminal is {:.0} of {:.0} wide: it still shares the strip",
+            rect.width(),
+            window.width()
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}
+
+/// A panel is opened by bringing its tab forward.
+mod opening_a_panel {
+    use super::*;
+
+    #[test]
+    fn alt_f12_brings_the_terminal_forward() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        assert!(
+            !gui.app().state.terminal.shown,
+            "the terminal was in front before the shortcut"
+        );
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::F12);
+        gui.settle();
+        gui.settle();
+        assert!(
+            gui.app().state.terminal.shown,
+            "Alt+F12 did not bring the terminal tab forward"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_view_menu_names_both_panels() {
+        let gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
+    }
+}

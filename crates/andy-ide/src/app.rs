@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style};
+use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabInsert};
 
 use crate::state::{AppState, DEFAULT_FONT_SIZE, MAX_ZOOM, MIN_ZOOM, display_name};
 use crate::ui::{Tab, Viewer};
@@ -72,28 +72,40 @@ fn default_layout() -> DockState<Tab> {
     with_terminal(dock)
 }
 
-/// Puts the terminal beside the problems in the bottom leaf.
+/// Puts the terminal in the bottom leaf as a tab beside the problems.
 ///
-/// A layout saved by an older version has no terminal tab, so the tab is added when it
-/// is missing rather than staying invisible until the layout is thrown away.
+/// The bottom strip is one row of tabs, not two panes: a pane of its own took half
+/// the width of the terminal away from the code above and half of it from the panel
+/// beside it. Both panels are drawn by their own tab, so whichever is in front uses
+/// the whole width.
+///
+/// A saved layout can disagree with that in two ways, and both are tidied here: it
+/// may have no terminal tab at all, or it may have one in a pane of its own from a
+/// version that split the strip.
 fn with_terminal(mut dock: DockState<Tab>) -> DockState<Tab> {
-    if dock.find_tab(&Tab::Terminal).is_some() {
-        return dock;
-    }
-    match dock.find_tab(&Tab::Problems) {
-        Some(path) => {
-            // Beside the problems, not on top of them: a user who never asked for a
-            // terminal still sees the panel that was there.
-            dock.split(
-                path.node_path(),
-                Split::Right,
-                0.5,
-                Node::leaf(Tab::Terminal),
-            );
+    let Some(problems) = dock.find_tab(&Tab::Problems) else {
+        if dock.find_tab(&Tab::Terminal).is_none() {
+            dock.push_to_first_leaf(Tab::Terminal);
         }
-        None => dock.push_to_first_leaf(Tab::Terminal),
+        return dock;
+    };
+    match dock.find_tab(&Tab::Terminal) {
+        Some(terminal) if terminal.node_path() == problems.node_path() => dock,
+        Some(terminal) => {
+            dock.move_tab(terminal, (problems.node_path(), TabInsert::Append));
+            // The problems were in front before the move and are in front after it.
+            let _ = dock.set_active_tab(problems);
+            dock
+        }
+        None => {
+            // A new tab would otherwise land in the focused leaf, which is not
+            // necessarily the bottom one.
+            dock.set_focused_node_and_surface(problems.node_path());
+            dock.push_to_focused_leaf(Tab::Terminal);
+            let _ = dock.set_active_tab(problems);
+            dock
+        }
     }
-    dock
 }
 
 impl eframe::App for App {
@@ -145,7 +157,7 @@ impl App {
             }
         }
 
-        egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state));
+        egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state, &mut self.dock));
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             crate::ui::status::bar(ui, &self.state);
         });
@@ -266,6 +278,9 @@ impl App {
         // whatever else is held down.
         let preview = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::M);
         let quick_open = KeyboardShortcut::new(Modifiers::CTRL, Key::P);
+        // Alt+F12 is the terminal in IntelliJ, and F12 alone is taken by "go to
+        // definition".
+        let terminal = KeyboardShortcut::new(Modifiers::ALT, Key::F12);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
@@ -278,12 +293,18 @@ impl App {
             .input_mut(|input| input.consume_shortcut(&quick_open));
         let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
         let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
+        let terminal_pressed = ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&terminal));
 
         if save_all_pressed {
             self.state.save_all();
         }
         if preview_pressed {
             self.state.preview_open = !self.state.preview_open;
+        }
+        if terminal_pressed {
+            bring_to_front(&mut self.dock, Tab::Terminal);
         }
         if quick_open_pressed {
             self.state.quick_open.open();
@@ -340,7 +361,18 @@ impl App {
     }
 }
 
-fn menu_bar(ui: &mut egui::Ui, state: &mut AppState) {
+/// Brings a panel's tab to the front, wherever the user has dragged it.
+///
+/// The keyboard follows to that pane: a panel brought forward is the one that is
+/// about to be used.
+fn bring_to_front(dock: &mut DockState<Tab>, tab: Tab) {
+    if let Some(path) = dock.find_tab(&tab) {
+        dock.set_focused_node_and_surface(path.node_path());
+        let _ = dock.set_active_tab(path);
+    }
+}
+
+fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Project", |ui| {
             ui.label("Recent");
@@ -375,6 +407,17 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState) {
             }
             if ui.button("quick open	Ctrl+P").clicked() {
                 state.quick_open.open();
+                ui.close();
+            }
+            ui.separator();
+            // The bottom of the window is a row of tabs, so a panel is "opened" by
+            // bringing its tab to the front.
+            if ui.button("problems	Ctrl+Shift+M").clicked() {
+                bring_to_front(dock, Tab::Problems);
+                ui.close();
+            }
+            if ui.button("terminal	Alt+F12").clicked() {
+                bring_to_front(dock, Tab::Terminal);
                 ui.close();
             }
             ui.separator();
@@ -3644,5 +3687,95 @@ mod the_terminal {
             "the shell's answer is not on the screen: {:?}",
             terminal.contents()
         );
+    }
+}
+
+/// The bottom strip is a row of tabs, not a row of panes.
+#[cfg(test)]
+mod the_bottom_strip {
+    use super::*;
+
+    fn active_tab_in(dock: &DockState<Tab>, path: egui_dock::TabPath) -> Option<Tab> {
+        let leaf = dock.leaf(path.node_path()).ok()?;
+        leaf.tabs().get(path.tab.0).copied()
+    }
+
+    fn tab_count_in_the_problems_leaf(dock: &DockState<Tab>) -> usize {
+        let problems = dock.find_tab(&Tab::Problems).expect("a problems tab");
+        dock.leaf(problems.node_path())
+            .map(|leaf| leaf.tabs().len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn the_panels_share_one_leaf() {
+        let dock = default_layout();
+        let problems = dock.find_tab(&Tab::Problems).expect("a problems tab");
+        let terminal = dock.find_tab(&Tab::Terminal).expect("a terminal tab");
+        assert_eq!(
+            problems.node_path(),
+            terminal.node_path(),
+            "the terminal still has a pane of its own"
+        );
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 2);
+    }
+
+    /// The tab that is in front is the one that was in front before the change.
+    #[test]
+    fn the_problems_stay_in_front() {
+        let dock = default_layout();
+        assert_eq!(
+            active_tab_in(&dock, dock.find_tab(&Tab::Problems).unwrap()),
+            Some(Tab::Problems)
+        );
+    }
+
+    #[test]
+    fn a_layout_that_split_the_strip_is_tidied() {
+        let mut dock = DockState::new(vec![Tab::Editor]);
+        dock.split(
+            NodePath::MAIN_ROOT,
+            Split::Below,
+            0.72,
+            Node::leaf(Tab::Problems),
+        );
+        // The shape this version wrote: the terminal in a pane of its own beside the
+        // problems, which is exactly what the change removes.
+        let problems = dock.find_tab(&Tab::Problems).unwrap();
+        dock.split(
+            problems.node_path(),
+            Split::Right,
+            0.5,
+            Node::leaf(Tab::Terminal),
+        );
+        let tidied = with_terminal(dock);
+        let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
+        let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
+        assert_eq!(problems.node_path(), terminal.node_path());
+        assert_eq!(
+            tidied.iter_all_tabs().count(),
+            3,
+            "the terminal was duplicated"
+        );
+    }
+
+    #[test]
+    fn a_layout_without_a_terminal_gets_one_beside_the_problems() {
+        let mut dock = DockState::new(vec![Tab::Editor]);
+        dock.split(
+            NodePath::MAIN_ROOT,
+            Split::Below,
+            0.72,
+            Node::leaf(Tab::Problems),
+        );
+        let tidied = with_terminal(dock);
+        let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
+        let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
+        assert_eq!(problems.node_path(), terminal.node_path());
+        assert_eq!(
+            active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
+            Some(Tab::Problems)
+        );
+        assert_eq!(tidied.iter_all_tabs().count(), 3);
     }
 }

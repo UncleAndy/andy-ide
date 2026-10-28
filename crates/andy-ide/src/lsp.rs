@@ -291,7 +291,7 @@ impl LanguageService {
         let worker = std::thread::Builder::new()
             .name(format!("{name}-worker"))
             .spawn(move || {
-                work(config, &root, jobs, outcomes, &worker_stopping);
+                work(config, &root, jobs, outcomes, worker_stopping);
                 let _ = finished.send(());
             })
             .ok();
@@ -353,9 +353,11 @@ fn work(
     root: &Path,
     jobs: Receiver<Job>,
     outcomes: Sender<Outcome>,
-    stopping: &AtomicBool,
+    stopping: Arc<AtomicBool>,
 ) {
-    let mut session = match LspSession::start(config, root) {
+    // The same flag ends a waiting request, so a stop is felt inside the session too
+    // and the worker returns without the server having to answer anything.
+    let mut session = match LspSession::start_with_abort(config, root, Arc::clone(&stopping)) {
         Ok(session) => session,
         Err(error) => {
             let _ = outcomes.send(Outcome::Failed(format!(
@@ -377,7 +379,7 @@ fn work(
         }
         match jobs.recv_timeout(Duration::from_millis(200)) {
             Ok(job) => {
-                if let Some(outcome) = apply(&mut session, job, &mut warm, stopping)
+                if let Some(outcome) = apply(&mut session, job, &mut warm, &stopping)
                     && outcomes.send(outcome).is_err()
                 {
                     break;
@@ -783,6 +785,9 @@ mod leaving {
         });
         std::thread::sleep(Duration::from_millis(400));
 
+        let before = servers_of_this_process();
+        assert!(before > 0, "no server was running to leave behind");
+
         let started = Instant::now();
         service.stop();
         assert!(
@@ -790,5 +795,45 @@ mod leaving {
             "leaving took {:?}",
             started.elapsed()
         );
+
+        // Letting the thread go is only honest if the worker gave up on its own:
+        // a detached worker would keep a rust-analyzer indexing for minutes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && servers_of_this_process() > 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            servers_of_this_process(),
+            0,
+            "the server outlived the application"
+        );
+    }
+
+    /// Language servers running as children of this test process.
+    fn servers_of_this_process() -> usize {
+        let me = std::process::id();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        let mut found = 0;
+        for entry in entries.flatten() {
+            let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+                continue;
+            };
+            let parent = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|value| value.trim().parse::<u32>().ok());
+            let name = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Name:"))
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if parent == Some(me) && name.starts_with("rust-analyzer") {
+                found += 1;
+            }
+        }
+        found
     }
 }
