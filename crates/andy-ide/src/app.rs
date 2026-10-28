@@ -105,11 +105,25 @@ impl App {
 
         self.state.apply_pending();
         self.handle_keys(ui);
+        self.state.poll_fs_events();
+        crate::ui::prompt::show(ui.ctx(), &mut self.state);
+        self.state.apply_pending();
 
         self.frames += 1;
         self.state.poll_index();
         let now = ui.ctx().input(|input| input.time);
-        let closing = ui.ctx().input(|input| input.viewport().close_requested());
+        let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
+        if self.state.quit_requested {
+            // The user answered the question already: let the window go.
+            self.state.quit_requested = false;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if closing && self.state.has_unsaved() {
+            // Never lose edits to a stray click on the window's cross.
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.prompt = Some(crate::state::Prompt::Quit);
+            closing = false;
+        }
         // Serializing the dock on every frame costs more than it is worth;
         // layouts change when the user drags a split, not sixty times a second.
         // The dock only has real rectangles after a frame, and a layout with NaN
@@ -131,10 +145,19 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         let close = KeyboardShortcut::new(Modifiers::CTRL, Key::W);
         let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
+        let save_all = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::S);
 
+        // The longer shortcut has to be taken first: Ctrl+Shift+S would
+        // otherwise be read as Ctrl+S with a stray modifier.
+        let save_all_pressed = ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&save_all));
         let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
         let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
 
+        if save_all_pressed {
+            self.state.save_all();
+        }
         if save_pressed {
             self.state.save_active();
         }
@@ -1381,5 +1404,353 @@ mod clipboard_keys_tests {
         let output = harness.key_with(egui::Key::Delete, egui::Modifiers::SHIFT);
         assert_eq!(harness.copied(&output).as_deref(), Some("second\n"));
         assert_eq!(harness.text(), "first\nthird\n");
+    }
+}
+
+#[cfg(test)]
+mod external_change_tests {
+    use super::*;
+    use ide_core::FsEvent;
+    use std::path::PathBuf;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        root: PathBuf,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new(files: &[(&str, &str)]) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            for (name, text) in files {
+                std::fs::write(project.path().join(name), text).unwrap();
+            }
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            // The watcher would deliver the very events the tests hand over by
+            // hand, and the two would race.
+            app.state.pause_watching();
+            let root = project.path().to_path_buf();
+            for (name, _) in files {
+                app.state.open_file(std::path::Path::new(name));
+            }
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                root,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.frame_with(events, Vec::new())
+        }
+
+        fn frame_with(
+            &mut self,
+            events: Vec<egui::Event>,
+            viewport_events: Vec<egui::ViewportEvent>,
+        ) -> egui::FullOutput {
+            self.time += 0.1;
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: viewport_events,
+                    ..Default::default()
+                },
+            );
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                viewports,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+            output
+        }
+
+        fn text_of(&self, name: &str) -> String {
+            self.app
+                .state
+                .buffers
+                .values()
+                .find(|buffer| buffer.path == std::path::Path::new(name))
+                .map(|buffer| buffer.text().to_owned())
+                .unwrap_or_default()
+        }
+
+        fn type_into(&mut self, name: &str, text: &str) {
+            let id = self
+                .app
+                .state
+                .tabs
+                .items()
+                .iter()
+                .find(|item| item.path == std::path::Path::new(name))
+                .map(|item| item.buffer_id)
+                .expect("the file is open");
+            let buffer = self.app.state.buffers.get_mut(&id).unwrap();
+            buffer.insert_text(text);
+            self.app.state.sync_dirty();
+        }
+
+        fn write_on_disk(&self, name: &str, text: &str) {
+            std::fs::write(self.root.join(name), text).unwrap();
+        }
+
+        fn change_on_disk(&mut self, name: &str, text: &str) {
+            self.write_on_disk(name, text);
+            self.app
+                .state
+                .handle_fs_event(FsEvent::Changed(self.root.join(name)));
+        }
+
+        fn commands(&self, output: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+            output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| viewport.commands.clone())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_change_on_disk_reloads_a_clean_buffer() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.change_on_disk("a.rs", "two\n");
+
+        assert_eq!(harness.text_of("a.rs"), "two\n");
+        let buffer = harness
+            .app
+            .state
+            .buffers
+            .values()
+            .find(|buffer| buffer.path == std::path::Path::new("a.rs"))
+            .unwrap();
+        assert!(!buffer.is_dirty(), "the text is the text on disk");
+        assert!(
+            harness.app.state.status.contains("reloaded"),
+            "status was {:?}",
+            harness.app.state.status
+        );
+    }
+
+    #[test]
+    fn a_change_on_disk_asks_when_the_buffer_has_edits() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.type_into("a.rs", "mine ");
+
+        harness.change_on_disk("a.rs", "theirs\n");
+
+        assert_eq!(
+            harness.text_of("a.rs"),
+            "mine one\n",
+            "the edits are kept until the question is answered"
+        );
+        assert_eq!(
+            harness.app.state.prompt,
+            Some(crate::state::Prompt::ExternalChange {
+                path: PathBuf::from("a.rs")
+            })
+        );
+
+        // Reload throws the edits away and takes the disk text.
+        harness
+            .app
+            .state
+            .pending
+            .push(crate::state::Action::ReloadExternal(PathBuf::from("a.rs")));
+        harness.frame(Vec::new());
+        assert_eq!(harness.text_of("a.rs"), "theirs\n");
+        assert!(harness.app.state.prompt.is_none());
+    }
+
+    #[test]
+    fn keeping_mine_leaves_the_buffer_alone() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.type_into("a.rs", "mine ");
+        harness.change_on_disk("a.rs", "theirs\n");
+
+        harness
+            .app
+            .state
+            .pending
+            .push(crate::state::Action::KeepMine(PathBuf::from("a.rs")));
+        harness.frame(Vec::new());
+
+        assert_eq!(harness.text_of("a.rs"), "mine one\n");
+        assert!(harness.app.state.prompt.is_none());
+        assert!(
+            harness
+                .app
+                .state
+                .buffers
+                .values()
+                .find(|buffer| buffer.path == std::path::Path::new("a.rs"))
+                .unwrap()
+                .is_dirty()
+        );
+    }
+
+    #[test]
+    fn the_editors_own_save_is_not_a_change() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.app.state.save_active();
+        assert!(!harness.app.state.status.contains("reloaded"));
+
+        // The watcher reports the very write the editor just did.
+        harness
+            .app
+            .state
+            .handle_fs_event(FsEvent::Changed(harness.root.join("a.rs")));
+        assert!(harness.app.state.prompt.is_none(), "nothing to ask about");
+        assert_eq!(harness.text_of("a.rs"), "one\n");
+    }
+
+    #[test]
+    fn a_file_removed_on_disk_is_reported() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        std::fs::remove_file(harness.root.join("a.rs")).unwrap();
+        harness
+            .app
+            .state
+            .handle_fs_event(FsEvent::Removed(harness.root.join("a.rs")));
+
+        assert!(harness.app.state.status.contains("removed"));
+        assert_eq!(harness.text_of("a.rs"), "one\n", "the buffer is not lost");
+    }
+
+    #[test]
+    fn save_all_writes_every_dirty_tab() {
+        let mut harness = Harness::new(&[("a.rs", "a\n"), ("b.rs", "b\n")]);
+        harness.type_into("a.rs", "1");
+        harness.type_into("b.rs", "2");
+
+        let output = harness.frame(vec![egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        }]);
+        let _ = output;
+
+        assert_eq!(
+            std::fs::read_to_string(harness.root.join("a.rs")).unwrap(),
+            "1a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(harness.root.join("b.rs")).unwrap(),
+            "2b\n"
+        );
+        assert!(!harness.app.state.has_unsaved());
+    }
+
+    #[test]
+    fn closing_a_dirty_tab_asks_before_dropping_it() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.type_into("a.rs", "x");
+
+        harness.app.state.close_tab(0);
+        assert_eq!(
+            harness.app.state.prompt,
+            Some(crate::state::Prompt::CloseTab { index: 0 })
+        );
+        assert_eq!(harness.app.state.tabs.len(), 1, "nothing closed yet");
+
+        harness
+            .app
+            .state
+            .pending
+            .push(crate::state::Action::SaveAndCloseTab(0));
+        harness.frame(Vec::new());
+        assert_eq!(harness.app.state.tabs.len(), 0);
+        assert_eq!(
+            std::fs::read_to_string(harness.root.join("a.rs")).unwrap(),
+            "xone\n",
+            "save and close writes first"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_with_edits_is_cancelled_and_asked_about() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        harness.type_into("a.rs", "x");
+
+        let output = harness.frame_with(Vec::new(), vec![egui::ViewportEvent::Close]);
+        let commands = harness.commands(&output);
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::CancelClose)),
+            "the close must be cancelled, got {commands:?}"
+        );
+        assert_eq!(harness.app.state.prompt, Some(crate::state::Prompt::Quit));
+    }
+
+    #[test]
+    fn closing_the_window_without_edits_is_allowed() {
+        let mut harness = Harness::new(&[("a.rs", "one\n")]);
+        let output = harness.frame_with(Vec::new(), vec![egui::ViewportEvent::Close]);
+        let commands = harness.commands(&output);
+        assert!(
+            !commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::CancelClose)),
+            "nothing to save, the window may close: {commands:?}"
+        );
+        assert!(harness.app.state.prompt.is_none());
+    }
+
+    #[test]
+    fn a_watcher_sees_a_file_changed_by_someone_else() {
+        // End to end: a real watcher on the real directory, no hand-made events.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "one\n").unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(project.path().join("a.rs"), "two\n").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.state.poll_fs_events();
+            let text = app
+                .state
+                .buffers
+                .values()
+                .next()
+                .map(|buffer| buffer.text().to_owned())
+                .unwrap_or_default();
+            if text == "two\n" || std::time::Instant::now() > deadline {
+                assert_eq!(text, "two\n", "the watcher never reported the change");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

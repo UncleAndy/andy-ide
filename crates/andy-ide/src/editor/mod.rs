@@ -82,6 +82,20 @@ impl EditorBuffer {
         self.doc.is_dirty()
     }
 
+    /// Replaces the whole text with what is on disk now.
+    ///
+    /// Used when a file changed behind the editor and the buffer has no edits
+    /// of its own. The caret stays where it was, clamped to the new text, and
+    /// the buffer is clean afterwards.
+    pub fn replace_text(&mut self, text: String) {
+        let character = self.caret().min(text.chars().count());
+        self.doc = Document::new(&text);
+        self.doc.mark_saved();
+        self.cursor = Cursor::caret(character);
+        self.goal_col = None;
+        self.refresh();
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }

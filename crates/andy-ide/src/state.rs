@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use ide_core::{
-    Config, FileIndex, FileIndexCache, Project, Recent, Tabs, TreeOptions, Workspace,
-    WorkspaceState,
+    Config, ExternalChange, FileIndex, FileIndexCache, FsEvent, Project, Recent, Tabs, TreeOptions,
+    Workspace, WorkspaceState, decide_external_change, watch_project,
 };
 
 use crate::editor::EditorBuffer;
@@ -18,6 +18,31 @@ pub enum Action {
     OpenFile(PathBuf),
     /// Close the tab at this index, asking first when it has unsaved changes.
     CloseTab(usize),
+    /// Close the tab at this index whatever it holds.
+    ForceCloseTab(usize),
+    /// Save the tab at this index and close it.
+    SaveAndCloseTab(usize),
+    /// Take the text from disk for a file that changed behind the editor.
+    ReloadExternal(PathBuf),
+    /// Keep the edits and forget the change on disk.
+    KeepMine(PathBuf),
+    /// Save every buffer that has changes.
+    SaveAll,
+    /// Leave without saving anything else.
+    Quit,
+    /// Go away, do nothing.
+    CancelPrompt,
+}
+
+/// A question the editor has to ask before it can continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prompt {
+    /// The file changed on disk while the buffer had edits of its own.
+    ExternalChange { path: PathBuf },
+    /// The tab has unsaved edits.
+    CloseTab { index: usize },
+    /// The window is closing and something is unsaved.
+    Quit,
 }
 
 /// Which directories the project tree shows open, and how it is shown.
@@ -51,6 +76,13 @@ pub struct AppState {
     pub pending: Vec<Action>,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
+    /// A question waiting for an answer; the interface draws it as a modal.
+    pub prompt: Option<Prompt>,
+    /// Set when the user chose to leave; the next frame closes the window.
+    pub quit_requested: bool,
+    /// Keeps the watch alive; dropping it stops the events.
+    watcher: Option<ide_core::ProjectWatcher>,
+    fs_events: Option<Receiver<FsEvent>>,
     next_buffer_id: usize,
     config_dir: PathBuf,
     /// `.andy-ide` of the open project, when it could be created.
@@ -87,6 +119,10 @@ impl AppState {
             status: String::new(),
             pending: Vec::new(),
             layout: None,
+            prompt: None,
+            quit_requested: false,
+            watcher: None,
+            fs_events: None,
             next_buffer_id: 1,
             config_dir,
             workspace: None,
@@ -133,18 +169,174 @@ impl AppState {
                 }
 
                 self.start_index_refresh(&canonical);
-                self.recent.add(canonical);
+                self.recent.add(canonical.clone());
                 let _ = self.recent.save(&self.config_dir.join("recent.json"));
 
                 self.tree.expanded.clear();
                 self.tabs = Tabs::new();
                 self.buffers.clear();
+                self.start_watching(&canonical.clone());
                 self.restore_tabs();
             }
             Err(error) => {
                 self.status = format!("cannot open {}: {error}", root.display());
             }
         }
+    }
+
+    /// Watches the project tree so files changed behind the editor are noticed.
+    fn start_watching(&mut self, root: &Path) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match watch_project(root, sender) {
+            Ok(watcher) => {
+                self.watcher = Some(watcher);
+                self.fs_events = Some(receiver);
+            }
+            Err(error) => {
+                // Without a watcher the editor still works; it just will not
+                // notice changes made elsewhere.
+                self.watcher = None;
+                self.fs_events = None;
+                self.status = format!("no file watching: {error}");
+            }
+        }
+    }
+
+    /// Takes every change the watcher has seen since the last frame.
+    pub fn poll_fs_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(receiver) = self.fs_events.as_ref() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.fs_events = None;
+                        break;
+                    }
+                }
+            }
+        }
+        for event in events {
+            self.handle_fs_event(event);
+        }
+    }
+
+    /// Decides what to do about one change on disk.
+    ///
+    /// A file that is not open is ignored: the index and the tree will catch
+    /// up on their own, and reopening the project is cheap.
+    pub fn handle_fs_event(&mut self, event: FsEvent) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        let absolute = event.path().to_path_buf();
+        let Ok(rel_path) = absolute.strip_prefix(&root) else {
+            return;
+        };
+        let rel = rel_path.to_path_buf();
+        let Some(buffer_id) = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == rel)
+            .map(|item| item.buffer_id)
+        else {
+            return;
+        };
+
+        match event {
+            FsEvent::Removed(_) => {
+                self.status = format!("{} was removed on disk", display_name(&rel));
+            }
+            FsEvent::Created(_) | FsEvent::Changed(_) => {
+                let Ok(text) = std::fs::read_to_string(&absolute) else {
+                    return;
+                };
+                let Some(buffer) = self.buffers.get_mut(&buffer_id) else {
+                    return;
+                };
+                // The editor writes its own saves atomically, and those come
+                // back as events too: same text, nothing to do.
+                if buffer.text() == text {
+                    return;
+                }
+                let dirty = buffer.is_dirty();
+                match decide_external_change(dirty) {
+                    ExternalChange::Reload => {
+                        buffer.replace_text(text);
+                        self.status = format!("{} reloaded from disk", display_name(&rel));
+                        self.sync_dirty();
+                    }
+                    ExternalChange::Prompt => {
+                        self.prompt = Some(Prompt::ExternalChange { path: rel });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Saves the buffer of one tab.
+    fn save_tab(&mut self, index: usize) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        let Some(buffer_id) = self.tabs.items().get(index).map(|item| item.buffer_id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(&buffer_id) else {
+            return;
+        };
+        match buffer.save(&root) {
+            Ok(()) => self.status = format!("saved {}", display_name(&buffer.path)),
+            Err(error) => self.status = format!("{error:#}"),
+        }
+        self.sync_dirty();
+    }
+
+    /// Stops watching the tree; tests hand over their own events instead.
+    #[cfg(test)]
+    pub fn pause_watching(&mut self) {
+        self.watcher = None;
+        self.fs_events = None;
+    }
+
+    /// Whether any buffer holds unsaved edits.
+    pub fn has_unsaved(&self) -> bool {
+        self.buffers.values().any(EditorBuffer::is_dirty)
+    }
+
+    /// Saves every buffer with changes; returns how many were written.
+    pub fn save_all(&mut self) -> usize {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return 0;
+        };
+        let mut saved = 0;
+        let mut failure = None;
+        for buffer in self.buffers.values_mut() {
+            if !buffer.is_dirty() {
+                continue;
+            }
+            match buffer.save(&root) {
+                Ok(()) => saved += 1,
+                Err(error) => failure = Some(format!("{error:#}")),
+            }
+        }
+        self.sync_dirty();
+        self.status = failure.unwrap_or_else(|| format!("saved {saved} files"));
+        saved
     }
 
     /// Walks the project in a thread and refreshes both the index and its cache.
@@ -369,24 +561,66 @@ impl AppState {
         }
     }
 
-    /// Closes a tab, refusing when it has unsaved changes.
+    /// Closes a tab, asking first when it has unsaved changes.
     pub fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self
+            .tabs
+            .items()
+            .get(index)
+            .and_then(|item| self.buffers.get(&item.buffer_id))
+            .map(EditorBuffer::is_dirty)
+            .unwrap_or(false)
+        {
+            self.prompt = Some(Prompt::CloseTab { index });
+            return;
+        }
+        self.force_close_tab(index);
+    }
+
+    /// Closes a tab whatever it holds.
+    pub fn force_close_tab(&mut self, index: usize) {
         let buffer_id = self.tabs.items().get(index).map(|item| item.buffer_id);
+        self.prompt = None;
         if self.tabs.close(index) {
             if let Some(buffer_id) = buffer_id {
                 self.buffers.remove(&buffer_id);
             }
             self.status = format!("{} tabs", self.tabs.len());
-        } else {
-            self.status = format!(
-                "{} has unsaved changes",
-                self.tabs
-                    .items()
-                    .get(index)
-                    .map(|item| display_name(&item.path))
-                    .unwrap_or_default()
-            );
         }
+    }
+
+    /// Replaces a buffer with the text on disk, whatever it holds.
+    pub fn reload_from_disk(&mut self, rel: &Path) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        self.prompt = None;
+        let absolute = root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&absolute) else {
+            self.status = format!("cannot read {}", absolute.display());
+            return;
+        };
+        let Some(buffer_id) = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == rel)
+            .map(|item| item.buffer_id)
+        else {
+            return;
+        };
+        if let Some(buffer) = self.buffers.get_mut(&buffer_id) {
+            buffer.replace_text(text);
+            self.status = format!("{} reloaded from disk", display_name(rel));
+        }
+        self.sync_dirty();
     }
 
     /// Applies everything the last frame asked for.
@@ -395,6 +629,29 @@ impl AppState {
             match action {
                 Action::OpenFile(rel) => self.open_file(&rel),
                 Action::CloseTab(index) => self.close_tab(index),
+                Action::ForceCloseTab(index) => self.force_close_tab(index),
+                Action::SaveAndCloseTab(index) => {
+                    self.prompt = None;
+                    self.save_tab(index);
+                    self.force_close_tab(index);
+                }
+                Action::ReloadExternal(path) => self.reload_from_disk(&path),
+                Action::KeepMine(path) => {
+                    self.prompt = None;
+                    self.status = format!(
+                        "kept the editor version of {}; save it or reopen it to see the disk one",
+                        display_name(&path)
+                    );
+                }
+                Action::SaveAll => {
+                    self.save_all();
+                }
+                Action::Quit => {
+                    self.prompt = None;
+                    self.quit_requested = true;
+                    self.save_workspace(None, 0.0, true);
+                }
+                Action::CancelPrompt => self.prompt = None,
             }
         }
     }
