@@ -1,6 +1,7 @@
 //! The andy-ide application: window, panels and the editor.
 
 mod app;
+mod editor;
 mod state;
 mod ui;
 

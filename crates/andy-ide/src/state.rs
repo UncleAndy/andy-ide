@@ -1,9 +1,11 @@
 //! Application state that is not the dock layout.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use ide_core::{Config, FileIndex, Project, Recent, Session, Tabs, TreeOptions};
+
+use crate::editor::EditorBuffer;
 
 /// Something the interface asked for, applied after the frame is drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,8 @@ pub struct AppState {
     pub project: Option<Project>,
     pub tree: TreeState,
     pub tabs: Tabs,
+    /// Open documents, keyed by the tab's buffer id.
+    pub buffers: HashMap<usize, EditorBuffer>,
     pub index: Option<FileIndex>,
     /// Text shown in the status bar.
     pub status: String,
@@ -70,6 +74,7 @@ impl AppState {
             recent,
             project: None,
             tabs: Tabs::new(),
+            buffers: HashMap::new(),
             index: None,
             status: String::new(),
             pending: Vec::new(),
@@ -112,6 +117,7 @@ impl AppState {
                 self.project = Some(project);
                 self.tree.expanded.clear();
                 self.tabs = Tabs::new();
+                self.buffers.clear();
             }
             Err(error) => {
                 self.status = format!("cannot open {}: {error}", root.display());
@@ -119,18 +125,117 @@ impl AppState {
         }
     }
 
-    /// Opens a file in a tab and activates it.
+    /// Opens a file in a tab and activates it, or focuses its existing tab.
     pub fn open_file(&mut self, rel: &Path) {
-        let buffer_id = self.next_buffer_id;
-        self.next_buffer_id += 1;
-        let index = self.tabs.open(rel.to_path_buf(), buffer_id);
-        self.tabs.set_active(index);
-        self.status = display_name(rel);
+        if let Some(index) = self.tabs.find(rel) {
+            self.tabs.set_active(index);
+            self.status = display_name(rel);
+            return;
+        }
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            self.status = "no project open".to_owned();
+            return;
+        };
+        match EditorBuffer::load(&root, rel) {
+            Ok(buffer) => {
+                let buffer_id = self.next_buffer_id;
+                self.next_buffer_id += 1;
+                self.buffers.insert(buffer_id, buffer);
+                let index = self.tabs.open(rel.to_path_buf(), buffer_id);
+                self.tabs.set_active(index);
+                self.status = display_name(rel);
+            }
+            Err(error) => self.status = format!("{error:#}"),
+        }
+    }
+
+    /// The buffer of the active tab.
+    pub fn active_buffer(&self) -> Option<&EditorBuffer> {
+        let index = self.tabs.active()?;
+        let buffer_id = self.tabs.items().get(index)?.buffer_id;
+        self.buffers.get(&buffer_id)
+    }
+
+    /// The buffer of the active tab, for editing.
+    pub fn active_buffer_mut(&mut self) -> Option<&mut EditorBuffer> {
+        let index = self.tabs.active()?;
+        let buffer_id = self.tabs.items().get(index)?.buffer_id;
+        self.buffers.get_mut(&buffer_id)
+    }
+
+    /// Line and column of the active caret, for the status bar.
+    pub fn caret_position(&self) -> Option<(usize, usize)> {
+        self.active_buffer().map(|buffer| {
+            let (line, col) = buffer.line_col();
+            (line + 1, col + 1)
+        })
+    }
+
+    /// Name of the active buffer's language, if it has one.
+    pub fn active_language(&self) -> Option<&'static str> {
+        self.active_buffer()
+            .and_then(|buffer| buffer.highlighter.as_ref())
+            .map(|highlighter| highlighter.language().name())
+    }
+
+    /// Saves the active buffer and returns the outcome for the status bar.
+    pub fn save_active(&mut self) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        let Some(index) = self.tabs.active() else {
+            return;
+        };
+        let Some(buffer_id) = self.tabs.items().get(index).map(|item| item.buffer_id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(&buffer_id) else {
+            return;
+        };
+        match buffer.save(&root) {
+            Ok(()) => {
+                self.status = format!("saved {}", display_name(&buffer.path));
+                self.sync_dirty();
+            }
+            Err(error) => self.status = format!("{error:#}"),
+        }
+    }
+
+    /// Copies each buffer's dirty flag into its tab, so the strip matches.
+    pub fn sync_dirty(&mut self) {
+        let flags: Vec<(usize, bool)> = self
+            .tabs
+            .items()
+            .iter()
+            .map(|item| {
+                let dirty = self
+                    .buffers
+                    .get(&item.buffer_id)
+                    .map(EditorBuffer::is_dirty)
+                    .unwrap_or(false);
+                (item.buffer_id, dirty)
+            })
+            .collect();
+        for (buffer_id, dirty) in flags {
+            self.tabs.dirty_flag(buffer_id, dirty);
+        }
     }
 
     /// Closes a tab, refusing when it has unsaved changes.
     pub fn close_tab(&mut self, index: usize) {
+        let buffer_id = self.tabs.items().get(index).map(|item| item.buffer_id);
         if self.tabs.close(index) {
+            if let Some(buffer_id) = buffer_id {
+                self.buffers.remove(&buffer_id);
+            }
             self.status = format!("{} tabs", self.tabs.len());
         } else {
             self.status = format!(

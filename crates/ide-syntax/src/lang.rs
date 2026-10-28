@@ -35,6 +35,24 @@ pub enum Language {
 }
 
 impl Language {
+    /// Short human-readable name, as shown in the status bar.
+    pub fn name(self) -> &'static str {
+        match self {
+            Language::Rust => "Rust",
+            Language::Python => "Python",
+            Language::TypeScript => "TypeScript",
+            Language::Tsx => "TSX",
+            Language::JavaScript => "JavaScript",
+            Language::Json => "JSON",
+            Language::Toml => "TOML",
+            Language::Markdown => "Markdown",
+            Language::Bash => "Bash",
+            Language::Go => "Go",
+            Language::C => "C",
+            Language::Cpp => "C++",
+        }
+    }
+
     /// Detects the language of a file: extension first, then, for files without
     /// a useful extension, the first line (a shebang).
     pub fn detect(path: &Path, first_line: Option<&str>) -> Option<Language> {

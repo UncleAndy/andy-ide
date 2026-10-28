@@ -19,6 +19,14 @@ pub fn bar(ui: &mut Ui, state: &AppState) {
         ui.label(&state.status);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(format!("{} tabs", state.tabs.len()));
+            if let Some((line, col)) = state.caret_position() {
+                ui.separator();
+                ui.label(format!("{line}:{col}"));
+            }
+            if let Some(language) = state.active_language() {
+                ui.label(language);
+                ui.separator();
+            }
             if let Some(index) = state.tabs.active()
                 && state.tabs.dirty(index)
             {

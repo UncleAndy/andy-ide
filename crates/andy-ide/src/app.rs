@@ -86,9 +86,15 @@ impl App {
 impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         let close = KeyboardShortcut::new(Modifiers::CTRL, Key::W);
-        if ui.ctx().input_mut(|input| input.consume_shortcut(&close))
-            && let Some(index) = self.state.tabs.active()
-        {
+        let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
+
+        let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
+        let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
+
+        if save_pressed {
+            self.state.save_active();
+        }
+        if close_pressed && let Some(index) = self.state.tabs.active() {
             self.state.close_tab(index);
         }
     }
@@ -188,5 +194,112 @@ mod tests {
         };
         let shapes = draw_frames(&mut app, 1);
         assert!(shapes > 0);
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    fn frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> usize {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        let shapes = output.shapes.len();
+        output.textures_delta.clear();
+        shapes
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn setup() -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "fn main() {}\n").unwrap();
+        let mut app = App {
+            state: AppState::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            dock: default_layout(),
+            zoom_applied: false,
+        };
+        app.state.open_file(std::path::Path::new("a.rs"));
+        (project, config, app)
+    }
+
+    #[test]
+    fn typed_text_reaches_the_buffer_and_dirties_the_tab() {
+        let (_project, _config, mut app) = setup();
+        let ctx = egui::Context::default();
+
+        // First frame lays the widget out and takes focus.
+        frame(&ctx, &mut app, Vec::new());
+        frame(&ctx, &mut app, vec![egui::Event::Text("X".to_owned())]);
+
+        let buffer = app.state.active_buffer().expect("active buffer");
+        assert!(buffer.text().starts_with('X'), "text: {:?}", buffer.text());
+        assert!(buffer.is_dirty());
+        assert!(app.state.tabs.dirty(0));
+    }
+
+    #[test]
+    fn ctrl_s_writes_the_file() {
+        let (project, _config, mut app) = setup();
+        let ctx = egui::Context::default();
+
+        frame(&ctx, &mut app, Vec::new());
+        frame(&ctx, &mut app, vec![egui::Event::Text("Y".to_owned())]);
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::S, egui::Modifiers::CTRL)],
+        );
+
+        let on_disk = std::fs::read_to_string(project.path().join("a.rs")).unwrap();
+        assert_eq!(on_disk, "Yfn main() {}\n");
+        assert!(!app.state.active_buffer().unwrap().is_dirty());
+    }
+
+    #[test]
+    fn backspace_and_arrows_move_the_caret() {
+        let (_project, _config, mut app) = setup();
+        let ctx = egui::Context::default();
+
+        frame(&ctx, &mut app, Vec::new());
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![key_event(egui::Key::Backspace, egui::Modifiers::NONE)],
+        );
+
+        let buffer = app.state.active_buffer().unwrap();
+        assert_eq!(buffer.line_count(), 2);
+        assert_eq!(buffer.caret(), 12);
     }
 }

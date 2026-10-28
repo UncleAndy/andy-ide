@@ -144,7 +144,15 @@ impl Document {
         if idx >= self.rope.len_lines() {
             return None;
         }
-        Some(self.rope.line(idx))
+        let slice = self.rope.line(idx);
+        let mut end = slice.len_chars();
+        if end > 0 && slice.char(end - 1) == '\n' {
+            end -= 1;
+            if end > 0 && slice.char(end - 1) == '\r' {
+                end -= 1;
+            }
+        }
+        Some(slice.slice(..end))
     }
 
     /// Line and column (both zero based, in chars) of a char index.

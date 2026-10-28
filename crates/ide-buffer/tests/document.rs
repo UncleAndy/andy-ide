@@ -95,3 +95,11 @@ fn history_is_bounded() {
     }
     assert_eq!(undone, 1000);
 }
+
+#[test]
+fn line_has_no_terminator() {
+    let d = Document::new("one\ntwo\r\nthree");
+    assert_eq!(d.line(0).unwrap().to_string(), "one");
+    assert_eq!(d.line(1).unwrap().to_string(), "two");
+    assert_eq!(d.line(2).unwrap().to_string(), "three");
+}

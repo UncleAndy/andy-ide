@@ -1,31 +1,28 @@
-//! The editor tab: the tab strip and, for now, a placeholder for the text area.
+//! The editor tab: the tab strip and the text area of the active document.
 
 use egui::Ui;
 
+use crate::editor::view;
 use crate::state::AppState;
 use crate::ui::tabs;
 
-/// Draws the tab strip and the active document.
+/// Draws the tab strip, then the active buffer.
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     tabs::strip(ui, state);
     ui.separator();
 
-    let active = state
-        .tabs
-        .active()
-        .and_then(|index| state.tabs.items().get(index).cloned());
+    if state.tabs.active().is_none() {
+        ui.centered_and_justified(|ui| {
+            ui.weak("Double-click a file in the project tree to open it.");
+        });
+        return;
+    }
 
-    match active {
-        Some(item) => {
-            ui.add_space(4.0);
-            ui.strong(item.path.display().to_string());
-            ui.add_space(8.0);
-            ui.weak("The text area, syntax highlighting and caret arrive with the next step.");
-        }
-        None => {
-            ui.centered_and_justified(|ui| {
-                ui.weak("Double-click a file in the project tree to open it.");
-            });
-        }
+    let changed = match state.active_buffer_mut() {
+        Some(buffer) => view::ui(ui, buffer),
+        None => false,
+    };
+    if changed {
+        state.sync_dirty();
     }
 }
