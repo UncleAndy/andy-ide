@@ -1703,3 +1703,37 @@ mod the_rename_modal {
         );
     }
 }
+
+/// The tab strip of a file that lives outside the project.
+mod the_external_tab {
+    use super::*;
+
+    #[test]
+    fn the_tab_says_which_mod_rs_it_is() {
+        let mut gui = Gui::new(&[("a.rs", "one\n")], Some("a.rs"));
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("block")).unwrap();
+        let top = outside.path().join("mod.rs");
+        let nested = outside.path().join("block").join("mod.rs");
+        std::fs::write(&top, "top\n").unwrap();
+        std::fs::write(&nested, "nested\n").unwrap();
+
+        gui.app_mut().state.open_file(&top);
+        gui.app_mut().state.open_file(&nested);
+        gui.settle();
+
+        let labels: Vec<String> = [&top, &nested]
+            .iter()
+            .map(|path| {
+                crate::state::tab_title(path, gui.app().state.project.as_ref().map(|p| p.root()))
+            })
+            .collect();
+        assert_ne!(labels[0], labels[1]);
+        for label in &labels {
+            assert!(
+                gui.harness.query_by_label(label).is_some(),
+                "the tab {label} is not on screen"
+            );
+        }
+    }
+}

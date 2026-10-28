@@ -3501,3 +3501,69 @@ mod real_rename_tests {
         );
     }
 }
+
+/// Tab labels and the watching of files outside the project.
+#[cfg(test)]
+mod external_files {
+    use super::*;
+
+    #[test]
+    fn a_file_in_the_project_is_named_by_its_file_name() {
+        let root = std::path::Path::new("/work/project");
+        let labels = crate::state::tab_labels(
+            &[
+                std::path::PathBuf::from("src/main.rs"),
+                std::path::PathBuf::from("src/lib.rs"),
+            ],
+            Some(root),
+        );
+        assert_eq!(labels, vec!["main.rs", "lib.rs"]);
+    }
+
+    #[test]
+    fn two_files_of_the_same_name_outside_the_project_are_told_apart() {
+        let root = std::path::Path::new("/work/project");
+        let first = std::path::Path::new("/home/me/.cargo/registry/src/x/ropey-1.6.1/src/mod.rs");
+        let second =
+            std::path::Path::new("/home/me/.cargo/registry/src/x/ropey-1.6.1/src/block/mod.rs");
+        let labels =
+            crate::state::tab_labels(&[first.to_path_buf(), second.to_path_buf()], Some(root));
+        let a = labels[0].clone();
+        let b = labels[1].clone();
+        println!("tabs: {a} | {b}");
+        assert_eq!(a, "ropey-1.6.1/src/mod.rs");
+        assert_ne!(a, b, "two mod.rs look the same in the strip");
+    }
+
+    #[test]
+    fn a_change_to_an_open_file_outside_the_project_is_reloaded() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let external = outside.path().join("dep.rs");
+        std::fs::write(&external, "one\n").unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(&external);
+        assert_eq!(
+            app.state.active_buffer().unwrap().text(),
+            "one\n",
+            "the file was not opened by its absolute path"
+        );
+
+        std::fs::write(&external, "two\n").unwrap();
+        app.state
+            .handle_fs_event(ide_core::FsEvent::Changed(external.clone()));
+
+        assert_eq!(
+            app.state.active_buffer().unwrap().text(),
+            "two\n",
+            "a change to a file outside the project went unnoticed"
+        );
+        assert!(!app.state.active_buffer().unwrap().is_dirty());
+    }
+}

@@ -314,10 +314,13 @@ impl AppState {
             return;
         };
         let absolute = event.path().to_path_buf();
-        let Ok(rel_path) = absolute.strip_prefix(&root) else {
-            return;
+        // A file of the project is held under its path relative to the root; a file
+        // from outside it is held under its absolute path, and its own directory is
+        // watched so that the event arrives at all.
+        let rel = match absolute.strip_prefix(&root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => absolute.clone(),
         };
-        let rel = rel_path.to_path_buf();
         let Some(buffer_id) = self
             .tabs
             .items()
@@ -985,6 +988,16 @@ impl AppState {
                 let index = self.tabs.open(rel.to_path_buf(), buffer_id);
                 self.tabs.set_active(index);
                 self.status = display_name(rel);
+                // The project watch does not reach outside the root, so a file from
+                // another crate gets its own directory watched; otherwise the editor
+                // would show a stale copy forever.
+                if rel.is_absolute()
+                    && let (Some(watcher), Some(project)) =
+                        (self.watcher.as_mut(), self.project.as_ref())
+                    && !rel.starts_with(project.root())
+                {
+                    let _ = ide_core::watch_extra_file(watcher, rel);
+                }
             }
             Err(error) => self.status = format!("{error:#}"),
         }
@@ -1733,6 +1746,31 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// The label of one tab, with the tail of the path for a file outside the project.
+///
+/// Only used when two tabs would otherwise read the same; `tab_labels` decides.
+///
+/// Inside the project the file name is enough — the tree says where the file is. A
+/// file from outside it keeps the tail of its path instead: `mod.rs` appears in a
+/// dependency's every directory, and two tabs reading `mod.rs` tell the user nothing
+/// about which one they are looking at.
+pub fn tab_title(path: &Path, root: Option<&Path>) -> String {
+    if !path.is_absolute() || root.is_some_and(|root| path.starts_with(root)) {
+        return display_name(path);
+    }
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if parts.len() <= 3 {
+        return format!("/{}", parts.join("/"));
+    }
+    parts[parts.len() - 3..].join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2093,4 +2131,20 @@ mod zoom_tests {
         state.remember_zoom(0.01, 1.0);
         assert_eq!(state.config.font_size, MIN_ZOOM * DEFAULT_FONT_SIZE);
     }
+}
+
+/// The labels of the tab strip.
+///
+/// A file inside the project is named by its file name — the tree says where it is.
+/// Outside it, the name alone is often enough, but `mod.rs` lives in every directory
+/// of a dependency, so a name that two tabs share is replaced by the tail of the path.
+pub fn tab_labels(paths: &[PathBuf], root: Option<&Path>) -> Vec<String> {
+    let names: Vec<String> = paths.iter().map(|path| display_name(path)).collect();
+    let mut labels = names.clone();
+    for (index, name) in names.iter().enumerate() {
+        if names.iter().filter(|other| *other == name).count() > 1 {
+            labels[index] = tab_title(&paths[index], root);
+        }
+    }
+    labels
 }

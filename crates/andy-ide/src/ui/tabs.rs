@@ -6,17 +6,23 @@
 
 use egui::Ui;
 
-use crate::state::{Action, AppState, display_name};
+use crate::state::{Action, AppState};
 
 /// Draws one button per open file; the active one is highlighted and the dirty
 /// ones carry a bullet.
 pub fn strip(ui: &mut Ui, state: &mut AppState) {
-    let entries: Vec<(usize, String, bool)> = state
+    let root = state.project.as_ref().map(|project| project.root());
+    let paths: Vec<std::path::PathBuf> = state
         .tabs
         .items()
         .iter()
+        .map(|item| item.path.clone())
+        .collect();
+    let labels = crate::state::tab_labels(&paths, root);
+    let entries: Vec<(usize, String, bool)> = labels
+        .into_iter()
         .enumerate()
-        .map(|(index, item)| (index, display_name(&item.path), state.tabs.dirty(index)))
+        .map(|(index, label)| (index, label, state.tabs.dirty(index)))
         .collect();
 
     let active = state.tabs.active();

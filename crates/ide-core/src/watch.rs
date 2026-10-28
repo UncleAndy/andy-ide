@@ -94,6 +94,21 @@ fn is_ignored(path: &Path) -> bool {
     })
 }
 
+/// Watches one file that lives outside the project.
+///
+/// Files from other crates are opened now and then — a definition that points into
+/// the registry, a file from a sibling project. The project watch does not cover
+/// them, so their directory is watched as well, without recursion: the editor only
+/// cares about the file it shows.
+pub fn watch_extra_file(watcher: &mut ProjectWatcher, path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    watcher
+        .watch(parent, RecursiveMode::NonRecursive)
+        .with_context(|| format!("cannot watch {}", parent.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
