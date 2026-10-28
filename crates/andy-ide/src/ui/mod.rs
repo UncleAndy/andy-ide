@@ -2,6 +2,7 @@
 
 pub mod editor;
 pub mod preview;
+pub mod problems;
 pub mod prompt;
 pub mod quick_open;
 pub mod status;
@@ -51,7 +52,7 @@ impl TabViewer for Viewer<'_> {
         match tab {
             Tab::Projects => tree::panel(ui, self.state),
             Tab::Editor => editor::panel(ui, self.state),
-            Tab::Problems => placeholder(ui, "Diagnostics arrive with the language server (M2)."),
+            Tab::Problems => problems::panel(ui, self.state),
         }
     }
 
@@ -60,9 +61,4 @@ impl TabViewer for Viewer<'_> {
     fn is_closeable(&self, tab: &Tab) -> bool {
         !matches!(tab, Tab::Projects | Tab::Editor | Tab::Problems)
     }
-}
-
-fn placeholder(ui: &mut Ui, text: &str) {
-    ui.add_space(8.0);
-    ui.weak(text);
 }

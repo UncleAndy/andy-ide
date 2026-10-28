@@ -139,6 +139,24 @@ impl EditorBuffer {
         self.doc.line_col_to_char(line, col)
     }
 
+    /// The caret as a byte offset, for anything that speaks bytes.
+    pub fn caret_byte(&self) -> usize {
+        self.text
+            .char_indices()
+            .nth(self.caret())
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len())
+    }
+
+    /// Moves the caret to a byte offset, snapping to a character boundary.
+    pub fn set_caret_byte(&mut self, byte: usize) {
+        let mut byte = byte.min(self.text.len());
+        while byte > 0 && !self.text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        self.set_caret(self.text[..byte].chars().count());
+    }
+
     pub fn set_caret(&mut self, caret: usize) {
         self.cursor = Cursor::caret(caret.min(self.doc.len_chars()));
         self.goal_col = None;

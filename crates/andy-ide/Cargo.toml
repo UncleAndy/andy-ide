@@ -9,6 +9,8 @@ description = "The andy-ide application"
 
 [dependencies]
 ide-core = { path = "../ide-core" }
+ide-lsp = { path = "../ide-lsp" }
+lsp-types = "0.97"
 ide-buffer = { path = "../ide-buffer" }
 ide-syntax = { path = "../ide-syntax" }
 anyhow.workspace = true

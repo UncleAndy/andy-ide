@@ -2,6 +2,7 @@
 
 mod app;
 mod editor;
+mod lsp;
 mod state;
 mod ui;
 

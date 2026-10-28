@@ -16,6 +16,8 @@ use crate::editor::EditorBuffer;
 pub enum Action {
     /// Open (or focus) a file, path relative to the project root.
     OpenFile(PathBuf),
+    /// Open a file at a line (0-based), for diagnostics and navigation.
+    OpenFileAt(PathBuf, u32),
     /// Close the tab at this index, asking first when it has unsaved changes.
     CloseTab(usize),
     /// Close the tab at this index whatever it holds.
@@ -84,6 +86,14 @@ pub struct AppState {
     pub preview_open: bool,
     /// The quick-open field.
     pub quick_open: crate::ui::quick_open::QuickOpen,
+    /// The language server of the project, once one has been needed.
+    pub lsp: Option<crate::lsp::LanguageService>,
+    /// Server name for the status bar, or why there is none.
+    pub lsp_status: String,
+    /// When documents were last sent to the server, in input time.
+    pub last_sync: f64,
+    /// Diagnostics per file, as the problems panel shows them.
+    pub diagnostics: std::collections::BTreeMap<PathBuf, Vec<crate::lsp::DiagnosticLine>>,
     /// Layout cache of the Markdown preview.
     pub preview: crate::ui::preview::Preview,
     pub commonmark: egui_commonmark::CommonMarkCache,
@@ -130,6 +140,10 @@ impl AppState {
             quit_requested: false,
             preview_open: false,
             quick_open: crate::ui::quick_open::QuickOpen::new(),
+            lsp: None,
+            lsp_status: String::new(),
+            last_sync: 0.0,
+            diagnostics: std::collections::BTreeMap::new(),
             preview: crate::ui::preview::Preview::new(),
             commonmark: egui_commonmark::CommonMarkCache::default(),
             watcher: None,
@@ -504,6 +518,198 @@ impl AppState {
         }
     }
 
+    /// Starts the language server of the project once, if there is one installed.
+    ///
+    /// Called when a file is opened: a project of text files never pays for a
+    /// server, and the handshake happens on the worker thread anyway.
+    fn ensure_lsp(&mut self, rel: &Path) {
+        if self.lsp.is_some() || !self.lsp_status.is_empty() {
+            return;
+        }
+        let Some(server) = ide_lsp::server_for(rel) else {
+            self.lsp_status = format!("no language server for {}", display_name(rel));
+            return;
+        };
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            self.lsp_status = format!("{} is not installed", server.name);
+            return;
+        }
+        self.lsp_status = format!("{} starting", server.name);
+        self.lsp = Some(crate::lsp::LanguageService::start(server, &root));
+    }
+
+    /// Sends the current text of every open document that has unsaved edits.
+    pub fn sync_open_documents(&mut self) {
+        let Some(lsp) = self.lsp.as_ref() else {
+            return;
+        };
+        let jobs: Vec<crate::lsp::Job> = self
+            .tabs
+            .items()
+            .iter()
+            .filter_map(|item| {
+                let buffer = self.buffers.get(&item.buffer_id)?;
+                if !buffer.is_dirty() {
+                    return None;
+                }
+                Some(crate::lsp::Job::Change {
+                    path: item.path.clone(),
+                    text: buffer.text().to_owned(),
+                })
+            })
+            .collect();
+        for job in jobs {
+            lsp.send(job);
+        }
+    }
+
+    /// Asks the server where the symbol under the caret is defined.
+    ///
+    /// The server is started here rather than when a project opens: a project
+    /// of text files never pays for one, and a cold rust-analyzer costs a second
+    /// or two, which is why it happens on the worker thread while the editor
+    /// keeps drawing.
+    pub fn goto_definition(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            return;
+        };
+        let path = buffer.path.clone();
+        let position = ide_lsp::byte_to_position(buffer.text(), buffer.caret_byte());
+
+        self.ensure_lsp(&path);
+        if self.lsp.is_none() {
+            self.status = self.lsp_status.clone();
+            return;
+        }
+        // Whatever is already open has to be announced: the server was not
+        // there when those tabs were opened.
+        self.replay_documents();
+        if let Some(lsp) = self.lsp.as_ref() {
+            self.status = "looking for the definition...".to_owned();
+            lsp.send(crate::lsp::Job::Definition { path, position });
+        }
+    }
+
+    /// Tells the server about every open document that it can understand.
+    fn replay_documents(&mut self) {
+        let Some(lsp) = self.lsp.as_ref() else {
+            return;
+        };
+        let jobs: Vec<crate::lsp::Job> = self
+            .tabs
+            .items()
+            .iter()
+            .filter(|item| ide_lsp::server_for(&item.path).is_some())
+            .filter_map(|item| {
+                let buffer = self.buffers.get(&item.buffer_id)?;
+                Some(crate::lsp::Job::Open {
+                    path: item.path.clone(),
+                    text: buffer.text().to_owned(),
+                })
+            })
+            .collect();
+        for job in jobs {
+            lsp.send(job);
+        }
+    }
+
+    /// Takes what the language server answered since the last frame.
+    pub fn poll_lsp(&mut self) {
+        let Some(lsp) = self.lsp.as_ref() else {
+            return;
+        };
+        let outcomes = lsp.poll();
+        for outcome in outcomes {
+            self.apply_outcome(outcome);
+        }
+    }
+
+    pub(crate) fn apply_outcome(&mut self, outcome: crate::lsp::Outcome) {
+        match outcome {
+            crate::lsp::Outcome::Failed(message) => self.status = message,
+            crate::lsp::Outcome::NoDefinition { from } => {
+                self.status = format!("no definition for the symbol in {}", display_name(&from));
+            }
+            crate::lsp::Outcome::Definitions { from, locations } => {
+                let Some(first) = locations.first() else {
+                    return;
+                };
+                let Some(absolute) = ide_lsp::uri_to_path(&first.uri) else {
+                    self.status = "the definition is not a file".to_owned();
+                    return;
+                };
+                let root = self
+                    .project
+                    .as_ref()
+                    .map(|project| project.root().to_path_buf());
+                let rel = root
+                    .as_ref()
+                    .and_then(|root| absolute.strip_prefix(root).ok())
+                    .map(Path::to_path_buf);
+                let Some(rel) = rel else {
+                    self.status = format!("{} is outside the project", absolute.display());
+                    return;
+                };
+                let text = std::fs::read_to_string(&absolute).unwrap_or_default();
+                let byte = ide_lsp::position_to_byte(&text, first.range.start);
+                self.open_file(&rel);
+                self.place_caret(&rel, byte);
+                self.status = if locations.len() > 1 {
+                    format!(
+                        "{} definitions, jumped to {}:{}",
+                        locations.len(),
+                        display_name(&rel),
+                        first.range.start.line + 1
+                    )
+                } else {
+                    format!(
+                        "{}:{}:{}",
+                        display_name(&rel),
+                        first.range.start.line + 1,
+                        first.range.start.character + 1
+                    )
+                };
+                let _ = from;
+            }
+            crate::lsp::Outcome::Diagnostics { path, lines } => {
+                let rel = self
+                    .project
+                    .as_ref()
+                    .and_then(|project| path.strip_prefix(project.root()).ok())
+                    .map(Path::to_path_buf)
+                    .unwrap_or(path);
+                if lines.is_empty() {
+                    self.diagnostics.remove(&rel);
+                } else {
+                    self.diagnostics.insert(rel, lines);
+                }
+            }
+        }
+    }
+
+    /// Puts the caret at a byte offset of a tab, opening it first if needed.
+    fn place_caret(&mut self, rel: &Path, byte: usize) {
+        let Some(buffer_id) = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == rel)
+            .map(|item| item.buffer_id)
+        else {
+            return;
+        };
+        if let Some(buffer) = self.buffers.get_mut(&buffer_id) {
+            buffer.set_caret_byte(byte);
+        }
+    }
+
     /// The buffer of the active tab.
     pub fn active_buffer(&self) -> Option<&EditorBuffer> {
         let index = self.tabs.active()?;
@@ -601,11 +807,18 @@ impl AppState {
 
     /// Closes a tab whatever it holds.
     pub fn force_close_tab(&mut self, index: usize) {
-        let buffer_id = self.tabs.items().get(index).map(|item| item.buffer_id);
+        let item = self.tabs.items().get(index).map(|item| item.buffer_id);
+        let path = self.tabs.items().get(index).map(|item| item.path.clone());
         self.prompt = None;
         if self.tabs.close(index) {
-            if let Some(buffer_id) = buffer_id {
+            if let Some(buffer_id) = item {
                 self.buffers.remove(&buffer_id);
+            }
+            // The server stops tracking a file the editor no longer shows.
+            if let (Some(lsp), Some(path)) = (self.lsp.as_ref(), path)
+                && ide_lsp::server_for(&path).is_some()
+            {
+                lsp.send(crate::lsp::Job::Close { path });
             }
             self.status = format!("{} tabs", self.tabs.len());
         }
@@ -647,6 +860,20 @@ impl AppState {
         for action in std::mem::take(&mut self.pending) {
             match action {
                 Action::OpenFile(rel) => self.open_file(&rel),
+                Action::OpenFileAt(rel, line) => {
+                    self.open_file(&rel);
+                    let byte = self
+                        .active_buffer()
+                        .map(|buffer| {
+                            buffer
+                                .line_starts()
+                                .get(line as usize)
+                                .copied()
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0);
+                    self.place_caret(&rel, byte);
+                }
                 Action::CloseTab(index) => self.close_tab(index),
                 Action::ForceCloseTab(index) => self.force_close_tab(index),
                 Action::SaveAndCloseTab(index) => {

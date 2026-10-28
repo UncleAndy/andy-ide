@@ -47,7 +47,7 @@ fn rust_analyzer_answers_a_definition() {
     session.did_open(relative, SOURCE).expect("didOpen");
 
     // The call of `helper()` on line 5, at the `helper` identifier.
-    let call = SOURCE.find("helper()").expect("the call") + 2;
+    let call = SOURCE.rfind("helper()").expect("the call");
     let position = ide_lsp::byte_to_position(SOURCE, call);
 
     // rust-analyzer answers once it has loaded the crate; it may need a while.

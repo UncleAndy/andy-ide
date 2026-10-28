@@ -112,6 +112,14 @@ impl App {
         self.state.apply_pending();
         self.handle_keys(ui);
         self.state.poll_fs_events();
+        self.state.poll_lsp();
+        // Only documents with unsaved edits need telling, and not on every
+        // keystroke: the server reads the file from disk otherwise.
+        let now = ui.ctx().input(|input| input.time);
+        if now - self.state.last_sync > 0.3 {
+            self.state.last_sync = now;
+            self.state.sync_open_documents();
+        }
         // Quick-open and the prompts are modals: they sit above the dock.
         let picked = {
             let index = self.state.index.as_ref();
@@ -127,7 +135,6 @@ impl App {
 
         self.frames += 1;
         self.state.poll_index();
-        let now = ui.ctx().input(|input| input.time);
         let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
         if self.state.quit_requested {
             // The user answered the question already: let the window go.
@@ -193,6 +200,14 @@ impl App {
         }
         if close_pressed && let Some(index) = self.state.tabs.active() {
             self.state.close_tab(index);
+        }
+        // F12 is the usual "go to definition" everywhere else, and it is a bare
+        // key, so it is read from the events rather than as a shortcut.
+        let f12 = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F12));
+        if f12 {
+            self.state.goto_definition();
         }
     }
 }
@@ -2006,5 +2021,238 @@ mod quick_open_and_theme_tests {
             .map(|item| item.path.clone())
             .collect();
         assert_eq!(open, vec![std::path::PathBuf::from("here.rs")]);
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    use crate::lsp::Outcome;
+    use lsp_types::{Location, Position, Range};
+
+    fn project(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = project.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, text).unwrap();
+        }
+        let app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        (project, config, app)
+    }
+
+    #[test]
+    fn f12_in_a_file_no_server_understands_explains_itself() {
+        let (_project, _config, mut app) = project(&[("notes.txt", "just text\n")]);
+        app.state.open_file(std::path::Path::new("notes.txt"));
+        app.state.goto_definition();
+        assert_eq!(app.state.lsp_status, "no language server for notes.txt");
+        assert_eq!(app.state.status, "no language server for notes.txt");
+        assert!(app.state.lsp.is_none(), "no server was started");
+    }
+
+    #[test]
+    fn a_definition_opens_its_file_at_the_right_line() {
+        let (project, _config, mut app) = project(&[
+            ("a.rs", "fn a() {}\n"),
+            ("b/c.rs", "one\ntwo\nthree\nfour\n"),
+        ]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        let target = project.path().join("b/c.rs");
+        let uri = ide_lsp::path_to_uri(&target).expect("a file uri");
+        app.state.apply_outcome(Outcome::Definitions {
+            from: std::path::PathBuf::from("a.rs"),
+            locations: vec![Location {
+                uri,
+                range: Range {
+                    start: Position {
+                        line: 2,
+                        character: 3,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 8,
+                    },
+                },
+            }],
+        });
+
+        let path = app.state.tabs.items()[app.state.tabs.active().unwrap()]
+            .path
+            .clone();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("b/c.rs"),
+            "the target opened"
+        );
+        let buffer = app.state.active_buffer().expect("a buffer");
+        assert_eq!(buffer.line_col(), (2, 3), "the caret is at the definition");
+        assert_eq!(buffer.line_text(2), "three");
+    }
+
+    #[test]
+    fn a_definition_outside_the_project_is_reported_not_opened() {
+        let (project, _config, mut app) = project(&[("a.rs", "fn a() {}\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        let outside = tempfile::tempdir().unwrap();
+        let uri = ide_lsp::path_to_uri(&outside.path().join("other.rs")).unwrap();
+        app.state.apply_outcome(Outcome::Definitions {
+            from: project.path().join("a.rs"),
+            locations: vec![Location {
+                uri,
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+            }],
+        });
+
+        assert!(
+            app.state.status.contains("outside the project"),
+            "{}",
+            app.state.status
+        );
+        assert_eq!(
+            app.state.tabs.items().len(),
+            1,
+            "no tab was opened for a file outside the project"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_kept_per_file_and_cleared_when_the_server_is_quiet() {
+        let (project, _config, mut app) = project(&[("a.rs", "fn a() {}\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+        let absolute = project.path().join("a.rs");
+        let uri = ide_lsp::path_to_uri(&absolute).unwrap();
+
+        app.state.apply_outcome(Outcome::Diagnostics {
+            path: ide_lsp::uri_to_path(&uri).unwrap(),
+            lines: vec![crate::lsp::DiagnosticLine {
+                line: 2,
+                message: "unused variable".to_owned(),
+            }],
+        });
+        assert_eq!(app.state.diagnostics.len(), 1);
+        let (path, lines) = app.state.diagnostics.iter().next().unwrap();
+        assert_eq!(path, &std::path::PathBuf::from("a.rs"), "stored relative");
+        assert_eq!(lines[0].line, 2);
+
+        app.state.apply_outcome(Outcome::Diagnostics {
+            path: ide_lsp::uri_to_path(&uri).unwrap(),
+            lines: Vec::new(),
+        });
+        assert!(app.state.diagnostics.is_empty(), "a quiet file is dropped");
+    }
+
+    #[test]
+    fn a_failed_server_is_a_status_line_not_a_crash() {
+        let (_project, _config, mut app) = project(&[("a.rs", "fn a() {}\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state.apply_outcome(Outcome::Failed(
+            "rust-analyzer did not start: not found".to_owned(),
+        ));
+        assert!(app.state.status.contains("did not start"));
+        assert_eq!(app.state.active_buffer().unwrap().line_col(), (0, 0));
+    }
+}
+
+/// The whole chain with the real server: a caret in the editor, F12, the worker
+/// thread, rust-analyzer, and the answer opening the file at the declaration.
+///
+/// It needs `rust-analyzer` installed and a minute of patience on a cold start;
+/// without the server the check says so and passes, because the editor must not
+/// depend on one.
+#[cfg(test)]
+mod real_navigation_tests {
+    use super::*;
+
+    const SOURCE: &str = "fn helper() -> u8 {\n    7\n}\n\nfn main() {\n    let value = helper();\n    println!(\"{value}\");\n}\n";
+
+    #[test]
+    fn f12_finds_the_definition_with_rust_analyzer() {
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/main.rs")) else {
+            println!("no server is known for Rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), SOURCE).unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/main.rs"));
+
+        let call = SOURCE.rfind("helper()").expect("the call");
+        let buffer = app.state.buffers.values_mut().next().expect("a buffer");
+        buffer.set_caret_byte(call);
+        assert_eq!(buffer.line_col(), (5, 16), "the caret is on the call");
+        assert!(buffer.line_text(5).trim_start().starts_with("let value"));
+
+        app.state.goto_definition();
+        assert!(
+            app.state.lsp.is_some(),
+            "the server started: {}",
+            app.state.lsp_status
+        );
+
+        // A cold server may answer nothing at first; the worker retries by itself,
+        // but the editor also has to be patient here.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            app.state.poll_lsp();
+            let at_definition = app
+                .state
+                .active_buffer()
+                .map(|buffer| buffer.line_col() == (0, 3))
+                .unwrap_or(false);
+            if at_definition || std::time::Instant::now() > deadline {
+                break;
+            }
+            if !app.state.status.contains("looking for") {
+                // Nothing found on this attempt: ask again until the deadline.
+                app.state.goto_definition();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        let buffer = app.state.active_buffer().expect("a buffer");
+        assert_eq!(
+            buffer.line_col(),
+            (0, 3),
+            "the caret is on the declaration of `helper` (status: {})",
+            app.state.status
+        );
+        assert!(buffer.line_text(0).starts_with("fn helper"));
+        app.state.lsp.take();
     }
 }
