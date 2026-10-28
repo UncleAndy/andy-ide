@@ -71,6 +71,12 @@ Checks:
 nix develop --command bash -c 'cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check'
 ```
 
+The window itself is testable without a display: `crates/andy-ide/src/gui_tests.rs` runs the
+real `App` through `egui_kittest`, finds panels and buttons by their labels, clicks
+them, types into the editor and reads back what the application did. Editor and preview
+text is painted rather than built from widgets, so those are checked through the buffer
+and the state instead.
+
 ## Layout
 
 ```
