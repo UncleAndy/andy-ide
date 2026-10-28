@@ -68,7 +68,8 @@ cargo run -p andy-ide -- --project ~/projects/RUST/andy-ide
 Started without `--project`, the editor opens the project that was open last, and
 skips the remembered ones whose directory is gone. `Ctrl`+`+`, `Ctrl`+`-` and
 `Ctrl`+`0` zoom the whole interface, and the size is kept in the `font_size` of
-`~/.config/andy-ide/config.toml`, so the next launch opens at the same scale.
+`~/.config/andy-ide/config.toml`, so the next launch opens at the same scale. A
+window that was maximized comes back maximized: that flag lives in the same file.
 
 Build artifacts go to `$HOME/.cache/andy-ide-target`, never into the repository.
 

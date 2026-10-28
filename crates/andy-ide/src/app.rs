@@ -95,6 +95,11 @@ impl App {
         if let Some(wait) = self.state.remember_zoom(ui.ctx().zoom_factor(), now) {
             ui.ctx().request_repaint_after(wait);
         }
+        // The window manager says whether the window is maximized; the next launch
+        // asks the backend for the same, so a maximized window comes back
+        // maximized.
+        self.state
+            .remember_window(ui.input(|input| input.viewport().maximized));
 
         egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state));
         egui::Panel::bottom("status_bar").show(ui, |ui| {

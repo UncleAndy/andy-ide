@@ -32,6 +32,8 @@ pub struct Config {
     pub font_size: f32,
     pub tab_width: u8,
     pub show_hidden: bool,
+    /// Open the window maximized, as it was when it was last closed.
+    pub window_maximized: bool,
     /// Keys this version does not know about, kept verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -44,6 +46,7 @@ impl Default for Config {
             font_size: 14.0,
             tab_width: 4,
             show_hidden: false,
+            window_maximized: false,
             extra: BTreeMap::new(),
         }
     }

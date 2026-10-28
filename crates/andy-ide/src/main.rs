@@ -35,6 +35,21 @@ impl Args {
     }
 }
 
+/// The window the native backend is asked for.
+///
+/// Whether it opens maximized is read from the configuration before the window
+/// exists: the window manager has to know on the first frame, and asking for it
+/// afterwards means the window is seen at its old size first.
+fn options(config: &ide_core::Config) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_title("andy-ide")
+            .with_maximized(config.window_maximized),
+        ..Default::default()
+    }
+}
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -49,12 +64,8 @@ fn main() -> eframe::Result<()> {
         "starting andy-ide"
     );
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_title("andy-ide"),
-        ..Default::default()
-    };
+    let config = ide_core::Config::load_or_default(&state::config_dir().join("config.toml"));
+    let options = options(&config);
 
     eframe::run_native(
         "Andy IDE",
@@ -70,8 +81,25 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::{Args, options};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_window_opens_the_way_it_was_left() {
+        let mut config = ide_core::Config::default();
+        assert_eq!(
+            options(&config).viewport.maximized,
+            Some(false),
+            "a fresh install opens in a window"
+        );
+
+        config.window_maximized = true;
+        assert_eq!(
+            options(&config).viewport.maximized,
+            Some(true),
+            "the window was left maximized and the backend was not told"
+        );
+    }
 
     #[test]
     fn parses_project_and_file() {

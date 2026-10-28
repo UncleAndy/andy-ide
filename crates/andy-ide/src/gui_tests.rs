@@ -1350,3 +1350,80 @@ mod a_zoom_written_on_the_way_out {
         );
     }
 }
+
+/// A maximized window has to come back maximized.
+mod the_maximized_window {
+    use super::*;
+
+    fn config_text(config: &Path) -> String {
+        std::fs::read_to_string(config.join("config.toml")).unwrap_or_default()
+    }
+
+    /// Says what the window manager says about the window.
+    fn maximized(gui: &mut Gui, maximized: bool) {
+        gui.harness.input_mut().viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                maximized: Some(maximized),
+                ..Default::default()
+            },
+        );
+        gui.harness.step();
+    }
+
+    #[test]
+    fn maximizing_the_window_is_remembered_at_once() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[], None);
+        assert!(!gui.app().state.config.window_maximized);
+
+        maximized(&mut gui, true);
+
+        assert!(
+            gui.app().state.config.window_maximized,
+            "the window did not notice it was maximized"
+        );
+        assert!(
+            config_text(config.path()).contains("window_maximized = true"),
+            "the state was not written: {}",
+            config_text(config.path())
+        );
+    }
+
+    #[test]
+    fn restoring_the_window_is_remembered_too() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[], None);
+        maximized(&mut gui, true);
+        maximized(&mut gui, false);
+
+        assert!(!gui.app().state.config.window_maximized);
+        assert!(
+            config_text(config.path()).contains("window_maximized = false"),
+            "restoring was not written: {}",
+            config_text(config.path())
+        );
+    }
+
+    #[test]
+    fn a_backend_that_does_not_say_leaves_the_value_alone() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[], None);
+        maximized(&mut gui, true);
+
+        // `maximized: None` is what a backend that cannot tell reports.
+        gui.harness.input_mut().viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                maximized: None,
+                ..Default::default()
+            },
+        );
+        gui.harness.step();
+
+        assert!(
+            gui.app().state.config.window_maximized,
+            "silence from the window manager was taken for a restored window"
+        );
+    }
+}

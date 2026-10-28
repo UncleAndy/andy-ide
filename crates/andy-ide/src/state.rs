@@ -404,8 +404,25 @@ impl AppState {
             return Some(std::time::Duration::from_secs_f64(left));
         }
         self.save_config();
-        self.saved_font_size = self.config.font_size;
         None
+    }
+
+    /// Remembers whether the window is maximized.
+    ///
+    /// The window manager reports the state every frame and it changes only when
+    /// the user maximizes or restores the window, so a change is written at once:
+    /// there is nothing to debounce, and a size nobody wrote would be lost if the
+    /// editor did not get a chance to close properly. `None` means this backend
+    /// does not tell, and then the remembered value is left alone.
+    pub fn remember_window(&mut self, maximized: Option<bool>) {
+        let Some(maximized) = maximized else {
+            return;
+        };
+        if self.config.window_maximized == maximized {
+            return;
+        }
+        self.config.window_maximized = maximized;
+        self.save_config();
     }
 
     /// Writes a zoom that is still waiting for its delay.
@@ -415,15 +432,16 @@ impl AppState {
     pub fn flush_zoom(&mut self) {
         if self.config.font_size != self.saved_font_size {
             self.save_config();
-            self.saved_font_size = self.config.font_size;
         }
     }
 
     /// Writes the configuration back, so a theme change survives a restart.
     pub fn save_config(&mut self) {
         let path = self.config_dir.join("config.toml");
-        if let Err(error) = self.config.save(&path) {
-            self.status = format!("cannot save config: {error}");
+        match self.config.save(&path) {
+            // The file now holds the zoom as well, so a pending write is done.
+            Ok(()) => self.saved_font_size = self.config.font_size,
+            Err(error) => self.status = format!("cannot save config: {error}"),
         }
     }
 
