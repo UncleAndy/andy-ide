@@ -22,6 +22,8 @@ eframe = "0.36.2"
 egui = "0.36.2"
 egui_dock = { version = "0.21.1", features = ["serde"] }
 egui_commonmark = { version = "0.25", default-features = false }
+ide-term = { version = "0.1.0", path = "../ide-term" }
+vt100 = "0.18"
 
 [dev-dependencies]
 egui_kittest = "0.36"

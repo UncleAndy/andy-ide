@@ -1737,3 +1737,32 @@ mod the_external_tab {
         }
     }
 }
+
+/// The terminal tab in the strip.
+mod the_terminal_tab {
+    use super::*;
+
+    #[test]
+    fn the_terminal_tab_is_in_the_layout_and_really_starts() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab is in the layout");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(
+            gui.app().state.terminal.error,
+            None,
+            "the tab drew but no shell started"
+        );
+        assert!(
+            gui.app().state.terminal.is_alive(),
+            "the shell behind the tab is not running"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}

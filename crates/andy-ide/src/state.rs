@@ -109,6 +109,8 @@ pub struct AppState {
     pub symbols: crate::ui::symbols::SymbolSearch,
     pub hover: crate::ui::hover::Hover,
     pub rename: crate::ui::rename::Rename,
+    /// The terminal tab: a shell on a pseudo-terminal.
+    pub terminal: crate::ui::terminal::Terminal,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -176,6 +178,7 @@ impl AppState {
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
             rename: crate::ui::rename::Rename::new(),
+            terminal: crate::ui::terminal::Terminal::new(),
             lsp: None,
             lsp_status: String::new(),
             highlight_key: None,

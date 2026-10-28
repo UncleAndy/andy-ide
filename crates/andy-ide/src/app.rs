@@ -14,7 +14,7 @@ const LAYOUT_SERIALIZE_SECS: f64 = 0.5;
 /// The window's contents.
 pub struct App {
     pub(crate) state: AppState,
-    dock: DockState<Tab>,
+    pub(crate) dock: DockState<Tab>,
     zoom_applied: bool,
     /// Frames drawn so far; the dock has no real rectangles before the first one.
     frames: u32,
@@ -34,10 +34,12 @@ impl App {
         file: Option<PathBuf>,
     ) -> Self {
         let state = AppState::with_config_dir(config_dir, project, file);
-        let dock = state
-            .stored_layout()
-            .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
-            .unwrap_or_else(default_layout);
+        let dock = with_terminal(
+            state
+                .stored_layout()
+                .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
+                .unwrap_or_else(default_layout),
+        );
         Self {
             state,
             dock,
@@ -67,6 +69,30 @@ fn default_layout() -> DockState<Tab> {
         0.72,
         Node::leaf(Tab::Problems),
     );
+    with_terminal(dock)
+}
+
+/// Puts the terminal beside the problems in the bottom leaf.
+///
+/// A layout saved by an older version has no terminal tab, so the tab is added when it
+/// is missing rather than staying invisible until the layout is thrown away.
+fn with_terminal(mut dock: DockState<Tab>) -> DockState<Tab> {
+    if dock.find_tab(&Tab::Terminal).is_some() {
+        return dock;
+    }
+    match dock.find_tab(&Tab::Problems) {
+        Some(path) => {
+            // Beside the problems, not on top of them: a user who never asked for a
+            // terminal still sees the panel that was there.
+            dock.split(
+                path.node_path(),
+                Split::Right,
+                0.5,
+                Node::leaf(Tab::Terminal),
+            );
+        }
+        None => dock.push_to_first_leaf(Tab::Terminal),
+    }
     dock
 }
 
@@ -383,10 +409,15 @@ mod tests {
     fn default_layout_holds_the_three_panels() {
         let dock = default_layout();
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(tabs.len(), 3);
+        assert_eq!(
+            tabs.len(),
+            4,
+            "the terminal is part of the layout: {tabs:?}"
+        );
         assert!(tabs.contains(&Tab::Projects));
         assert!(tabs.contains(&Tab::Editor));
         assert!(tabs.contains(&Tab::Problems));
+        assert!(tabs.contains(&Tab::Terminal));
     }
 
     #[test]
@@ -718,7 +749,7 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 3);
+        assert_eq!(back.iter_all_tabs().count(), 4);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
@@ -741,7 +772,7 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 3);
+        assert_eq!(restored.dock.iter_all_tabs().count(), 4);
         assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
     }
 
@@ -760,7 +791,7 @@ mod layout_persistence_tests {
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 3);
+        assert_eq!(app.dock.iter_all_tabs().count(), 4);
     }
 }
 
@@ -3565,5 +3596,35 @@ mod external_files {
             "a change to a file outside the project went unnoticed"
         );
         assert!(!app.state.active_buffer().unwrap().is_dirty());
+    }
+}
+
+/// The terminal tab: a real shell behind it.
+#[cfg(test)]
+mod the_terminal {
+    use std::time::{Duration, Instant};
+
+    fn wait_for(terminal: &crate::ui::terminal::Terminal, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if terminal.contents().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn the_tab_runs_a_shell_and_shows_what_it_prints() {
+        let mut terminal = crate::ui::terminal::Terminal::new();
+        terminal.ensure_started(80, 24);
+        assert_eq!(terminal.error, None, "the shell did not start");
+        terminal.write(b"echo terminal-ok\n").unwrap();
+        assert!(
+            wait_for(&terminal, "terminal-ok"),
+            "the shell's answer is not on the screen: {:?}",
+            terminal.contents()
+        );
     }
 }

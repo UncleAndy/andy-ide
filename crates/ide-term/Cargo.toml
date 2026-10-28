@@ -8,3 +8,6 @@ repository.workspace = true
 description = "PTY sessions and terminal screen emulation"
 
 [dependencies]
+anyhow = "1"
+portable-pty = "0.9"
+vt100 = "0.18"

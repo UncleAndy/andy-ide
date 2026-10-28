@@ -11,6 +11,7 @@ pub mod results;
 pub mod status;
 pub mod symbols;
 pub mod tabs;
+pub mod terminal;
 pub mod tree;
 
 use egui::{Id, Ui, WidgetText};
@@ -24,6 +25,7 @@ pub enum Tab {
     Projects,
     Editor,
     Problems,
+    Terminal,
 }
 
 impl Tab {
@@ -32,6 +34,7 @@ impl Tab {
             Tab::Projects => "Projects",
             Tab::Editor => "Editor",
             Tab::Problems => "Problems",
+            Tab::Terminal => "Terminal",
         }
     }
 }
@@ -57,12 +60,16 @@ impl TabViewer for Viewer<'_> {
             Tab::Projects => tree::panel(ui, self.state),
             Tab::Editor => editor::panel(ui, self.state),
             Tab::Problems => problems::panel(ui, self.state),
+            Tab::Terminal => self.state.terminal.show(ui),
         }
     }
 
     /// The three fixed panels are part of the layout; only the editor tab is a
     /// real document and could be closed.
     fn is_closeable(&self, tab: &Tab) -> bool {
-        !matches!(tab, Tab::Projects | Tab::Editor | Tab::Problems)
+        !matches!(
+            tab,
+            Tab::Projects | Tab::Editor | Tab::Problems | Tab::Terminal
+        )
     }
 }
