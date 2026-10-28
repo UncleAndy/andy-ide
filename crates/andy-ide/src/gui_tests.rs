@@ -4087,6 +4087,108 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_keyboard_stays_in_the_field_after_a_message_is_sent() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        let before = gui.app().state.active_buffer().unwrap().text().to_owned();
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::TextInput);
+        fields.last().expect("the message field").click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("one".to_owned()));
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        // The next thing typed, with no click in between, is a message and not code.
+        gui.harness.event(egui::Event::Text("next".to_owned()));
+        gui.settle();
+        assert_eq!(
+            gui.app().state.agent.input,
+            "next",
+            "the field lost the keyboard after sending: focus={:?} editor={:?} status={:?}",
+            gui.harness.ctx.memory(|memory| memory.focused()),
+            gui.app()
+                .state
+                .active_buffer()
+                .map(|buffer| buffer.text().to_owned()),
+            gui.app().state.agent.status
+        );
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().text(),
+            before,
+            "the next message was typed into the file"
+        );
+
+        // The keyboard is still the field's own: nothing else has taken it between the
+        // send and now.
+        assert_eq!(
+            gui.harness.ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("agent-message")),
+            "the field does not hold the keyboard after sending"
+        );
+    }
+
+    #[test]
+    fn a_message_typed_mid_answer_is_queued_and_then_sent() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "slow".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        gui.settle();
+        assert!(gui.app().state.agent.busy, "the agent is not answering yet");
+
+        // Written while the answer is still coming: kept, and the field keeps the keys.
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::TextInput);
+        fields.last().expect("the message field").click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("next".to_owned()));
+        gui.settle();
+        assert_eq!(gui.app().state.agent.input, "next");
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        assert!(
+            gui.app().state.agent.status.contains("queued"),
+            "the message was not queued: {:?}",
+            gui.app().state.agent.status
+        );
+
+        // And it goes out by itself when the answer ends — nobody has to press Enter twice.
+        wait(&mut gui, "the queued message going out", |gui| {
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .any(|line| matches!(line, crate::agent::Line::You(text) if text == "next"))
+        });
+    }
+
+    #[test]
     fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");

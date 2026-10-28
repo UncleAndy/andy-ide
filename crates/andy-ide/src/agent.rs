@@ -63,6 +63,10 @@ pub struct AgentState {
     pub transcript: Vec<Line>,
     /// What is being typed.
     pub input: String,
+    /// What was typed while the agent was still answering, to send when the turn ends.
+    pub queued: Option<String>,
+    /// Whether the field is asking for the keyboard back after a send.
+    pub wants_focus: bool,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
     /// What the panel is doing, in one line.
@@ -194,7 +198,12 @@ impl AgentState {
             return;
         };
         if self.busy {
-            self.status = "the agent is still answering".to_owned();
+            // Typed while the answer is still coming: kept, not refused. The field is
+            // where a person writes, and a field that disables itself mid-sentence is
+            // one that hands the keyboard to whatever else wants it.
+            self.queued = Some(text);
+            self.input.clear();
+            self.status = "queued: sent when this answer ends".to_owned();
             return;
         }
         if worker.commands.send(Command::Prompt(text.clone())).is_err() {
@@ -302,6 +311,10 @@ impl AgentState {
                 AgentEvent::Finished(reason) => {
                     self.busy = false;
                     self.status = reason.clone();
+                    if let Some(queued) = self.queued.take() {
+                        self.input = queued;
+                        self.send();
+                    }
                 }
                 AgentEvent::Closed => {
                     self.busy = false;

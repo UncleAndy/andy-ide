@@ -168,14 +168,20 @@ fn question(ui: &mut Ui, state: &mut AppState) {
 /// The field, and the button that sends it.
 fn input(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
-        let busy = state.agent.busy || !state.agent.running();
+        // The field stays open while the agent answers: a message typed mid-answer is
+        // queued, and the keyboard stays where the person is writing. It is closed only
+        // when there is no agent to talk to.
+        let busy = !state.agent.running();
         // The field stops short of the button: a field that takes the whole width pushes
         // the button out of the panel, and a button nobody can see is a button nobody
         // can press.
         let width = (ui.available_width() - 90.0).max(80.0);
+        // A name of its own, so the keyboard can be asked back for it after a send.
+        let id = egui::Id::new("agent-message");
         let response = ui.add_enabled(
             !busy,
             egui::TextEdit::singleline(&mut state.agent.input)
+                .id(id)
                 .hint_text("Ask the agent…")
                 .desired_width(width),
         );
@@ -185,8 +191,30 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         if sent {
             state.agent.send();
         }
-        if ui.add_enabled(!busy, egui::Button::new("Send")).clicked() {
+        let pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
+        if pressed {
             state.agent.send();
+        }
+        // Sending is not leaving the field. Enter gives the focus up as it commits, and a
+        // click puts it on the button; either way the editor is the next thing that finds
+        // the keyboard free and takes it, and the next message is typed into a file.
+        if sent || pressed {
+            state.agent.wants_focus = true;
+        }
+        // Asked for on every frame until it is held, not once: a request is not the
+        // keyboard, and a panel drawn later in the same frame asks louder.
+        if state.agent.wants_focus {
+            if response.has_focus() {
+                state.agent.wants_focus = false;
+            } else {
+                response.request_focus();
+                ui.ctx().request_repaint();
+            }
+        }
+        // A click anywhere else means the person has left the field, and is obeyed at
+        // once: the field does not hold the keyboard against a click.
+        if ui.input(|input| input.pointer.any_click()) && !response.has_focus() {
+            state.agent.wants_focus = false;
         }
     });
 }
