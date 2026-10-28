@@ -69,7 +69,11 @@ file when its line is clicked; a project that is not a repository says so instea
 showing an empty list. A single click selects a change, a double click opens the file,
 and `Enter` shows its diff in the `Diff` tab beside it — both sides read where they
 live, `HEAD`'s tree and the index as objects, the work tree as a file, so looking at a
-diff cannot disturb the work in progress.
+diff cannot disturb the work in progress. `Stage`, `Unstage` and `Stage all` move
+changes into the index and `Commit` writes them with the message in the field. Reading
+is native; writing is the real `git`, so hooks, signing and commit templates behave
+exactly as they do on the command line, and a hook's refusal is shown in its own
+words.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).

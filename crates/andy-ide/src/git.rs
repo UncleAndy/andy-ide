@@ -29,6 +29,10 @@ pub struct GitState {
     pub show_diff: bool,
     /// What went wrong on the last read, if anything.
     pub error: Option<String>,
+    /// The message being written for the next commit.
+    pub message: String,
+    /// What `git` said about the last change it was asked to make.
+    pub outcome: Option<String>,
     /// The root this state belongs to, so a second project re-opens it.
     root: Option<std::path::PathBuf>,
     last_read: Option<Instant>,
@@ -127,5 +131,69 @@ impl GitState {
     /// The branch name to put in the title, when there is one.
     pub fn branch(&self) -> Option<String> {
         self.repo.as_ref().map(Repo::head_label)
+    }
+
+    /// Puts the selected change into the index.
+    pub fn stage_selected(&mut self) {
+        let Some(path) = self.selected_change().map(|change| change.path.clone()) else {
+            return;
+        };
+        self.apply(|repo| repo.stage(&path), "staged");
+    }
+
+    /// Takes the selected change out of the index again.
+    pub fn unstage_selected(&mut self) {
+        let Some(path) = self.selected_change().map(|change| change.path.clone()) else {
+            return;
+        };
+        self.apply(|repo| repo.unstage(&path), "unstaged");
+    }
+
+    /// Puts every change into the index.
+    pub fn stage_all(&mut self) {
+        self.apply(|repo| repo.stage_all(), "staged everything");
+    }
+
+    /// Commits the index with the message in the field.
+    pub fn commit(&mut self) {
+        let message = self.message.clone();
+        let outcome = self.apply(|repo| repo.commit(&message), "committed");
+        if outcome {
+            self.message.clear();
+            self.diff = None;
+            self.selected = None;
+        }
+    }
+
+    /// Runs one operation, re-reads the repository whatever happened, and keeps what
+    /// `git` said.
+    ///
+    /// The re-read is unconditional on purpose: a refused commit still may have
+    /// changed the index (a hook that formats files, for instance), and a panel that
+    /// showed the state from before would be lying about what is staged.
+    fn apply(
+        &mut self,
+        operation: impl FnOnce(&Repo) -> anyhow::Result<String>,
+        done: &str,
+    ) -> bool {
+        let Some(repo) = &self.repo else {
+            return false;
+        };
+        let result = operation(repo);
+        self.refresh(true);
+        match result {
+            Ok(said) => {
+                self.outcome = Some(if said.trim().is_empty() {
+                    format!("{done}.")
+                } else {
+                    said.trim().to_owned()
+                });
+                true
+            }
+            Err(error) => {
+                self.outcome = Some(format!("{error}"));
+                false
+            }
+        }
     }
 }

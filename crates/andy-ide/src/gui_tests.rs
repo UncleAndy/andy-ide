@@ -3043,20 +3043,13 @@ mod the_git_panel {
     }
 
     fn commit_all(root: &Path, message: &str) {
+        // The panel commits with plain `git commit`, which reads the identity from the
+        // repository's config: a temp directory has none of its own, and a developer's
+        // machine does.
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "user.email", "test@example.com"]);
         git(root, &["add", "-A"]);
-        git(
-            root,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-q",
-                "-m",
-                message,
-            ],
-        );
+        git(root, &["commit", "-q", "-m", message]);
     }
 
     /// `Alt+9`, the way a user opens the panel.
@@ -3164,6 +3157,87 @@ mod the_git_panel {
                 && gui.harness.query_by_label("In the work tree").is_some(),
             "the panel does not name the two halves"
         );
+    }
+
+    #[test]
+    fn stage_and_commit_take_the_changes_away() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("Stage all").click();
+        gui.settle();
+        assert!(
+            gui.app()
+                .state
+                .git
+                .changes
+                .iter()
+                .all(|change| change.area == ide_git::Area::Staged),
+            "Stage all left something in the work tree: {:?}",
+            gui.app().state.git.changes
+        );
+
+        gui.app_mut().state.git.message = "second".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Commit").click();
+        gui.settle();
+
+        assert!(
+            gui.app().state.git.changes.is_empty(),
+            "the panel still lists changes after a commit: {:?}",
+            gui.app().state.git.changes
+        );
+        assert!(
+            gui.app().state.git.message.is_empty(),
+            "the message field kept the text of the commit it just made"
+        );
+        let log = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(gui._project.path())
+            .output()
+            .expect("git ran");
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "second",
+            "the commit did not carry the message"
+        );
+        assert!(
+            gui.harness
+                .query_by_label("Nothing has changed since the last commit.")
+                .is_some(),
+            "the panel does not say the repository is clean"
+        );
+    }
+
+    #[test]
+    fn stage_puts_one_selected_file_into_the_index() {
+        let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "two\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\nedited\n").unwrap();
+        std::fs::write(gui._project.path().join("b.txt"), "two\nedited\n").unwrap();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("M  a.txt").click();
+        gui.settle();
+        gui.harness.get_by_label("Stage").click();
+        gui.settle();
+
+        let staged: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .staged()
+            .map(|change| change.path.display().to_string())
+            .collect();
+        let worktree: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .worktree()
+            .map(|change| change.path.display().to_string())
+            .collect();
+        assert_eq!(staged, vec!["a.txt"], "the wrong file was staged");
+        assert_eq!(worktree, vec!["b.txt"], "the other file was staged too");
     }
 
     #[test]

@@ -1,13 +1,21 @@
-//! The Git panel: the branch, then the two halves of `git status`, one file a line.
+//! The Git panel: the branch, the two halves of `git status`, the commit field.
 //!
-//! A click selects a change and opens the file; Enter shows its diff. The two are on
-//! separate gestures because a click is what a person does to look at the code, and
-//! the diff is a second thought.
+//! A click selects a change, a double click opens the file, Enter shows the diff.
+//! Staging and committing are buttons on purpose: they change the repository, and a
+//! gesture that changes something should be one the user can see and aim at.
 
 use egui::Ui;
 use ide_git::{Area, Change};
 
 use crate::state::{Action, AppState};
+
+/// What the panel was asked to do this frame, applied after the list is drawn.
+enum Asked {
+    StageSelected,
+    UnstageSelected,
+    StageAll,
+    Commit,
+}
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.git.refresh(false);
@@ -33,6 +41,60 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         ui.weak(error.clone());
         return;
     }
+
+    let mut asked = None;
+    if !state.git.changes.is_empty() {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(state.git.selected.is_some(), egui::Button::new("Stage"))
+                .on_hover_text("Put the selected file into the index")
+                .clicked()
+            {
+                asked = Some(Asked::StageSelected);
+            }
+            if ui
+                .add_enabled(state.git.selected.is_some(), egui::Button::new("Unstage"))
+                .on_hover_text("Take the selected file out of the index")
+                .clicked()
+            {
+                asked = Some(Asked::UnstageSelected);
+            }
+            if ui
+                .button("Stage all")
+                .on_hover_text("Put every change into the index")
+                .clicked()
+            {
+                asked = Some(Asked::StageAll);
+            }
+        });
+    }
+
+    ui.horizontal(|ui| {
+        let field = egui::TextEdit::singleline(&mut state.git.message)
+            .hint_text("Commit message")
+            .desired_width(ui.available_width() - 90.0);
+        let response = ui.add(field);
+        // Enter in the field commits: the field has the keyboard, so Enter cannot
+        // mean "show the diff" here, and a second key to commit would be a mystery.
+        let typed_enter =
+            response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if ui
+            .add_enabled(
+                !state.git.message.trim().is_empty(),
+                egui::Button::new("Commit"),
+            )
+            .clicked()
+            || typed_enter
+        {
+            asked = Some(Asked::Commit);
+        }
+    });
+
+    if let Some(outcome) = &state.git.outcome {
+        ui.add_space(2.0);
+        ui.weak(outcome.clone());
+    }
+    ui.separator();
 
     if state.git.changes.is_empty() {
         ui.add_space(6.0);
@@ -85,7 +147,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
                         );
                     }
                     if response.clicked() {
-                        clicked = Some((index, change.path.clone()));
+                        clicked = Some(index);
                     }
                     // A single click only selects: it must not move the keyboard to
                     // the editor, or Enter would go to the text and not to the diff.
@@ -99,7 +161,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
             }
         });
 
-    if let Some((index, _)) = clicked {
+    if let Some(index) = clicked {
         selected = Some(index);
         // The diff belongs to the row that is selected now; an old one would be
         // answering a question nobody asked.
@@ -109,5 +171,13 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.git.selected = selected;
     if let Some(path) = opened {
         state.pending.push(Action::OpenFile(path));
+    }
+
+    match asked {
+        Some(Asked::StageSelected) => state.git.stage_selected(),
+        Some(Asked::UnstageSelected) => state.git.unstage_selected(),
+        Some(Asked::StageAll) => state.git.stage_all(),
+        Some(Asked::Commit) => state.git.commit(),
+        None => {}
     }
 }
