@@ -16,7 +16,7 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 
 /// The window's contents.
 pub struct App {
-    state: AppState,
+    pub(crate) state: AppState,
     dock: DockState<Tab>,
     zoom_applied: bool,
     /// Frames drawn so far; the dock has no real rectangles before the first one.

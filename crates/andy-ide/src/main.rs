@@ -2,6 +2,8 @@
 
 mod app;
 mod editor;
+#[cfg(test)]
+mod gui_tests;
 mod lsp;
 mod state;
 mod ui;
