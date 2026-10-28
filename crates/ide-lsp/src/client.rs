@@ -391,6 +391,32 @@ impl LspSession {
         Ok(serde_json::from_value(result).ok().flatten())
     }
 
+    /// The edits that rename the symbol at `position` to `new_name`.
+    ///
+    /// A server answers with a workspace edit: every file it touches and every
+    /// range in it. The ranges are positions of the protocol, not bytes, and the
+    /// caller turns them into bytes of the text it is about to change.
+    pub fn rename(
+        &mut self,
+        path: &Path,
+        position: Position,
+        new_name: &str,
+    ) -> Result<Option<lsp_types::WorkspaceEdit>> {
+        let uri = self.uri(path)?;
+        let params = lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name: new_name.to_owned(),
+            work_done_progress_params: Default::default(),
+        };
+        let result = self
+            .process
+            .request("textDocument/rename", Some(serde_json::to_value(params)?))?;
+        Ok(serde_json::from_value(result).ok().flatten())
+    }
+
     /// Every place the symbol at `position` is used in this file.
     ///
     /// A server may answer `null` instead of an empty list, so both are one.

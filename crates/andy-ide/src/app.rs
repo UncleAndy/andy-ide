@@ -143,6 +143,11 @@ impl App {
                 .push(crate::state::Action::OpenFile(path));
         }
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
+        match self.state.rename.show(ui.ctx()) {
+            crate::ui::rename::Reply::Submit => self.state.submit_rename(),
+            crate::ui::rename::Reply::Apply => self.state.apply_rename(),
+            crate::ui::rename::Reply::Cancel | crate::ui::rename::Reply::None => {}
+        }
         let chosen = self.state.results.show(ui.ctx());
         if let Some(action) = chosen {
             self.state.pending.push(action);
@@ -271,6 +276,14 @@ impl App {
             .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F12));
         if references {
             self.state.find_references();
+        }
+        // Shift+F6 is "rename" in every JetBrains editor, and the modal it opens
+        // owns the keyboard while it is up.
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F6))
+        {
+            self.state.begin_rename();
         }
         // F12 is the usual "go to definition" everywhere else, and it is a bare
         // key, so it is read from the events rather than as a shortcut.
@@ -3217,5 +3230,274 @@ mod real_highlight_tests {
             return;
         }
         panic!("no highlights came back in 120 s");
+    }
+}
+
+/// Renaming: the field, the answer, and the writes.
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use crate::lsp::Outcome;
+
+    const A: &str = "fn alpha() {}\n";
+    const B: &str = "fn use_it() { alpha(); }\n";
+
+    fn project_with_two_files() -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), A).unwrap();
+        std::fs::write(project.path().join("b.rs"), B).unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state
+            .active_buffer_mut()
+            .unwrap()
+            .set_caret_byte(A.find("alpha").unwrap());
+        (project, config, app)
+    }
+
+    /// What rust-analyzer answers for renaming `alpha` in these two files.
+    fn answer(app: &mut App, new_name: &str) {
+        app.state.apply_outcome(Outcome::Rename {
+            new_name: new_name.to_owned(),
+            changes: vec![
+                (std::path::PathBuf::from("a.rs"), vec![(0, 3, 0, 8)]),
+                (
+                    std::path::PathBuf::from("b.rs"),
+                    vec![(
+                        0,
+                        B.find("alpha").unwrap() as u32,
+                        0,
+                        (B.find("alpha").unwrap() + 5) as u32,
+                    )],
+                ),
+            ],
+        });
+    }
+
+    #[test]
+    fn the_field_opens_with_the_word_under_the_caret() {
+        let (_project, _config, mut app) = project_with_two_files();
+        app.state.rename.begin("alpha");
+        assert!(app.state.rename.open);
+        assert_eq!(app.state.rename.name, "alpha");
+    }
+
+    #[test]
+    fn the_answer_is_shown_before_anything_is_written() {
+        let (_project, _config, mut app) = project_with_two_files();
+        app.state.rename.begin("alpha");
+        answer(&mut app, "beta");
+
+        assert!(app.state.rename.preview, "the preview did not appear");
+        assert_eq!(app.state.rename.extent(), (2, 2));
+        assert!(
+            app.state.active_buffer().unwrap().text().contains("alpha"),
+            "the text was changed before the user saw the list"
+        );
+    }
+
+    #[test]
+    fn accepting_the_preview_writes_every_file() {
+        let (project, _config, mut app) = project_with_two_files();
+        app.state.rename.begin("alpha");
+        answer(&mut app, "beta");
+        app.state.apply_rename();
+
+        assert!(
+            app.state
+                .active_buffer()
+                .unwrap()
+                .text()
+                .contains("fn beta()")
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("a.rs")).unwrap(),
+            "fn beta() {}\n",
+            "the open file was not saved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("b.rs")).unwrap(),
+            "fn use_it() { beta(); }\n",
+            "the file that was not open was not written"
+        );
+        assert!(
+            app.state.status.contains("renamed 2 uses in 2 files"),
+            "the status does not say what happened: {}",
+            app.state.status
+        );
+        assert!(!app.state.rename.open, "the modal stayed open");
+    }
+
+    #[test]
+    fn an_absolute_answer_reaches_the_open_buffer() {
+        // A server answers with URIs, which are absolute; the tab is open under a
+        // project-relative path. Both must meet in the same buffer.
+        let (project, _config, mut app) = project_with_two_files();
+        app.state.rename.begin("alpha");
+        let absolute = project.path().join("a.rs");
+        app.state.apply_outcome(Outcome::Rename {
+            new_name: "beta".to_owned(),
+            changes: vec![(absolute.clone(), vec![(0, 3, 0, 8)])],
+        });
+        assert!(app.state.rename.preview, "{}", app.state.status);
+
+        app.state.apply_rename();
+
+        assert!(
+            app.state
+                .active_buffer()
+                .unwrap()
+                .text()
+                .contains("fn beta()"),
+            "the open buffer still shows the old name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(absolute).unwrap(),
+            "fn beta() {}\n",
+            "the file on disk was not written"
+        );
+    }
+
+    #[test]
+    fn a_file_that_changed_after_the_preview_stops_the_rename() {
+        let (project, _config, mut app) = project_with_two_files();
+        app.state.rename.begin("alpha");
+        answer(&mut app, "beta");
+
+        // Someone else writes the file while the list is on screen.
+        std::fs::write(project.path().join("b.rs"), "fn use_it() {}\n").unwrap();
+        app.state.apply_rename();
+
+        assert!(
+            app.state.status.contains("changed since the preview"),
+            "the rename went ahead: {}",
+            app.state.status
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("a.rs")).unwrap(),
+            A,
+            "a file was renamed although the preview no longer matched"
+        );
+    }
+
+    #[test]
+    fn without_a_server_the_field_is_not_opened() {
+        let (project, _config, mut app) = project_with_two_files();
+        std::fs::write(project.path().join("notes.txt"), "text\n").unwrap();
+        app.state.open_file(std::path::Path::new("notes.txt"));
+        let caret = app.state.active_buffer().unwrap().caret_byte();
+        assert_eq!(caret, 0);
+
+        app.state.begin_rename();
+
+        assert!(!app.state.rename.open, "the field opened without a server");
+        assert_eq!(app.state.status, "no language server for notes.txt");
+    }
+
+    #[test]
+    fn on_whitespace_there_is_nothing_to_rename() {
+        let (_project, _config, mut app) = project_with_two_files();
+        // The second line is empty: the caret has no name to take.
+        app.state
+            .active_buffer_mut()
+            .unwrap()
+            .set_caret_byte(A.len());
+        app.state.begin_rename();
+        assert!(!app.state.rename.open);
+        assert_eq!(app.state.status, "no symbol under the caret to rename");
+    }
+}
+
+/// Renaming through the real server, written to the file on disk.
+#[cfg(test)]
+mod real_rename_tests {
+    use super::*;
+
+    const SOURCE: &str =
+        "pub fn alpha() -> u8 {\n    1\n}\n\npub fn caller() -> u8 {\n    alpha()\n}\n";
+
+    #[test]
+    fn a_function_is_renamed_everywhere_it_is_used() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/lib.rs")) else {
+            println!("no server for rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), SOURCE).unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/lib.rs"));
+        let declaration = SOURCE.find("alpha").unwrap();
+        app.state
+            .active_buffer_mut()
+            .unwrap()
+            .set_caret_byte(declaration);
+
+        // Straight to the field, on a server that has answered nothing yet: that is
+        // what a person does after opening a file, and the retries inside the job
+        // have to carry it.
+        app.state.begin_rename();
+        assert!(
+            app.state.rename.open,
+            "the field did not open: {}",
+            app.state.status
+        );
+        assert_eq!(app.state.rename.name, "alpha");
+
+        app.state.rename.name = "beta".to_owned();
+        app.state.submit_rename();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline && !app.state.rename.preview {
+            app.state.poll_lsp();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            app.state.rename.preview,
+            "no preview came back in 120 s: {}",
+            app.state.status
+        );
+        let (uses, files) = app.state.rename.extent();
+        println!("rename preview: {uses} uses in {files} files");
+        assert!(uses >= 2, "the use inside `caller` was not listed");
+
+        app.state.apply_rename();
+        let written = std::fs::read_to_string(project.path().join("src/lib.rs")).unwrap();
+        println!("after rename:\n{written}");
+        assert!(
+            written.contains("pub fn beta()"),
+            "the declaration was not renamed"
+        );
+        assert!(written.contains("    beta()"), "the use was not renamed");
+        assert!(!written.contains("alpha"), "a use of the old name is left");
+        assert_eq!(
+            app.state.active_buffer().unwrap().text(),
+            written,
+            "the buffer and the file disagree after the rename"
+        );
     }
 }

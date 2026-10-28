@@ -1606,3 +1606,100 @@ mod the_occurrence_background {
         );
     }
 }
+
+/// The rename modal: the field, then the list of what would change.
+mod the_rename_modal {
+    use super::*;
+    use crate::ui::rename::{FileChanges, Span};
+
+    fn preview(gui: &mut Gui) {
+        gui.app_mut().state.rename.preview(
+            vec![FileChanges {
+                path: PathBuf::from("a.rs"),
+                spans: vec![
+                    Span {
+                        line: 0,
+                        start: 3,
+                        end: 8,
+                    },
+                    Span {
+                        line: 2,
+                        start: 30,
+                        end: 35,
+                    },
+                ],
+            }],
+            Vec::new(),
+        );
+    }
+
+    #[test]
+    fn the_field_shows_the_name_and_closes_on_escape() {
+        let mut gui = Gui::new(&[("a.rs", "fn alpha() {}\n")], Some("a.rs"));
+        gui.app_mut().state.rename.begin("alpha");
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("rename alpha").is_some(),
+            "the field did not appear"
+        );
+
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+
+        assert!(!gui.app().state.rename.open, "Escape did not close it");
+        assert!(
+            gui.harness.query_by_label("rename alpha").is_none(),
+            "the modal is still on screen"
+        );
+    }
+
+    #[test]
+    fn the_preview_lists_the_places_before_anything_is_written() {
+        let mut gui = Gui::new(&[("a.rs", "fn alpha() {}\n")], Some("a.rs"));
+        gui.app_mut().state.rename.begin("alpha");
+        gui.app_mut().state.rename.name = "beta".to_owned();
+        preview(&mut gui);
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label("alpha → beta").is_some(),
+            "the preview does not say what the rename would do"
+        );
+        assert!(
+            gui.harness.query_by_label("2 uses in 1 file").is_some(),
+            "the extent is not on screen"
+        );
+        assert!(
+            gui.app()
+                .state
+                .active_buffer()
+                .unwrap()
+                .text()
+                .contains("alpha"),
+            "the text changed while the preview was on screen"
+        );
+    }
+
+    #[test]
+    fn escape_on_the_preview_writes_nothing() {
+        let mut gui = Gui::new(&[("a.rs", "fn alpha() {}\n")], Some("a.rs"));
+        gui.app_mut().state.rename.begin("alpha");
+        gui.app_mut().state.rename.name = "beta".to_owned();
+        preview(&mut gui);
+        gui.settle();
+
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+
+        assert!(!gui.app().state.rename.open);
+        assert!(
+            gui.app()
+                .state
+                .active_buffer()
+                .unwrap()
+                .text()
+                .contains("alpha"),
+            "Escape renamed something"
+        );
+    }
+}

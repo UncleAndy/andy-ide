@@ -6,6 +6,7 @@ pub mod preview;
 pub mod problems;
 pub mod prompt;
 pub mod quick_open;
+pub mod rename;
 pub mod results;
 pub mod status;
 pub mod symbols;

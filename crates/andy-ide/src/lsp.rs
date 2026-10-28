@@ -46,6 +46,12 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// Rename the symbol at `position` to `new_name`.
+    Rename {
+        path: PathBuf,
+        position: Position,
+        new_name: String,
+    },
     /// The outline of one file.
     Symbols {
         path: PathBuf,
@@ -87,6 +93,12 @@ pub enum Outcome {
         character: u32,
         spots: Vec<(u32, u32, u32, u32)>,
     },
+    /// The edits that rename a symbol: every file the server would change, and
+    /// the ranges in it as protocol positions.
+    Rename {
+        new_name: String,
+        changes: crate::lsp::RenameChanges,
+    },
     /// The outline of one file, as the server nested it.
     Symbols {
         from: PathBuf,
@@ -126,6 +138,101 @@ pub fn hover_text(hover: &lsp_types::Hover) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n\n");
     (!text.is_empty()).then_some(text)
+}
+
+/// The files and ranges of a workspace edit, whichever of the two shapes the
+/// server chose.
+///
+/// The protocol lets a server say "edits per file" or "a list of document edits",
+/// and rust-analyzer uses the second one. Both are flattened here, and a file
+/// whose URI is not a path on this machine is dropped: the editor cannot write it.
+pub type RenameChanges = Vec<(PathBuf, Vec<(u32, u32, u32, u32)>)>;
+
+pub fn rename_changes(edit: &lsp_types::WorkspaceEdit) -> RenameChanges {
+    let mut per_file: RenameChanges = Vec::new();
+    let mut add = |uri: &lsp_types::Uri, edits: &[lsp_types::TextEdit]| {
+        let Some(path) = ide_lsp::uri_to_path(uri) else {
+            return;
+        };
+        let ranges = edits
+            .iter()
+            .map(|edit| {
+                (
+                    edit.range.start.line,
+                    edit.range.start.character,
+                    edit.range.end.line,
+                    edit.range.end.character,
+                )
+            })
+            .collect();
+        match per_file.iter_mut().find(|(file, _)| *file == path) {
+            Some((_, found)) => found.extend(ranges),
+            None => per_file.push((path, ranges)),
+        }
+    };
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            add(uri, edits);
+        }
+    }
+    // The two shapes of `documentChanges` are untagged in the protocol types, and
+    // which one a server's answer becomes is up to `serde`: both are read here, so
+    // the answer does not depend on that guess.
+    match &edit.document_changes {
+        Some(lsp_types::DocumentChanges::Edits(edits)) => {
+            for edit in edits {
+                add_text_document_edit(&mut add, edit);
+            }
+        }
+        Some(lsp_types::DocumentChanges::Operations(operations)) => {
+            for operation in operations {
+                if let lsp_types::DocumentChangeOperation::Edit(edit) = operation {
+                    add_text_document_edit(&mut add, edit);
+                }
+            }
+        }
+        None => {}
+    }
+    per_file
+}
+
+fn add_text_document_edit(
+    add: &mut impl FnMut(&lsp_types::Uri, &[lsp_types::TextEdit]),
+    edit: &lsp_types::TextDocumentEdit,
+) {
+    let ranges: Vec<lsp_types::TextEdit> = edit
+        .edits
+        .iter()
+        .map(|change| match change {
+            lsp_types::OneOf::Left(edit) => edit.clone(),
+            lsp_types::OneOf::Right(annotated) => annotated.text_edit.clone(),
+        })
+        .collect();
+    add(&edit.text_document.uri, &ranges);
+}
+
+/// One `textDocument/rename`, with an answer of `null` read as "no changes".
+fn rename_once(
+    session: &mut LspSession,
+    path: &Path,
+    position: Position,
+    new_name: &str,
+) -> anyhow::Result<RenameChanges> {
+    let edit = session.rename(path, position, new_name)?;
+    Ok(edit.map(|edit| rename_changes(&edit)).unwrap_or_default())
+}
+
+/// Whether an error is a server that has not loaded the project yet.
+///
+/// rust-analyzer says `No references found at position` (-32602) about a symbol it
+/// would find a moment later, which is the same cold start a definition shows as an
+/// empty answer. Anything else is taken at its word.
+fn is_cold_refusal(error: &anyhow::Error) -> bool {
+    if ide_lsp::is_content_modified(error) {
+        return true;
+    }
+    let text = format!("{error:#}");
+    text.contains("code -32602") && text.contains("No references found")
 }
 
 fn marked_string_text(marked: &lsp_types::MarkedString) -> String {
@@ -354,6 +461,40 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 text,
             })
         }
+        Job::Rename {
+            path,
+            position,
+            new_name,
+        } => {
+            // rust-analyzer has two ways of saying "not yet": it refuses with "No
+            // references found at position" (-32602), or it answers `null` because the
+            // symbol is not in the index it is still building. It loads the crate on
+            // the first rename rather than on the outline, so even a server that has
+            // answered a dozen questions can refuse the first one. A refusal that
+            // survives the retries is taken at its word.
+            let mut asked = rename_once(session, &path, position, &new_name);
+            for delay in [250u64, 500, 1000, 2000, 4000, 8000, 8000, 8000] {
+                let not_yet = match &asked {
+                    Ok(changes) => changes.is_empty(),
+                    Err(error) => is_cold_refusal(error),
+                };
+                if !not_yet {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(delay));
+                asked = rename_once(session, &path, position, &new_name);
+            }
+            let changes = match asked {
+                Ok(changes) => {
+                    if !changes.is_empty() {
+                        *warm = true;
+                    }
+                    changes
+                }
+                Err(error) => return Some(Outcome::Failed(format!("{error:#}"))),
+            };
+            Some(Outcome::Rename { new_name, changes })
+        }
         Job::Highlights { path, position } => {
             let spots = match session.document_highlights(&path, position) {
                 Ok(highlights) => highlights
@@ -474,5 +615,39 @@ mod tests {
             hover_text(&hover).is_none(),
             "whitespace was taken for a hint"
         );
+    }
+}
+
+#[cfg(test)]
+mod workspace_edits {
+    use super::rename_changes;
+
+    /// The answer rust-analyzer gave when a function was renamed in a measured
+    /// run: `documentChanges`, one file, two edits.
+    const REAL_ANSWER: &str = r#"{"documentChanges":[{"textDocument":{"uri":"file:///tmp/x/src/lib.rs","version":1},"edits":[{"range":{"start":{"line":0,"character":7},"end":{"line":0,"character":12}},"newText":"beta"},{"range":{"start":{"line":5,"character":4},"end":{"line":5,"character":9}},"newText":"beta"}]}]}"#;
+
+    #[test]
+    fn a_workspace_edit_becomes_files_and_ranges() {
+        let edit: lsp_types::WorkspaceEdit = serde_json::from_str(REAL_ANSWER).unwrap();
+        let changes = rename_changes(&edit);
+        assert_eq!(changes.len(), 1, "the file was lost: {changes:?}");
+        let (path, ranges) = &changes[0];
+        assert!(path.ends_with("src/lib.rs"), "{}", path.display());
+        assert_eq!(ranges, &vec![(0, 7, 0, 12), (5, 4, 5, 9)]);
+    }
+
+    #[test]
+    fn the_edits_per_file_shape_is_read_too() {
+        let text = r#"{"changes":{"file:///tmp/x/a.rs":[{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":3}},"newText":"z"}]}}"#;
+        let edit: lsp_types::WorkspaceEdit = serde_json::from_str(text).unwrap();
+        let changes = rename_changes(&edit);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, vec![(1, 0, 1, 3)]);
+    }
+
+    #[test]
+    fn an_empty_answer_is_no_changes() {
+        let edit: lsp_types::WorkspaceEdit = serde_json::from_str("{}").unwrap();
+        assert!(rename_changes(&edit).is_empty());
     }
 }

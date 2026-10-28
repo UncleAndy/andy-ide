@@ -5,6 +5,7 @@ mod editor;
 #[cfg(test)]
 mod gui_tests;
 mod lsp;
+mod rename;
 mod state;
 mod ui;
 

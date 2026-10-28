@@ -108,6 +108,7 @@ pub struct AppState {
     /// The project-symbol search (`Ctrl+Shift+F12`).
     pub symbols: crate::ui::symbols::SymbolSearch,
     pub hover: crate::ui::hover::Hover,
+    pub rename: crate::ui::rename::Rename,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -174,6 +175,7 @@ impl AppState {
             results: crate::ui::results::Results::new(),
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
+            rename: crate::ui::rename::Rename::new(),
             lsp: None,
             lsp_status: String::new(),
             highlight_key: None,
@@ -520,6 +522,227 @@ impl AppState {
         buffer.occurrences = ranges;
     }
 
+    /// Opens the rename field for the word under the caret.
+    pub fn begin_rename(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            self.status = "open a file first".to_owned();
+            return;
+        };
+        let text = buffer.text().to_owned();
+        let path = buffer.path.clone();
+        let caret = buffer.caret_byte();
+        let Some((start, end)) = crate::rename::word_at(&text, caret) else {
+            self.status = "no symbol under the caret to rename".to_owned();
+            return;
+        };
+        if !self.start_server_for(&path) {
+            return;
+        }
+        self.rename.begin(&text[start..end]);
+    }
+
+    /// Asks the server what renaming the symbol to `new_name` would change.
+    pub fn submit_rename(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            return;
+        };
+        let path = buffer.path.clone();
+        let position = ide_lsp::byte_to_position(buffer.text(), buffer.caret_byte());
+        let Some(lsp) = self.lsp.as_ref() else {
+            self.rename.close();
+            self.status = self.lsp_status.clone();
+            return;
+        };
+        lsp.send(crate::lsp::Job::Rename {
+            path,
+            position,
+            new_name: self.rename.name.trim().to_owned(),
+        });
+        self.status = format!("renaming to {}…", self.rename.name.trim());
+    }
+
+    /// The path a tab is opened under: relative inside the project, absolute
+    /// outside it.
+    ///
+    /// A server answers with URIs, which are always absolute; tabs use the same
+    /// relative paths the tree shows. Without this the editor would look for a
+    /// buffer under a path no tab has, write the file behind it, and leave the
+    /// open buffer showing the old name.
+    fn tab_path(&self, path: &Path) -> PathBuf {
+        match self.project.as_ref() {
+            Some(project) => match path.strip_prefix(project.root()) {
+                Ok(relative) => relative.to_path_buf(),
+                Err(_) => path.to_path_buf(),
+            },
+            None => path.to_path_buf(),
+        }
+    }
+
+    /// Writes the buffer that holds `path` to its file.
+    fn save_buffer(&mut self, path: &Path) -> anyhow::Result<()> {
+        let root = match self.project.as_ref() {
+            Some(project) => project.root().to_path_buf(),
+            None => PathBuf::new(),
+        };
+        let Some(buffer) = self.buffer_for_mut(path) else {
+            return Ok(());
+        };
+        buffer.save(&root)?;
+        self.sync_dirty();
+        Ok(())
+    }
+
+    /// The text of a file as the editor sees it: an open buffer, or the disk.
+    fn text_of(&self, path: &Path) -> Option<String> {
+        if let Some(buffer) = self.buffer_for(path) {
+            return Some(buffer.text().to_owned());
+        }
+        let absolute = match self.project.as_ref() {
+            Some(project) => project.root().join(path),
+            None => path.to_path_buf(),
+        };
+        std::fs::read_to_string(absolute).ok()
+    }
+
+    fn buffer_for(&self, path: &Path) -> Option<&EditorBuffer> {
+        let id = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == path)
+            .map(|item| item.buffer_id)?;
+        self.buffers.get(&id)
+    }
+
+    fn buffer_for_mut(&mut self, path: &Path) -> Option<&mut EditorBuffer> {
+        let id = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == path)
+            .map(|item| item.buffer_id)?;
+        self.buffers.get_mut(&id)
+    }
+
+    /// Turns the server's answer into spans of bytes, and shows the preview.
+    fn preview_rename(&mut self, changes: crate::lsp::RenameChanges, new_name: &str) {
+        let mut files = Vec::new();
+        let mut measured = Vec::new();
+        for (path, ranges) in changes {
+            // The server speaks in URIs, the tabs in project-relative paths.
+            let path = self.tab_path(&path);
+            let Some(text) = self.text_of(&path) else {
+                // A file the editor cannot read is a file it cannot rename.
+                continue;
+            };
+            let spans: Vec<crate::ui::rename::Span> = ranges
+                .iter()
+                .map(|(start_line, start_col, end_line, end_col)| {
+                    let start = ide_lsp::position_to_byte(
+                        &text,
+                        lsp_types::Position::new(*start_line, *start_col),
+                    );
+                    let end = ide_lsp::position_to_byte(
+                        &text,
+                        lsp_types::Position::new(*end_line, *end_col),
+                    );
+                    crate::ui::rename::Span {
+                        line: crate::ui::rename::line_of(&text, start),
+                        start,
+                        end: end.max(start),
+                    }
+                })
+                .collect();
+            files.push(crate::ui::rename::FileChanges {
+                path: path.clone(),
+                spans,
+            });
+            measured.push((path, text));
+        }
+        if files.is_empty() {
+            self.rename.close();
+            self.status = "nothing to rename".to_owned();
+            return;
+        }
+        self.rename.name = new_name.to_owned();
+        self.rename.preview(files, measured);
+    }
+
+    /// Writes the rename the user has just looked at.
+    pub fn apply_rename(&mut self) {
+        let name = self.rename.name.trim().to_owned();
+        let files = std::mem::take(&mut self.rename.changes);
+        let measured = std::mem::take(&mut self.rename.measured);
+        self.rename.close();
+        if name.is_empty() || files.is_empty() {
+            return;
+        }
+
+        // Nothing is written if any file changed since the preview: the list the
+        // user accepted would no longer be the list of edits.
+        for (path, text) in &measured {
+            if self.text_of(path).as_deref() != Some(text.as_str()) {
+                self.status = format!(
+                    "{} changed since the preview: nothing renamed",
+                    display_name(path)
+                );
+                return;
+            }
+        }
+
+        let mut changed_files = 0;
+        let mut changed_uses = 0;
+        for file in &files {
+            let Some(text) = measured
+                .iter()
+                .find(|(path, _)| *path == file.path)
+                .map(|(_, text)| text.clone())
+            else {
+                continue;
+            };
+            let ranges: Vec<(usize, usize)> = file
+                .spans
+                .iter()
+                .map(|span| (span.start, span.end))
+                .collect();
+            let Some(new_text) = crate::rename::apply_edits(&text, &ranges, &name) else {
+                self.status = format!(
+                    "{} has edits that do not fit its text",
+                    display_name(&file.path)
+                );
+                return;
+            };
+            if new_text == text {
+                continue;
+            }
+            changed_uses += file.spans.len();
+            changed_files += 1;
+            match self.buffer_for_mut(&file.path) {
+                Some(buffer) => {
+                    buffer.replace_text(new_text);
+                    if let Err(error) = self.save_buffer(&file.path) {
+                        self.status = format!(
+                            "renamed, but {} was not saved: {error}",
+                            display_name(&file.path)
+                        );
+                        return;
+                    }
+                }
+                None => {
+                    let absolute = match self.project.as_ref() {
+                        Some(project) => project.root().join(&file.path),
+                        None => file.path.clone(),
+                    };
+                    if let Err(error) = std::fs::write(&absolute, new_text) {
+                        self.status = format!("cannot write {}: {error}", absolute.display());
+                        return;
+                    }
+                }
+            }
+        }
+        self.status = format!("renamed {changed_uses} uses in {changed_files} files to {name}");
+    }
+
     /// Where the pointer rests, as the view of the active tab last saw it.
     pub(crate) fn hover_spot(&self) -> Option<crate::ui::hover::Spot> {
         let buffer = self.active_buffer()?;
@@ -545,6 +768,7 @@ impl AppState {
         self.results.open
             || self.symbols.open
             || self.quick_open.open
+            || self.rename.open
             || self.prompt.is_some()
             || self.preview_open
     }
@@ -1147,7 +1371,12 @@ impl AppState {
 
     pub(crate) fn apply_outcome(&mut self, outcome: crate::lsp::Outcome) {
         match outcome {
-            crate::lsp::Outcome::Failed(message) => self.status = message,
+            crate::lsp::Outcome::Failed(message) => {
+                self.status = message;
+                // A failed request leaves the field open with no answer coming:
+                // the status line says why, and the modal gets out of the way.
+                self.rename.close();
+            }
             crate::lsp::Outcome::Hover {
                 path,
                 line,
@@ -1160,6 +1389,9 @@ impl AppState {
                 character,
                 spots,
             } => self.apply_highlights(&path, line, character, &spots),
+            crate::lsp::Outcome::Rename { new_name, changes } => {
+                self.preview_rename(changes, &new_name)
+            }
             crate::lsp::Outcome::NoDefinition { from } => {
                 self.status = format!("no definition for the symbol in {}", display_name(&from));
             }

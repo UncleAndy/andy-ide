@@ -36,7 +36,10 @@ Milestone M2 (navigation through a language server) is under way: the LSP client
 definition, `Shift+F12` lists the places a symbol is used, `Ctrl+F12` shows the structure
 of the file and `Ctrl+Alt+Shift+N` searches the symbols of the project. Resting the
 pointer on a symbol shows its signature, and the other uses of the symbol under the
-caret are dimmed behind the text. The problems panel shows what the server published. Plan and state:
+caret are dimmed behind the text. `Shift+F6` renames the symbol under the caret: the
+server's answer is shown as a list of the places it would change, and nothing is written
+until Enter is pressed on that list. The problems panel shows what the server published.
+Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
 
 ## Crates
