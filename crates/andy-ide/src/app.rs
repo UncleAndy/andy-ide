@@ -9,6 +9,9 @@ use crate::state::{AppState, display_name};
 use crate::ui::{Tab, Viewer};
 
 /// Font size that maps to zoom factor 1.0; the configured size scales the UI.
+/// How often the dock layout is turned into JSON while the app runs.
+const LAYOUT_SERIALIZE_SECS: f64 = 0.5;
+
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 
 /// The window's contents.
@@ -18,6 +21,8 @@ pub struct App {
     zoom_applied: bool,
     /// Frames drawn so far; the dock has no real rectangles before the first one.
     frames: u32,
+    /// When the dock layout was last serialized, in input time.
+    layout_serialized_at: f64,
 }
 
 impl App {
@@ -41,6 +46,7 @@ impl App {
             dock,
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         }
     }
 }
@@ -102,15 +108,21 @@ impl App {
 
         self.frames += 1;
         self.state.poll_index();
-        // The dock only has real rectangles after a frame, and a layout with
-        // NaN rectangles cannot be read back, so the first frame is skipped.
-        let layout = if self.frames > 1 {
+        let now = ui.ctx().input(|input| input.time);
+        let closing = ui.ctx().input(|input| input.viewport().close_requested());
+        // Serializing the dock on every frame costs more than it is worth;
+        // layouts change when the user drags a split, not sixty times a second.
+        // The dock only has real rectangles after a frame, and a layout with NaN
+        // rectangles cannot be read back, so the first frame is skipped.
+        let due = closing || now - self.layout_serialized_at >= LAYOUT_SERIALIZE_SECS;
+        let layout = if self.frames > 1 && due {
             serde_json::to_string(&self.dock).ok()
         } else {
             None
         };
-        let now = ui.ctx().input(|input| input.time);
-        let closing = ui.ctx().input(|input| input.viewport().close_requested());
+        if layout.is_some() {
+            self.layout_serialized_at = now;
+        }
         self.state.save_workspace(layout, now, closing);
     }
 }
@@ -180,6 +192,7 @@ mod tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         }
     }
 
@@ -225,6 +238,7 @@ mod tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         };
         let shapes = draw_frames(&mut app, 1);
         assert!(shapes > 0);
@@ -273,6 +287,7 @@ mod typing_tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         (project, config, app)
@@ -388,6 +403,7 @@ mod layout_tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         };
         app.state.open_file(std::path::Path::new("long.rs"));
         (project, config, app)
@@ -463,6 +479,7 @@ mod click_tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         let ctx = egui::Context::default();
@@ -506,6 +523,7 @@ mod layout_persistence_tests {
             dock: default_layout(),
             zoom_applied: false,
             frames: 0,
+            layout_serialized_at: 0.0,
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         let ctx = egui::Context::default();
@@ -1072,5 +1090,108 @@ mod drag_scroll_tests {
             steps.iter().all(|step| (1..=2).contains(step)),
             "the view scrolled unevenly: {steps:?} from {ends:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod caret_visibility_tests {
+    use super::*;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn with_lines(lines: usize) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            let text: String = (0..lines).map(|n| format!("line number {n}\n")).collect();
+            std::fs::write(project.path().join("a.rs"), text).unwrap();
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            app.state.open_file(std::path::Path::new("a.rs"));
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+            output
+        }
+
+        fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) -> egui::FullOutput {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]);
+            // Smooth scrolling needs a few frames to arrive; the answer is what
+            // the last of them painted.
+            let mut output = None;
+            for _ in 0..8 {
+                output = Some(self.frame(Vec::new()));
+            }
+            output.expect("frames drawn")
+        }
+
+        /// Y of the carets that were painted this frame, in screen points.
+        fn caret_rows(output: &egui::FullOutput) -> Vec<f32> {
+            let mut rows = Vec::new();
+            for clipped in &output.shapes {
+                if let egui::Shape::Rect(rect) = &clipped.shape
+                    && (rect.rect.width() - 1.5).abs() < 0.01
+                {
+                    rows.push(rect.rect.min.y);
+                }
+            }
+            rows
+        }
+    }
+
+    #[test]
+    fn ctrl_home_leaves_the_caret_where_it_can_be_seen() {
+        let mut harness = Harness::with_lines(200);
+        harness.key(egui::Key::End, egui::Modifiers::CTRL);
+        let output = harness.key(egui::Key::End, egui::Modifiers::CTRL);
+        let rows = Harness::caret_rows(&output);
+        assert!(!rows.is_empty(), "no caret was painted");
+        let visible = rows.iter().any(|y| (0.0..700.0).contains(y));
+        assert!(visible, "the caret is off screen after Ctrl+End: {rows:?}");
+
+        let output = harness.key(egui::Key::Home, egui::Modifiers::CTRL);
+        let rows = Harness::caret_rows(&output);
+        assert!(
+            rows.iter().any(|y| (0.0..700.0).contains(y)),
+            "the caret is off screen after Ctrl+Home: {rows:?}"
+        );
+        assert_eq!(harness.app.state.active_buffer().unwrap().caret(), 0);
     }
 }

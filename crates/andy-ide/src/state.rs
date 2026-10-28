@@ -49,6 +49,8 @@ pub struct AppState {
     pub status: String,
     /// Requests collected while drawing, applied afterwards.
     pub pending: Vec<Action>,
+    /// The dock layout as it will be written back to `.andy-ide`.
+    layout: Option<String>,
     next_buffer_id: usize,
     config_dir: PathBuf,
     /// `.andy-ide` of the open project, when it could be created.
@@ -84,6 +86,7 @@ impl AppState {
             index: None,
             status: String::new(),
             pending: Vec::new(),
+            layout: None,
             next_buffer_id: 1,
             config_dir,
             workspace: None,
@@ -229,6 +232,9 @@ impl AppState {
     /// Writes the workspace file when it changed, at most every 300 ms unless
     /// `force` is set (used when the window closes).
     pub fn save_workspace(&mut self, layout: Option<String>, now: f64, force: bool) {
+        if let Some(layout) = layout {
+            self.layout = Some(layout);
+        }
         let Some(workspace) = self.workspace.as_ref() else {
             return;
         };
@@ -240,7 +246,9 @@ impl AppState {
                 .map(|item| item.path.clone())
                 .collect(),
             active: self.tabs.active(),
-            layout,
+            // The layout is serialized once in a while and kept here between
+            // saves, so a save that does not carry one cannot wipe it.
+            layout: self.layout.clone(),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

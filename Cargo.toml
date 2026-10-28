@@ -26,3 +26,13 @@ serde_json = "1"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The parsers, the rope and the GUI are all heavy in an unoptimized build: a
+# keystroke used to cost tens of milliseconds at `opt-level = 0`. Dependencies
+# are built optimized, our own crates lightly, so `cargo run` stays usable
+# without the compile time of a full release build.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

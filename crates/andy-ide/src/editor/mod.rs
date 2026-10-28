@@ -31,6 +31,10 @@ pub struct EditorBuffer {
     line_starts: Vec<usize>,
     /// Byte offset just past the last character of each line, terminators excluded.
     line_ends: Vec<usize>,
+    /// Widest line in characters, cached: the horizontal extent needs it every
+    /// frame, and counting the whole document per frame is what used to make
+    /// scrolling through a big file sluggish.
+    max_line_chars: usize,
 }
 
 impl EditorBuffer {
@@ -46,11 +50,9 @@ impl EditorBuffer {
     pub fn from_text(path: PathBuf, text: String) -> Self {
         let first_line = text.lines().next();
         let language = Language::detect(&path, first_line);
-        let highlighter = language.map(|language| {
-            let mut highlighter = Highlighter::new(language);
-            highlighter.set_text(&text);
-            highlighter
-        });
+        // The text reaches the highlighter through `refresh`, which knows how to
+        // hand it over incrementally.
+        let highlighter = language.map(Highlighter::new);
 
         let mut buffer = Self {
             path,
@@ -61,6 +63,7 @@ impl EditorBuffer {
             text: String::new(),
             line_starts: Vec::new(),
             line_ends: Vec::new(),
+            max_line_chars: 0,
         };
         buffer.refresh();
         buffer
@@ -104,10 +107,7 @@ impl EditorBuffer {
 
     /// Width of the longest line in characters, for the horizontal extent.
     pub fn max_line_chars(&self) -> usize {
-        (0..self.line_count())
-            .map(|line| self.line_text(line).chars().count())
-            .max()
-            .unwrap_or(0)
+        self.max_line_chars
     }
 
     pub fn line_col(&self) -> (usize, usize) {
@@ -347,26 +347,20 @@ impl EditorBuffer {
 
     /// Rebuilds the flat mirror, the line table and the highlight spans.
     fn refresh(&mut self) {
+        let previous = std::mem::take(&mut self.text);
         self.text = self.doc.text();
-        // Line boundaries come from the document: ropey also breaks on a lone
-        // `\r`, and a buffer that counted only `\n` would then disagree with it
-        // about where a line ends.
-        self.line_starts.clear();
-        self.line_ends.clear();
-        let count = self.doc.line_count().max(1);
-        let length = self.text.len();
-        for index in 0..count {
-            let start = self.doc.line_start_byte(index).min(length);
-            let next = self.doc.line_start_byte(index + 1).min(length);
-            let mut end = next.max(start);
-            while end > start && matches!(self.text.as_bytes()[end - 1], b'\n' | b'\r') {
-                end -= 1;
-            }
-            self.line_starts.push(start);
-            self.line_ends.push(end);
-        }
-        if let Some(highlighter) = self.highlighter.as_mut() {
-            highlighter.set_text(&self.text);
+        let lines = split_lines(&self.text);
+        self.max_line_chars = lines.iter().map(|line| line.width).max().unwrap_or(0);
+        self.line_starts = lines.iter().map(|line| line.start).collect();
+        self.line_ends = lines.iter().map(|line| line.end).collect();
+
+        // Handing one edit to the highlighter lets tree-sitter reparse just the
+        // changed region; replacing the whole text would reparse the file on
+        // every keystroke.
+        if let Some(highlighter) = self.highlighter.as_mut()
+            && let Some((start, old_end, new_end)) = common_edit(&previous, &self.text)
+        {
+            highlighter.edit(start, old_end, new_end, &self.text[start..new_end]);
         }
     }
 }
@@ -553,4 +547,162 @@ mod indent_tests {
         buf.outdent();
         assert_eq!(buf.text(), "x\n");
     }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::{common_edit, split_lines};
+    use ide_buffer::Document;
+
+    #[test]
+    fn the_line_table_matches_the_rope() {
+        for text in [
+            "",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\r\nb",
+            "a\rb",
+            "\r\n",
+            "\r",
+            "a\r\n\r\nb\n",
+            "первая\nвторая\r\nтретья\r",
+        ] {
+            let doc = Document::new(text);
+            let lines = split_lines(text);
+            assert_eq!(lines.len(), doc.line_count(), "line count of {text:?}");
+            for (index, line) in lines.iter().enumerate() {
+                assert_eq!(
+                    line.start,
+                    doc.line_start_byte(index),
+                    "start of {index} in {text:?}"
+                );
+                assert_eq!(
+                    &text[line.start..line.end],
+                    doc.line(index).unwrap().to_string(),
+                    "text of line {index} in {text:?}"
+                );
+                assert_eq!(
+                    line.width,
+                    text[line.start..line.end].chars().count(),
+                    "width of line {index} in {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn widths_count_characters_not_bytes() {
+        let lines = split_lines("привет\nмир\n");
+        assert_eq!(lines[0].width, 6);
+        assert_eq!(lines[1].width, 3);
+    }
+
+    #[test]
+    fn an_edit_is_found_in_the_middle_of_the_text() {
+        assert_eq!(common_edit("abcd", "abcd"), None);
+        assert_eq!(common_edit("abcd", "abXd"), Some((2, 3, 3)));
+        assert_eq!(common_edit("abcd", "abcdX"), Some((4, 4, 5)));
+        assert_eq!(common_edit("abcd", "abc"), Some((3, 4, 3)));
+    }
+
+    #[test]
+    fn an_edit_never_splits_a_character() {
+        // The byte in the middle of a two-byte letter must not become a boundary.
+        let (start, old_end, new_end) = common_edit("привет", "привет!").unwrap();
+        assert_eq!((start, old_end), (12, 12));
+        assert_eq!(new_end, 13);
+        let (start, _, new_end) = common_edit("мама", "папа").unwrap();
+        assert!("мама".is_char_boundary(start) && "папа".is_char_boundary(new_end));
+    }
+}
+
+/// One line of the mirror text, terminators excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MirrorLine {
+    start: usize,
+    end: usize,
+    /// Characters in the line, without the terminator.
+    width: usize,
+}
+
+/// Splits text the way ropey does: `\n`, `\r\n` and a lone `\r` all end a line.
+///
+/// One pass over the bytes: asking the rope for every line start costs a tree
+/// descent per line, which shows up on large files.
+fn split_lines(text: &str) -> Vec<MirrorLine> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let skip = match bytes[index] {
+            b'\n' => 1,
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
+            b'\r' => 1,
+            _ => 0,
+        };
+        if skip == 0 {
+            index += 1;
+            continue;
+        }
+        lines.push(MirrorLine {
+            start,
+            end: index,
+            width: char_count(&bytes[start..index]),
+        });
+        index += skip;
+        start = index;
+    }
+    lines.push(MirrorLine {
+        start,
+        end: bytes.len(),
+        width: char_count(&bytes[start..]),
+    });
+    lines
+}
+
+/// Counts characters in UTF-8 bytes without decoding the text.
+fn char_count(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .filter(|byte| (**byte & 0b1100_0000) != 0b1000_0000)
+        .count()
+}
+
+/// The one replacement that turns `old` into `new`, as `(start, old_end, new_end)`.
+///
+/// `None` when the texts are equal. The boundaries never split a character, so
+/// the range can be handed to tree-sitter as it is.
+fn common_edit(old: &str, new: &str) -> Option<(usize, usize, usize)> {
+    if old == new {
+        return None;
+    }
+    let old_bytes = old.as_bytes();
+    let new_bytes = new.as_bytes();
+
+    let limit = old_bytes.len().min(new_bytes.len());
+    let mut prefix = 0;
+    while prefix < limit && old_bytes[prefix] == new_bytes[prefix] {
+        prefix += 1;
+    }
+    while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+
+    let mut suffix = 0;
+    let limit = limit - prefix;
+    while suffix < limit
+        && old_bytes[old_bytes.len() - 1 - suffix] == new_bytes[new_bytes.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!old.is_char_boundary(old_bytes.len() - suffix)
+            || !new.is_char_boundary(new_bytes.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    Some((prefix, old_bytes.len() - suffix, new_bytes.len() - suffix))
 }

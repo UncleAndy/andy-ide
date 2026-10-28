@@ -5,7 +5,10 @@
 //! previous tree is reused, so the cost of a keystroke does not grow with file
 //! size.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{InputEdit, Point, Query, QueryCursor};
@@ -48,11 +51,32 @@ pub struct HighlightSpan {
 pub struct Highlighter {
     lang: Language,
     parser: Option<tree_sitter::Parser>,
-    query: Option<Query>,
+    query: Option<Arc<Query>>,
     tree: Option<tree_sitter::Tree>,
     source: String,
     line_starts: Vec<usize>,
+    /// Bumped on every change, so a cached window knows it is stale.
+    generation: u64,
+    /// The last window that was queried. Painting asks for the same lines
+    /// frame after frame, and re-running the query would cost more than the
+    /// whole rest of the frame.
+    window: RefCell<WindowCache>,
+}
+
+struct WindowCache {
+    generation: u64,
+    range: Range<usize>,
     spans: Vec<HighlightSpan>,
+}
+
+impl Default for WindowCache {
+    fn default() -> Self {
+        Self {
+            generation: u64::MAX,
+            range: 0..0,
+            spans: Vec::new(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Highlighter {
@@ -60,7 +84,7 @@ impl std::fmt::Debug for Highlighter {
         f.debug_struct("Highlighter")
             .field("lang", &self.lang)
             .field("bytes", &self.source.len())
-            .field("spans", &self.spans.len())
+            .field("spans", &self.window.borrow().spans.len())
             .finish()
     }
 }
@@ -73,14 +97,7 @@ impl Highlighter {
     /// a render loop.
     pub fn new(lang: Language) -> Self {
         let ts = lang.tree_sitter();
-        let query_source = lang.highlights_query();
-        let query = match Query::new(&ts, &query_source) {
-            Ok(query) => Some(query),
-            Err(error) => {
-                tracing::error!(?lang, %error, "highlight query does not compile");
-                None
-            }
-        };
+        let query = compile_query(lang, &ts);
 
         let mut parser = tree_sitter::Parser::new();
         let parser = match parser.set_language(&ts) {
@@ -98,7 +115,8 @@ impl Highlighter {
             tree: None,
             source: String::new(),
             line_starts: vec![0],
-            spans: Vec::new(),
+            generation: 0,
+            window: RefCell::new(WindowCache::default()),
         }
     }
 
@@ -116,13 +134,13 @@ impl Highlighter {
         self.source.clear();
         self.source.push_str(text);
         self.compute_line_starts();
+        self.generation = self.generation.wrapping_add(1);
         let previous = self.tree.take();
         drop(previous);
         self.tree = self
             .parser
             .as_mut()
             .and_then(|parser| parser.parse(&self.source, None));
-        self.recompute_spans();
     }
 
     /// Applies one replacement and reparses incrementally.
@@ -164,12 +182,12 @@ impl Highlighter {
 
         self.source = updated;
         self.compute_line_starts();
+        self.generation = self.generation.wrapping_add(1);
         let previous = self.tree.take();
         self.tree = self
             .parser
             .as_mut()
             .and_then(|parser| parser.parse(&self.source, previous.as_ref()));
-        self.recompute_spans();
     }
 
     /// Highlight ranges intersecting lines `first_line..=last_line`.
@@ -186,17 +204,53 @@ impl Highlighter {
         if range.is_empty() {
             return Vec::new();
         }
+        {
+            let cache = self.window.borrow();
+            if cache.generation == self.generation && cache.range == range {
+                return cache.spans.clone();
+            }
+        }
 
-        let mut window: Vec<&HighlightSpan> = Vec::new();
-        for span in &self.spans {
-            if span.end_byte <= range.start {
-                continue;
+        let spans = self.query_window(range.clone());
+        *self.window.borrow_mut() = WindowCache {
+            generation: self.generation,
+            range,
+            spans: spans.clone(),
+        };
+        spans
+    }
+
+    /// Runs the query over one byte range and turns the captures into a
+    /// partition of that range.
+    ///
+    /// Only the visible window is queried: scanning the whole tree costs more
+    /// than painting the frame, and the answer is needed for the window alone.
+    fn query_window(&self, range: Range<usize>) -> Vec<HighlightSpan> {
+        let (Some(tree), Some(query)) = (self.tree.as_ref(), self.query.as_ref()) else {
+            return Vec::new();
+        };
+
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range.clone());
+        let mut window = Vec::new();
+        let mut matches = cursor.matches(query, tree.root_node(), self.source.as_bytes());
+        while let Some(found) = matches.next() {
+            for capture in found.captures() {
+                let Some(kind) = kind_for_capture(query.capture_names()[capture.index as usize])
+                else {
+                    continue;
+                };
+                let node = capture.node;
+                if node.end_byte() <= range.start || node.start_byte() >= range.end {
+                    continue;
+                }
+                window.push(HighlightSpan {
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    kind: refine_kind(node.kind(), kind),
+                    priority: found.pattern_index as u32,
+                });
             }
-            if span.start_byte >= range.end {
-                // Spans are sorted by start, so the rest are past the window.
-                break;
-            }
-            window.push(span);
         }
         // Paint in query order: a later pattern covers the bytes of an earlier
         // one, which is how tree-sitter highlighting is meant to resolve this.
@@ -253,43 +307,6 @@ impl Highlighter {
             .copied()
             .unwrap_or(self.source.len());
         start..end.max(start)
-    }
-
-    /// Rebuilds the span list for the whole tree.
-    ///
-    /// Runs once per change, not per painted frame: the render loop only filters
-    /// this list by the visible line range.
-    fn recompute_spans(&mut self) {
-        self.spans.clear();
-        let (Some(tree), Some(query)) = (self.tree.as_ref(), self.query.as_ref()) else {
-            return;
-        };
-
-        let mut cursor = QueryCursor::new();
-        let mut spans = Vec::new();
-        let mut matches = cursor.matches(query, tree.root_node(), self.source.as_bytes());
-        // tree-sitter exposes matches as a streaming iterator, not an `Iterator`.
-        while let Some(found) = matches.next() {
-            for capture in found.captures() {
-                let Some(kind) = kind_for_capture(query.capture_names()[capture.index as usize])
-                else {
-                    continue;
-                };
-                let node = capture.node;
-                spans.push(HighlightSpan {
-                    start_byte: node.start_byte(),
-                    end_byte: node.end_byte(),
-                    kind: refine_kind(node.kind(), kind),
-                    priority: found.pattern_index as u32,
-                });
-            }
-        }
-        spans.sort_by(|a, b| {
-            a.start_byte
-                .cmp(&b.start_byte)
-                .then_with(|| b.end_byte.cmp(&a.end_byte))
-        });
-        self.spans = spans;
     }
 
     fn compute_line_starts(&mut self) {
@@ -361,4 +378,32 @@ fn point_at(source: &str, byte: usize) -> Point {
         None => prefix.len(),
     };
     Point { row, column }
+}
+
+/// Compiles a highlight query once per language and shares it.
+///
+/// Compiling is expensive — tens of milliseconds — while opening a second file
+/// of the same language needs the very same query. The result, including
+/// failure, is kept: a grammar that rejects its own query would otherwise log
+/// the same error for every file.
+fn compile_query(lang: Language, ts: &tree_sitter::Language) -> Option<Arc<Query>> {
+    static QUERIES: OnceLock<Mutex<HashMap<Language, Option<Arc<Query>>>>> = OnceLock::new();
+    let cache = QUERIES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache.lock().ok()?.get(&lang) {
+        return cached.clone();
+    }
+
+    let source = lang.highlights_query();
+    let compiled = match Query::new(ts, &source) {
+        Ok(query) => Some(Arc::new(query)),
+        Err(error) => {
+            tracing::error!(?lang, %error, "highlight query does not compile");
+            None
+        }
+    };
+    cache
+        .lock()
+        .expect("query cache poisoned")
+        .insert(lang, compiled.clone());
+    compiled
 }

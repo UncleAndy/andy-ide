@@ -96,62 +96,11 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 .as_ref()
                 .map(|highlighter| highlighter.spans_for_lines(first_line, last_line))
                 .unwrap_or_default();
-
-            paint_gutter(
-                ui,
-                &painter,
-                buffer,
-                rect,
-                origin,
-                gutter_width,
-                row_h,
-                first_line,
-                last_line,
-            );
             let layouts = LineLayouts::build(ui, buffer, &spans, &font, first_line, last_line);
-            paint_selection(
-                PaintCtx {
-                    painter: &painter,
-                    origin: text_origin,
-                    char_w,
-                    row_h,
-                },
-                buffer,
-                &layouts,
-                first_line,
-                last_line,
-            );
-            paint_galleys(&painter, &layouts, text_origin, row_h);
-            let (caret_line, _) = buffer.line_col();
-            let caret_galley = layouts
-                .galley(caret_line)
-                .cloned()
-                .or_else(|| line_galley(ui, buffer, &spans, &font, caret_line));
-            let caret_pos = paint_caret(
-                &painter,
-                buffer,
-                caret_galley.as_ref(),
-                text_origin,
-                char_w,
-                row_h,
-            );
 
-            // Keep the caret on screen while it moves, and only then: scrolling
-            // must never fight the user's wheel. The viewport is reported in
-            // content coordinates, the caret is painted in screen coordinates,
-            // so the caret is shifted into content space before comparing.
-            let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
-            let tracked = response.id.with("last_caret");
-            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
-            let caret = buffer.caret();
-            let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
-            let (remember, scroll) = caret_follow(previous, caret, viewport, row);
-            if remember {
-                ui.data_mut(|data| data.insert_temp(tracked, caret));
-            }
-
-            // Pointer first: clicking must place the caret even though the very
-            // same click gives the widget focus.
+            // Input comes before painting: the caret this frame is the one the
+            // key press asked for, so it is drawn where it belongs and the view
+            // can follow it in the same frame.
             let mut drag_scrolled = false;
             if (response.clicked() || response.dragged())
                 && let Some(pos) = response.interact_pointer_pos()
@@ -189,27 +138,88 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 }
             }
 
-            // While a drag scrolls by itself, following the caret as well would
-            // move the view twice per frame and make the text jump.
-            if scroll && !drag_scrolled {
-                ui.scroll_to_rect(row.expand(3.0), None);
+            let mut navigated = false;
+            if response.has_focus() {
+                let (text_changed, moved) = handle_input(ui, buffer);
+                changed |= text_changed;
+                navigated = moved;
             }
 
-            if response.has_focus() {
-                changed |= handle_input(ui, buffer);
+            paint_gutter(
+                ui,
+                &painter,
+                buffer,
+                rect,
+                origin,
+                gutter_width,
+                row_h,
+                first_line,
+                last_line,
+            );
+            paint_selection(
+                PaintCtx {
+                    painter: &painter,
+                    origin: text_origin,
+                    char_w,
+                    row_h,
+                },
+                buffer,
+                &layouts,
+                first_line,
+                last_line,
+            );
+            paint_galleys(&painter, &layouts, text_origin, row_h);
+            let (caret_line, _) = buffer.line_col();
+            let caret_galley = layouts
+                .galley(caret_line)
+                .cloned()
+                .or_else(|| line_galley(ui, buffer, &spans, &font, caret_line));
+            let caret_pos = paint_caret(
+                &painter,
+                buffer,
+                caret_galley.as_ref(),
+                text_origin,
+                char_w,
+                row_h,
+            );
+
+            // The view followed the caret in the same frame, so the caret is where
+            // it was asked to be, and the scroll target is in screen coordinates:
+            // the scroll area compares it with its clip rect.
+            let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
+            let tracked = response.id.with("last_caret");
+            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
+            let caret = buffer.caret();
+            let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
+            let (remember, outside) = caret_follow(previous, caret, viewport, row);
+            if remember {
+                ui.data_mut(|data| data.insert_temp(tracked, caret));
+            }
+            // A wheel scroll moves the view and leaves the caret alone: chasing
+            // it then would fight the wheel. Only a caret move or an explicit
+            // navigation key pulls the view.
+            let pull = outside && (navigated || previous.is_none());
+            if pull && !drag_scrolled {
+                ui.scroll_to_rect(
+                    Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0),
+                    None,
+                );
             }
         });
 
     changed
 }
 
-/// Decides whether the view follows the caret this frame.
+/// Decides whether the view should follow the caret this frame.
 ///
-/// Returns `(remember, scroll)`. The caret is followed only when it actually
-/// moved: a wheel scroll leaves the caret where it is, and scrolling the view
-/// back to it would make the wheel feel broken. Both rectangles are in content
-/// coordinates — the scroll area reports the viewport that way, and the caller
-/// shifts the caret there before asking.
+/// Returns `(remember, outside)`: whether the caret of this frame has to be
+/// stored for the next one, and whether it sits outside the viewport. Both
+/// rectangles are in content coordinates — the scroll area reports the viewport
+/// that way, and the caller shifts the caret there before asking.
+///
+/// The caller scrolls only when the caret is outside *and* the user asked for a
+/// caret motion: a wheel scroll leaves the caret where it is, and chasing it
+/// then would fight the wheel.
 fn caret_follow(previous: Option<usize>, caret: usize, viewport: Rect, row: Rect) -> (bool, bool) {
     if previous == Some(caret) {
         return (false, false);
@@ -567,9 +577,13 @@ fn token_color(kind: TokenKind) -> Color32 {
     }
 }
 
-/// Applies keyboard and clipboard events. Returns true when the text changed.
-fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
+/// Applies keyboard and clipboard events.
+///
+/// Returns `(text changed, caret moved)`: the second flag tells the view that
+/// the user asked for a caret motion, even if the caret could not move.
+fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
     let mut changed = false;
+    let mut navigated = false;
     let events = ui.input(|input| input.events.clone());
 
     for event in events {
@@ -604,20 +618,54 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             } => {
                 let extend = modifiers.shift;
                 match key {
-                    Key::ArrowLeft if modifiers.ctrl => buffer.move_caret(Motion::WordLeft, extend),
-                    Key::ArrowLeft => buffer.move_caret(Motion::Left, extend),
+                    Key::ArrowLeft if modifiers.ctrl => {
+                        navigated = true;
+                        buffer.move_caret(Motion::WordLeft, extend)
+                    }
+                    Key::ArrowLeft => {
+                        navigated = true;
+                        buffer.move_caret(Motion::Left, extend)
+                    }
                     Key::ArrowRight if modifiers.ctrl => {
+                        navigated = true;
                         buffer.move_caret(Motion::WordRight, extend)
                     }
-                    Key::ArrowRight => buffer.move_caret(Motion::Right, extend),
-                    Key::ArrowUp => buffer.move_caret(Motion::Up, extend),
-                    Key::ArrowDown => buffer.move_caret(Motion::Down, extend),
-                    Key::Home if modifiers.ctrl => buffer.move_caret(Motion::DocStart, extend),
-                    Key::Home => buffer.move_caret(Motion::Home, extend),
-                    Key::End if modifiers.ctrl => buffer.move_caret(Motion::DocEnd, extend),
-                    Key::End => buffer.move_caret(Motion::End, extend),
-                    Key::PageUp => buffer.move_caret(Motion::PageUp(20), extend),
-                    Key::PageDown => buffer.move_caret(Motion::PageDown(20), extend),
+                    Key::ArrowRight => {
+                        navigated = true;
+                        buffer.move_caret(Motion::Right, extend)
+                    }
+                    Key::ArrowUp => {
+                        navigated = true;
+                        buffer.move_caret(Motion::Up, extend)
+                    }
+                    Key::ArrowDown => {
+                        navigated = true;
+                        buffer.move_caret(Motion::Down, extend)
+                    }
+                    Key::Home if modifiers.ctrl => {
+                        navigated = true;
+                        buffer.move_caret(Motion::DocStart, extend)
+                    }
+                    Key::Home => {
+                        navigated = true;
+                        buffer.move_caret(Motion::Home, extend)
+                    }
+                    Key::End if modifiers.ctrl => {
+                        navigated = true;
+                        buffer.move_caret(Motion::DocEnd, extend)
+                    }
+                    Key::End => {
+                        navigated = true;
+                        buffer.move_caret(Motion::End, extend)
+                    }
+                    Key::PageUp => {
+                        navigated = true;
+                        buffer.move_caret(Motion::PageUp(20), extend)
+                    }
+                    Key::PageDown => {
+                        navigated = true;
+                        buffer.move_caret(Motion::PageDown(20), extend)
+                    }
                     Key::Backspace => {
                         buffer.backspace();
                         changed = true;
@@ -655,7 +703,7 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
         }
     }
 
-    changed
+    (changed, navigated)
 }
 
 #[cfg(test)]
