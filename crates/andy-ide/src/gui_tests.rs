@@ -231,7 +231,7 @@ fn a_click_in_the_editor_puts_the_caret_there() {
 
     // The editor is the large area to the right of the tree, above the problems
     // panel; a click at its top-left corner lands on the first character.
-    let pos = egui::pos2(320.0, 60.0);
+    let pos = egui::pos2(315.0, 125.0);
     gui.harness.event(egui::Event::PointerMoved(pos));
     gui.harness.event(egui::Event::PointerButton {
         pos,
@@ -274,7 +274,7 @@ fn click_at(harness: &mut Harness<'static, App>, pos: egui::Pos2) {
 #[test]
 fn typing_changes_the_buffer_and_marks_it_modified() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-    click_at(&mut gui.harness, egui::pos2(320.0, 60.0));
+    click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
     gui.settle();
 
     gui.harness.event(egui::Event::Text("X".to_owned()));
@@ -367,7 +367,7 @@ mod closing_the_window {
 
     fn dirty_window() -> Gui {
         let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(320.0, 60.0));
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
         gui.settle();
         gui.harness.event(egui::Event::Text("X".to_owned()));
         gui.settle();
@@ -470,6 +470,162 @@ mod closing_the_window {
                 egui::ViewportCommand::Close
             )),
             "the window was not told to close: {answered:?}"
+        );
+    }
+}
+
+/// Clicking with Ctrl held asks for the definition at the pointer.
+mod navigation_by_mouse {
+    use super::*;
+
+    fn ctrl_click_at(harness: &mut Harness<'static, App>, pos: egui::Pos2) {
+        // The window layer sends the modifiers before the press, and egui keeps
+        // them in the input state for the frame that handles the click.
+        harness.event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
+        harness.event(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::CTRL,
+            });
+        }
+        harness.step();
+        harness.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        harness.step();
+    }
+
+    #[test]
+    fn ctrl_click_asks_the_server_for_a_definition() {
+        // A text file has no server, and that is the point: the click has to
+        // reach the navigation code, which says so in the status bar.
+        let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
+        gui.settle();
+
+        ctrl_click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+
+        assert_eq!(
+            gui.app().state.status,
+            "no language server for notes.txt",
+            "the Ctrl+Click did not ask for a definition"
+        );
+    }
+
+    #[test]
+    fn a_plain_click_still_only_moves_the_caret() {
+        let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
+        gui.settle();
+
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().line_col(),
+            (0, 0),
+            "the caret did not move"
+        );
+        assert!(
+            !gui.app().state.status.contains("language server"),
+            "a plain click asked the server: {:?}",
+            gui.app().state.status
+        );
+    }
+}
+
+/// The list `Shift+F12` puts on screen.
+mod the_reference_list {
+    use super::*;
+    use crate::ui::results::Hit;
+
+    fn two_hits() -> Vec<Hit> {
+        vec![
+            Hit {
+                path: PathBuf::from("a.rs"),
+                line: 2,
+                character: 0,
+                text: "three".to_owned(),
+            },
+            Hit {
+                path: PathBuf::from("b.rs"),
+                line: 1,
+                character: 2,
+                text: "beta".to_owned(),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_list_shows_the_hits_and_enter_opens_the_selected_one() {
+        let mut gui = Gui::new(
+            &[("a.rs", "one\ntwo\nthree\n"), ("b.rs", "alpha\nbeta\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        gui.app_mut().state.results.show_hits(two_hits());
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label_contains("a.rs:3").is_some(),
+            "the first hit is not in the list"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("b.rs:2").is_some(),
+            "the second hit is not in the list"
+        );
+
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        assert_eq!(
+            gui.active_tab(),
+            Some(PathBuf::from("b.rs")),
+            "Enter did not open the second hit"
+        );
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().line_col().0,
+            1,
+            "the caret is not on the line of the hit"
+        );
+        assert!(!gui.app().state.results.open, "the list stayed open");
+    }
+
+    #[test]
+    fn clicking_a_hit_opens_it() {
+        let mut gui = Gui::new(
+            &[("a.rs", "one\ntwo\nthree\n"), ("b.rs", "alpha\nbeta\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        gui.app_mut().state.results.show_hits(two_hits());
+        gui.settle();
+
+        gui.harness.get_by_label_contains("b.rs:2").click();
+        gui.settle();
+
+        assert_eq!(gui.active_tab(), Some(PathBuf::from("b.rs")));
+        assert!(!gui.app().state.results.open);
+    }
+
+    #[test]
+    fn escape_closes_the_list_without_opening_anything() {
+        let mut gui = Gui::new(
+            &[("a.rs", "one\ntwo\nthree\n"), ("b.rs", "alpha\nbeta\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        gui.app_mut().state.results.show_hits(two_hits());
+        gui.settle();
+
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+
+        assert!(!gui.app().state.results.open, "Escape left the list open");
+        assert_eq!(
+            gui.active_tab(),
+            Some(PathBuf::from("a.rs")),
+            "Escape opened something"
         );
     }
 }

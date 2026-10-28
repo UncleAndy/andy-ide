@@ -89,6 +89,8 @@ pub struct AppState {
     pub preview_open: bool,
     /// The quick-open field.
     pub quick_open: crate::ui::quick_open::QuickOpen,
+    /// Where a symbol is used, once the server has answered.
+    pub results: crate::ui::results::Results,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -144,6 +146,7 @@ impl AppState {
             quit_decided: false,
             preview_open: false,
             quick_open: crate::ui::quick_open::QuickOpen::new(),
+            results: crate::ui::results::Results::new(),
             lsp: None,
             lsp_status: String::new(),
             last_sync: 0.0,
@@ -581,6 +584,19 @@ impl AppState {
     /// or two, which is why it happens on the worker thread while the editor
     /// keeps drawing.
     pub fn goto_definition(&mut self) {
+        self.navigate(false);
+    }
+
+    /// Asks the server for every place the symbol under the caret is used.
+    pub fn find_references(&mut self) {
+        self.navigate(true);
+    }
+
+    /// Sends a navigation request for the symbol under the caret.
+    ///
+    /// `references` picks the wider question; the rest of the way is the same,
+    /// down to starting the server and announcing the open documents.
+    fn navigate(&mut self, references: bool) {
         let Some(buffer) = self.active_buffer() else {
             return;
         };
@@ -596,9 +612,116 @@ impl AppState {
         // there when those tabs were opened.
         self.replay_documents();
         if let Some(lsp) = self.lsp.as_ref() {
-            self.status = "looking for the definition...".to_owned();
-            lsp.send(crate::lsp::Job::Definition { path, position });
+            self.status = if references {
+                "looking for references...".to_owned()
+            } else {
+                "looking for the definition...".to_owned()
+            };
+            lsp.send(if references {
+                crate::lsp::Job::References { path, position }
+            } else {
+                crate::lsp::Job::Definition { path, position }
+            });
         }
+    }
+
+    /// Takes a navigation request left by a Ctrl+Click in the editor.
+    pub fn poll_navigation(&mut self) {
+        let Some(buffer_id) = self
+            .tabs
+            .active()
+            .and_then(|index| self.tabs.items().get(index))
+            .map(|item| item.buffer_id)
+        else {
+            return;
+        };
+        // Requests are drained from every buffer: one left in a tab the user
+        // switched away from must not fire when they come back to it.
+        let mut pending = None;
+        for (id, buffer) in self.buffers.iter_mut() {
+            if let Some(index) = buffer.take_nav_request()
+                && *id == buffer_id
+            {
+                pending = Some(index);
+            }
+        }
+        let Some(index) = pending else {
+            return;
+        };
+        if let Some(buffer) = self.buffers.get_mut(&buffer_id) {
+            buffer.set_caret(index);
+        }
+        self.goto_definition();
+    }
+
+    /// Turns the server's locations into rows of the list.
+    ///
+    /// Paths are made relative to the project (anything outside it is dropped, as
+    /// it cannot be opened here), duplicates are merged, and the rows are ordered
+    /// by file and line so the list reads like a search result.
+    fn hits_from(&self, locations: Vec<lsp_types::Location>) -> Vec<crate::ui::results::Hit> {
+        use crate::ui::results::Hit;
+
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return Vec::new();
+        };
+        let mut hits: Vec<Hit> = Vec::new();
+        for location in locations {
+            let Some(absolute) = ide_lsp::uri_to_path(&location.uri) else {
+                continue;
+            };
+            let Ok(rel) = absolute.strip_prefix(&root) else {
+                continue;
+            };
+            let hit = Hit {
+                path: rel.to_path_buf(),
+                line: location.range.start.line,
+                character: location.range.start.character,
+                text: self.line_at(rel, location.range.start.line),
+            };
+            if hits.iter().any(|known| {
+                known.path == hit.path && known.line == hit.line && known.character == hit.character
+            }) {
+                continue;
+            }
+            hits.push(hit);
+        }
+        hits.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.character.cmp(&right.character))
+        });
+        hits
+    }
+
+    /// The text of one line: from the buffer when the file is open (it may hold
+    /// edits), from disk otherwise.
+    fn line_at(&self, rel: &Path, line: u32) -> String {
+        let open = self
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == rel)
+            .and_then(|item| self.buffers.get(&item.buffer_id));
+        if let Some(buffer) = open {
+            return buffer.line_text(line as usize).to_owned();
+        }
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return String::new();
+        };
+        std::fs::read_to_string(root.join(rel))
+            .ok()
+            .and_then(|text| text.lines().nth(line as usize).map(str::to_owned))
+            .unwrap_or_default()
     }
 
     /// Tells the server about every open document that it can understand.
@@ -640,6 +763,16 @@ impl AppState {
             crate::lsp::Outcome::Failed(message) => self.status = message,
             crate::lsp::Outcome::NoDefinition { from } => {
                 self.status = format!("no definition for the symbol in {}", display_name(&from));
+            }
+            crate::lsp::Outcome::References { from, locations } => {
+                let hits = self.hits_from(locations);
+                let count = hits.len();
+                self.results.show_hits(hits);
+                self.status = if count == 0 {
+                    format!("no references to the symbol in {}", display_name(&from))
+                } else {
+                    format!("{count} references")
+                };
             }
             crate::lsp::Outcome::Definitions { from, locations } => {
                 let Some(first) = locations.first() else {

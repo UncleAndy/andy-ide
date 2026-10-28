@@ -21,6 +21,7 @@ pub enum Job {
     Change { path: PathBuf, text: String },
     Close { path: PathBuf },
     Definition { path: PathBuf, position: Position },
+    References { path: PathBuf, position: Position },
 }
 
 /// What came back.
@@ -34,6 +35,11 @@ pub enum Outcome {
     },
     /// A definition request that found nothing.
     NoDefinition { from: PathBuf },
+    /// Every place the symbol under the caret is used.
+    References {
+        from: PathBuf,
+        locations: Vec<Location>,
+    },
     /// Something went wrong; the text is for the status bar, the editor keeps
     /// working.
     Failed(String),
@@ -194,6 +200,13 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
             let _ = session.did_close(&path);
             None
         }
+        Job::References { path, position } => Some(match session.references(&path, position) {
+            Ok(locations) => Outcome::References {
+                from: path,
+                locations,
+            },
+            Err(error) => Outcome::Failed(format!("{error:#}")),
+        }),
         Job::Definition { path, position } => {
             let mut found = session.definition(&path, position);
             // A cold server answers "nothing" until it has loaded the project, so

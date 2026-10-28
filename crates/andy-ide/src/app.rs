@@ -131,6 +131,11 @@ impl App {
                 .push(crate::state::Action::OpenFile(path));
         }
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
+        let chosen = self.state.results.show(ui.ctx());
+        if let Some(action) = chosen {
+            self.state.pending.push(action);
+        }
+        self.state.poll_navigation();
         self.state.apply_pending();
 
         self.frames += 1;
@@ -212,6 +217,12 @@ impl App {
             .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F12));
         if f12 {
             self.state.goto_definition();
+        }
+        let references = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F12));
+        if references {
+            self.state.find_references();
         }
     }
 }
@@ -2257,6 +2268,231 @@ mod real_navigation_tests {
             app.state.status
         );
         assert!(buffer.line_text(0).starts_with("fn helper"));
+        app.state.lsp.take();
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    use crate::lsp::Outcome;
+    use lsp_types::{Location, Position, Range};
+
+    fn project(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = project.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, text).unwrap();
+        }
+        let app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        (project, config, app)
+    }
+
+    fn at(root: &std::path::Path, name: &str, line: u32, character: u32) -> Location {
+        Location {
+            uri: ide_lsp::path_to_uri(&root.join(name)).expect("a uri"),
+            range: Range {
+                start: Position { line, character },
+                end: Position {
+                    line,
+                    character: character + 1,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn references_are_ordered_merged_and_made_relative() {
+        let (project, _config, mut app) = project(&[
+            ("a.rs", "one\ntwo\n"),
+            ("b.rs", "alpha\nbeta\n"),
+            ("c/x.rs", "gamma\n"),
+        ]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        // Out of order on purpose, with the same place twice and one file the
+        // project does not contain.
+        let outside = tempfile::tempdir().unwrap();
+        let locations = vec![
+            at(project.path(), "b.rs", 1, 0),
+            at(project.path(), "a.rs", 1, 2),
+            at(project.path(), "a.rs", 1, 2),
+            at(project.path(), "c/x.rs", 0, 0),
+            Location {
+                uri: ide_lsp::path_to_uri(&outside.path().join("far.rs")).unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+            },
+        ];
+
+        app.state.apply_outcome(Outcome::References {
+            from: std::path::PathBuf::from("a.rs"),
+            locations,
+        });
+
+        let hits = &app.state.results.hits;
+        assert!(app.state.results.open, "the list did not open");
+        assert_eq!(
+            hits.len(),
+            3,
+            "the duplicate or the outside file got in: {hits:?}"
+        );
+        let paths: Vec<String> = hits
+            .iter()
+            .map(|hit| hit.path.display().to_string())
+            .collect();
+        assert_eq!(paths, vec!["a.rs", "b.rs", "c/x.rs"], "not ordered by file");
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].character, 2, "the column is kept");
+        assert_eq!(hits[0].text, "two", "the preview is the line of the hit");
+        assert_eq!(hits[1].text, "beta");
+        assert_eq!(hits[2].text, "gamma");
+        assert!(
+            app.state.status.contains("3 references"),
+            "status was {:?}",
+            app.state.status
+        );
+    }
+
+    #[test]
+    fn the_preview_of_an_edited_buffer_shows_the_edits() {
+        let (project, _config, mut app) = project(&[("a.rs", "one\ntwo\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        let id = app
+            .state
+            .tabs
+            .items()
+            .iter()
+            .find(|item| item.path == std::path::Path::new("a.rs"))
+            .map(|item| item.buffer_id)
+            .expect("the file is open");
+        let buffer = app.state.buffers.get_mut(&id).unwrap();
+        buffer.set_caret(0);
+        buffer.insert_text("edited ");
+
+        app.state.apply_outcome(Outcome::References {
+            from: std::path::PathBuf::from("a.rs"),
+            locations: vec![at(project.path(), "a.rs", 0, 0)],
+        });
+
+        assert_eq!(
+            app.state.results.hits[0].text, "edited one",
+            "the preview came from disk, not from the buffer"
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_says_so_and_opens_nothing() {
+        let (_project, _config, mut app) = project(&[("a.rs", "one\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        app.state.apply_outcome(Outcome::References {
+            from: std::path::PathBuf::from("a.rs"),
+            locations: Vec::new(),
+        });
+
+        assert!(!app.state.results.open, "an empty list was shown");
+        assert!(
+            app.state.status.contains("no references"),
+            "status was {:?}",
+            app.state.status
+        );
+    }
+}
+
+/// `Shift+F12` through the whole chain with the real server.
+#[cfg(test)]
+mod real_reference_tests {
+    use super::*;
+
+    const SOURCE: &str = "fn helper() -> u8 {\n    7\n}\n\nfn main() {\n    let value = helper();\n    println!(\"{value}\");\n}\n";
+
+    #[test]
+    fn shift_f12_lists_the_uses_with_rust_analyzer() {
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/main.rs")) else {
+            println!("no server is known for Rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), SOURCE).unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/main.rs"));
+
+        // The caret on the declaration of `helper`, which has one use.
+        let declaration = SOURCE.find("helper").expect("the declaration") + 1;
+        let buffer = app.state.buffers.values_mut().next().expect("a buffer");
+        buffer.set_caret_byte(declaration);
+
+        app.state.find_references();
+        assert!(app.state.lsp.is_some(), "the server started");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !app.state.results.open && std::time::Instant::now() < deadline {
+            app.state.poll_lsp();
+            if !app.state.status.contains("looking for") && !app.state.results.open {
+                // A cold server answers nothing at first: ask again.
+                app.state.find_references();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        let hits = &app.state.results.hits;
+        assert!(
+            !hits.is_empty(),
+            "rust-analyzer listed no uses (status: {})",
+            app.state.status
+        );
+        let lines: Vec<u32> = hits.iter().map(|hit| hit.line).collect();
+        assert!(
+            lines.contains(&0),
+            "the declaration itself is missing from {lines:?}"
+        );
+        assert!(
+            lines.contains(&5),
+            "the call on line 6 is missing from {lines:?}"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.path.ends_with("src/main.rs")),
+            "a hit points outside the file: {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|hit| !hit.text.trim().is_empty()),
+            "a preview is empty: {hits:?}"
+        );
         app.state.lsp.take();
     }
 }

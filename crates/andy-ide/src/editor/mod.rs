@@ -35,6 +35,9 @@ pub struct EditorBuffer {
     /// frame, and counting the whole document per frame is what used to make
     /// scrolling through a big file sluggish.
     max_line_chars: usize,
+    /// A Ctrl+Click asked for the definition of the character at this index, and
+    /// the application has not answered it yet.
+    nav_request: Option<usize>,
 }
 
 impl EditorBuffer {
@@ -64,6 +67,7 @@ impl EditorBuffer {
             line_starts: Vec::new(),
             line_ends: Vec::new(),
             max_line_chars: 0,
+            nav_request: None,
         };
         buffer.refresh();
         buffer
@@ -137,6 +141,16 @@ impl EditorBuffer {
         let line = line.min(self.line_count().saturating_sub(1));
         let col = col.min(self.line_text(line).chars().count());
         self.doc.line_col_to_char(line, col)
+    }
+
+    /// Records that the character at this index was clicked with Ctrl held.
+    pub fn request_navigation(&mut self, index: usize) {
+        self.nav_request = Some(index.min(self.doc.len_chars()));
+    }
+
+    /// Takes the pending navigation request, if there is one.
+    pub fn take_nav_request(&mut self) -> Option<usize> {
+        self.nav_request.take()
     }
 
     /// The caret as a byte offset, for anything that speaks bytes.

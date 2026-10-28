@@ -200,10 +200,17 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 let (line, col) =
                     position_to_line_col(buffer, &layouts, text_origin, target, row_h);
                 let index = buffer.char_index(line, col);
+                // Ctrl+Click is "go to the definition", as in every other editor:
+                // the caret follows the symbol, and the definition is asked for.
+                let navigation = response.clicked()
+                    && ui.input(|input| input.modifiers.ctrl && !input.modifiers.shift);
                 if response.dragged() {
                     buffer.set_drag_caret(index);
                 } else {
                     buffer.set_caret(index);
+                    if navigation {
+                        buffer.request_navigation(index);
+                    }
                 }
             }
 
