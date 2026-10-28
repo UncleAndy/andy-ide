@@ -2804,3 +2804,204 @@ mod the_terminal_sessions {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// A link in the terminal: `Ctrl+Click` opens it, a plain click does not.
+mod the_terminal_links {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn open_terminal(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+        rect
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    /// The point in the middle of the cell where `needle` starts on its row.
+    fn point_of(gui: &Gui, rect: egui::Rect, needle: &str) -> egui::Pos2 {
+        let contents = gui.app().state.terminal.contents();
+        // The last line, not the first: the shell echoes the command it ran, and the
+        // output that matters comes below the echo.
+        let (row, line) = contents
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .last()
+            .expect("the text is on the screen");
+        let column = line.find(needle).expect("the text is on its line");
+        let (cols, rows) = gui.app().state.terminal.size();
+        let cell = egui::vec2(rect.width() / cols as f32, rect.height() / rows as f32);
+        rect.left_top() + egui::vec2((column as f32 + 1.0) * cell.x, (row as f32 + 0.5) * cell.y)
+    }
+
+    fn ctrl_click(gui: &mut Gui, at: egui::Pos2) -> egui::FullOutput {
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
+        gui.harness.event(egui::Event::PointerMoved(at));
+        gui.harness.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness.step();
+        let output = gui.harness.output().clone();
+        gui.harness.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        gui.settle();
+        output
+    }
+
+    #[test]
+    fn ctrl_click_opens_a_url_in_the_browser() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        gui.harness.event(egui::Event::Text(
+            "printf '\\nsee https://example.com/docs\\n'\n".to_owned(),
+        ));
+        gui.settle();
+        // Twice: once in the echoed command, once in what it printed.
+        wait_until(&mut gui, "the url to be printed", |gui| {
+            gui.app()
+                .state
+                .terminal
+                .contents()
+                .matches("https://example.com/docs")
+                .count()
+                >= 2
+        });
+
+        let at = point_of(&gui, rect, "https://example.com/docs");
+        let output = ctrl_click(&mut gui, at);
+        let opened = output
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::OpenUrl(url) => Some(url.url.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            opened.as_deref(),
+            Some("https://example.com/docs"),
+            "Ctrl+Click did not open the link"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn ctrl_click_opens_the_file_on_the_line_it_names() {
+        let mut gui = Gui::new(
+            &[("src/main.rs", "first\nsecond\nthird\nfourth\n")],
+            Some("src/main.rs"),
+        );
+        let rect = open_terminal(&mut gui);
+        gui.harness.event(egui::Event::Text(
+            "printf '\\nboom at src/main.rs:3\\n'\n".to_owned(),
+        ));
+        gui.settle();
+        wait_until(&mut gui, "the file link to be printed", |gui| {
+            gui.app()
+                .state
+                .terminal
+                .contents()
+                .matches("src/main.rs:3")
+                .count()
+                >= 2
+        });
+
+        let at = point_of(&gui, rect, "src/main.rs:3");
+        ctrl_click(&mut gui, at);
+        let state = &gui.app().state;
+        let index = state.tabs.active().expect("an active tab");
+        let active = &state.tabs.items()[index].path;
+        assert_eq!(
+            active,
+            std::path::Path::new("src/main.rs"),
+            "the link did not open the file"
+        );
+        let line = state
+            .active_buffer()
+            .map(|buffer| buffer.line_col().0)
+            .expect("a buffer");
+        assert_eq!(line, 2, "the caret is not on the third line");
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_plain_click_does_not_open_a_link() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        gui.harness.event(egui::Event::Text(
+            "printf '\\nsee https://example.com/docs\\n'\n".to_owned(),
+        ));
+        gui.settle();
+        wait_until(&mut gui, "the url to be printed", |gui| {
+            gui.app()
+                .state
+                .terminal
+                .contents()
+                .contains("https://example.com/docs")
+        });
+
+        let at = point_of(&gui, rect, "https://example.com/docs");
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            gui.harness.step();
+        }
+        let opened = gui
+            .harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)));
+        assert!(!opened, "a plain click opened the link");
+        gui.app_mut().state.terminal.restart();
+    }
+}

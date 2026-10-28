@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+pub mod link;
+
 /// How many lines above the screen are kept: enough to scroll back through a test run,
 /// small enough that a chatty program cannot eat memory.
 pub const SCROLLBACK: usize = 2000;

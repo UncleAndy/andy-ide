@@ -177,6 +177,19 @@ impl App {
                 .show_inside(ui, &mut viewer);
         });
 
+        // A link clicked in the terminal: the panel knows the text, the application
+        // knows the project and the browser.
+        if let Some(link) = self.state.terminal.take_link() {
+            match link {
+                ide_term::link::Link::Url(url) => {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+                ide_term::link::Link::File { path, line, column } => {
+                    self.state.follow_file_link(&path, line, column);
+                }
+            }
+        }
+
         self.state.apply_pending();
         self.handle_keys(ui);
         self.state.poll_fs_events();

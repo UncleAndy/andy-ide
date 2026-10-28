@@ -63,6 +63,8 @@ pub struct Terminal {
     pub shown: bool,
     /// Where the panel was last drawn, for the tests that click it.
     pub shown_rect: Option<egui::Rect>,
+    /// A link that was `Ctrl`-clicked this frame, for the application to act on.
+    link_clicked: Option<ide_term::link::Link>,
 }
 
 /// The colour under selected cells.
@@ -116,6 +118,7 @@ impl Terminal {
             focused: false,
             shown: false,
             shown_rect: None,
+            link_clicked: None,
         }
     }
 
@@ -364,6 +367,8 @@ impl Terminal {
         }
         let cell_size = egui::vec2(cell_width, cell_height);
         self.track_selection(ui, rect, cell_size, cols, rows);
+        let hovered = self.link_under_pointer(ui, rect, cell_size, cols, rows);
+        self.follow_clicked_link(ui, &hovered);
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(16, 18, 20));
         // A shell that has finished is worth saying out loud; otherwise the tab looks
@@ -436,6 +441,19 @@ impl Terminal {
                     );
                 }
             }
+            // A link under the pointer is underlined, and only then: a screen full
+            // of underlined prose would be noise.
+            if let Some((start, end, row, _)) = &hovered {
+                let underline = egui::Rect::from_min_size(
+                    rect.left_top()
+                        + egui::vec2(
+                            *start as f32 * cell_width,
+                            (*row as f32 + 1.0) * cell_height - 2.0,
+                        ),
+                    egui::vec2((*end as f32 - *start as f32) * cell_width, 2.0),
+                );
+                painter.rect_filled(underline, 0.0, egui::Color32::from_rgb(120, 180, 255));
+            }
             // The cursor is drawn last so that a block under a glyph is visible.
             if !screen.hide_cursor() {
                 let (row, col) = screen.cursor_position();
@@ -479,10 +497,11 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) {
-        let (pos, shift, pressed, down, released) = ui.input(|input| {
+        let (pos, shift, ctrl, pressed, down, released) = ui.input(|input| {
             (
                 input.pointer.interact_pos(),
                 input.modifiers.shift,
+                input.modifiers.ctrl,
                 input.pointer.button_pressed(egui::PointerButton::Primary),
                 input.pointer.button_down(egui::PointerButton::Primary),
                 input.pointer.button_released(egui::PointerButton::Primary),
@@ -491,6 +510,14 @@ impl Terminal {
         let wants_mouse = self
             .pane()
             .is_some_and(|pane| pane.session.mouse_protocol().enabled);
+        // `Ctrl` is the link key: a click with it opens what is under the pointer, and
+        // must not start a selection as well.
+        if ctrl {
+            if let Some(pane) = self.pane_mut() {
+                pane.dragging = false;
+            }
+            return;
+        }
         let selecting = shift || !wants_mouse;
         let Some(pane) = self.pane_mut() else {
             return;
@@ -530,6 +557,67 @@ impl Terminal {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn selection(&self) -> Option<Selection> {
         self.pane().and_then(|pane| pane.selection)
+    }
+
+    /// The link that was just `Ctrl`-clicked, if one was.
+    ///
+    /// The panel knows nothing of the project or the browser, so it hands the link
+    /// over and the application decides what to do with it.
+    pub fn take_link(&mut self) -> Option<ide_term::link::Link> {
+        self.link_clicked.take()
+    }
+
+    /// Records the link a `Ctrl`-click landed on, and shows the hand over one.
+    ///
+    /// Whether it is opened, and how, is the application's business: a URL belongs to
+    /// the browser, a `file:line` to the editor beside it.
+    fn follow_clicked_link(
+        &mut self,
+        ui: &Ui,
+        hovered: &Option<(u16, u16, u16, ide_term::link::Link)>,
+    ) {
+        let Some((_, _, _, link)) = hovered else {
+            return;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let clicked = ui.input(|input| {
+            input.modifiers.ctrl && input.pointer.button_pressed(egui::PointerButton::Primary)
+        });
+        if clicked {
+            self.link_clicked = Some(link.clone());
+        }
+    }
+
+    /// The link under the pointer, and the columns it covers on its row.
+    ///
+    /// Links are read from the characters on the screen, so they are found in a
+    /// shell's output as well as in a build tool's.
+    fn link_under_pointer(
+        &self,
+        ui: &Ui,
+        rect: egui::Rect,
+        cell: egui::Vec2,
+        cols: u16,
+        rows: u16,
+    ) -> Option<(u16, u16, u16, ide_term::link::Link)> {
+        if !ui.input(|input| input.modifiers.ctrl) {
+            return None;
+        }
+        let pos = ui.input(|input| input.pointer.hover_pos())?;
+        if !rect.contains(pos) {
+            return None;
+        }
+        let pane = self.pane()?;
+        let (column, row) = Self::cell_at(rect, cell, pos, cols, rows);
+        let found = pane.session.with_screen(|screen| {
+            let text: String = (0..cols)
+                .filter_map(|col| screen.cell(row, col))
+                .map(|cell| cell.contents())
+                .collect();
+            ide_term::link::find(&text, column as usize)
+        });
+        let (range, link) = found?;
+        Some((range.start as u16, range.end as u16, row, link))
     }
 
     /// The selected text, one line per row, trailing blanks cut.
@@ -603,7 +691,8 @@ impl Terminal {
         // With `Shift` held the mouse is the terminal's, not the program's: it picks
         // text. Programs know this as the shift override, and it is the only way to
         // copy a line out of `mc` or `vim`, which would otherwise eat every click.
-        if modifiers.shift {
+        // `Ctrl` is the link key, and a program must not see that click either.
+        if modifiers.shift || modifiers.ctrl {
             pane.mouse_cell = None;
             return;
         }

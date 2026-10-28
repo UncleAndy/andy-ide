@@ -1514,6 +1514,45 @@ impl AppState {
         }
     }
 
+    /// Opens a file a terminal link named, at the line it named.
+    ///
+    /// A compiler prints `src/main.rs:12:5`, and that is where the user wants to be:
+    /// the tab opens on the line, not at the top of the file.
+    pub fn follow_file_link(&mut self, path: &str, line: u32, column: u32) {
+        let named = PathBuf::from(path);
+        let root = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        let absolute = match (&root, named.is_absolute()) {
+            (_, true) => named.clone(),
+            (Some(root), false) => root.join(&named),
+            (None, false) => {
+                self.status = format!("no project: cannot open {path}");
+                return;
+            }
+        };
+        let text = match std::fs::read_to_string(&absolute) {
+            Ok(text) => text,
+            Err(error) => {
+                self.status = format!("{}: {error}", absolute.display());
+                return;
+            }
+        };
+        let rel = match root
+            .as_ref()
+            .and_then(|root| absolute.strip_prefix(root).ok())
+        {
+            Some(rel) => rel.to_path_buf(),
+            None => absolute.clone(),
+        };
+        let position = lsp_types::Position::new(line.saturating_sub(1), column.saturating_sub(1));
+        let byte = ide_lsp::position_to_byte(&text, position);
+        self.open_file(&rel);
+        self.place_caret(&rel, byte);
+        self.status = format!("{}:{}:{}", display_name(&rel), line, column);
+    }
+
     /// Puts the caret at a byte offset of a tab, opening it first if needed.
     fn place_caret(&mut self, rel: &Path, byte: usize) {
         let Some(buffer_id) = self
