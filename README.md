@@ -31,7 +31,10 @@ rope-backed editor with tree-sitter highlighting for twelve languages, tabs, qui
 session and layout restore, atomic save, filesystem watching, Markdown preview, dark and
 light themes. Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
-Next: M2, navigation through the language server. Specification: `docs/TZ_andy_ide_v0.1.md`.
+Milestone M2 (navigation through a language server) is under way: the LSP client in
+`ide-lsp` speaks the protocol to a real child process, `F12` goes to the definition and
+the problems panel shows what the server published. Plan and state:
+[`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
 
 ## Crates
 
@@ -39,6 +42,7 @@ Next: M2, navigation through the language server. Specification: `docs/TZ_andy_i
 |---|---|
 | `ide-core` | Project model, file tree, configuration, sessions, filesystem watching |
 | `ide-buffer` | Rope-backed text buffer, cursors, selections, undo history |
+| `ide-lsp` | Language server client: transport, handshake, document sync, navigation requests |
 | `ide-syntax` | Language registry, tree-sitter grammars, incremental highlighting |
 | `ide-lsp` | LSP client, language server registry, document synchronisation |
 | `ide-agents` | Agent registry, ACP client, MCP bridge, edit proposals |
