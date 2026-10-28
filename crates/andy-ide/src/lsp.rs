@@ -6,13 +6,23 @@
 //! job, keeps drawing, and picks the answer up from [`LanguageService::poll`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ide_lsp::registry::ServerConfig;
 use ide_lsp::{LspSession, uri_to_path};
 use lsp_types::{DocumentSymbol, Location, Position, SymbolInformation};
+
+/// How long the window waits for the worker to go on its own before leaving it.
+///
+/// A server in the middle of a request cannot be interrupted, and waiting for one
+/// held the window open for tens of seconds on the way out. The worker is an
+/// ordinary thread with a process behind it: the program is leaving anyway, and
+/// the server sees end-of-file on its stdin once the pipes close.
+const WORKER_GRACE: Duration = Duration::from_millis(400);
 
 /// Something the editor wants from the server.
 #[derive(Debug)]
@@ -256,6 +266,12 @@ pub struct LanguageService {
     jobs: Sender<Job>,
     outcomes: Receiver<Outcome>,
     worker: Option<JoinHandle<()>>,
+    /// Set when the application is closing: retry pauses stop pausing and long
+    /// work gives up, so the thread can be joined instead of waited out.
+    stopping: Arc<AtomicBool>,
+    /// The worker rings this when it has returned; the exit waits on it, not on
+    /// the thread handle, because a join cannot be given a deadline.
+    finished: Option<Receiver<()>>,
 }
 
 impl LanguageService {
@@ -266,18 +282,26 @@ impl LanguageService {
     pub fn start(config: &'static ServerConfig, root: &Path) -> Self {
         let (job_sender, jobs) = channel();
         let (outcomes, outcome_receiver) = channel();
+        let (finished, finished_receiver) = channel();
         let root = root.to_path_buf();
         let name = config.name;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
 
         let worker = std::thread::Builder::new()
             .name(format!("{name}-worker"))
-            .spawn(move || work(config, &root, jobs, outcomes))
+            .spawn(move || {
+                work(config, &root, jobs, outcomes, &worker_stopping);
+                let _ = finished.send(());
+            })
             .ok();
 
         Self {
             jobs: job_sender,
             outcomes: outcome_receiver,
             worker,
+            stopping,
+            finished: Some(finished_receiver),
         }
     }
 
@@ -300,13 +324,20 @@ impl LanguageService {
     /// Stops the worker by dropping the job queue; the server is shut down by
     /// the worker itself when the queue closes.
     pub fn stop(&mut self) {
+        // Retry pauses wake up and long work gives up, so the usual stop takes
+        // milliseconds even in the middle of a rename.
+        self.stopping.store(true, Ordering::Relaxed);
         // A channel closes when the last sender goes, so the sender is replaced
         // with one whose receiver is gone.
         let (dead, _) = channel();
         self.jobs = dead;
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.recv_timeout(WORKER_GRACE);
         }
+        // Whatever the worker is still doing (a request the server has not
+        // answered yet) is not waited for: no join can be given a deadline, and
+        // the answer is worth nothing to a program that is leaving.
+        self.worker.take();
     }
 }
 
@@ -322,6 +353,7 @@ fn work(
     root: &Path,
     jobs: Receiver<Job>,
     outcomes: Sender<Outcome>,
+    stopping: &AtomicBool,
 ) {
     let mut session = match LspSession::start(config, root) {
         Ok(session) => session,
@@ -340,9 +372,12 @@ fn work(
     let mut warm = false;
 
     loop {
+        if stopping.load(Ordering::Relaxed) {
+            break;
+        }
         match jobs.recv_timeout(Duration::from_millis(200)) {
             Ok(job) => {
-                if let Some(outcome) = apply(&mut session, job, &mut warm)
+                if let Some(outcome) = apply(&mut session, job, &mut warm, stopping)
                     && outcomes.send(outcome).is_err()
                 {
                     break;
@@ -372,11 +407,39 @@ fn work(
         }
     }
 
+    if stopping.load(Ordering::Relaxed) {
+        // Leaving: closing the pipes is enough. A polite `shutdown` asks a server
+        // that may be busy indexing, and the window is waiting on this thread.
+        return;
+    }
     session.shutdown();
 }
 
+/// Waits before a retry, in steps, so that leaving does not have to wait too.
+///
+/// Returns `false` when the application is closing: the caller should stop asking.
+fn pause(delay_ms: u64, stopping: &AtomicBool) -> bool {
+    const STEP: Duration = Duration::from_millis(20);
+    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+    loop {
+        if stopping.load(Ordering::Relaxed) {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(STEP.min(left));
+    }
+}
+
 /// Carries out one job, if it produces an answer worth reporting.
-fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome> {
+fn apply(
+    session: &mut LspSession,
+    job: Job,
+    warm: &mut bool,
+    stopping: &AtomicBool,
+) -> Option<Outcome> {
     match job {
         Job::Open { path, text } => {
             if let Err(error) = session.did_open(&path, &text) {
@@ -407,7 +470,9 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
             // server has indexed the file means "not yet", not "nothing here".
             if !*warm && matches!(&found, Ok(symbols) if symbols.is_empty()) {
                 for delay in [250u64, 500, 1000, 2000] {
-                    std::thread::sleep(Duration::from_millis(delay));
+                    if !pause(delay, stopping) {
+                        break;
+                    }
                     found = session.document_symbols(&path);
                     if !matches!(&found, Ok(symbols) if symbols.is_empty()) {
                         break;
@@ -440,7 +505,9 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
             let mut found = ask(session);
             if !*warm && matches!(&found, Ok(None)) {
                 for delay in [250u64, 500, 1000, 2000] {
-                    std::thread::sleep(Duration::from_millis(delay));
+                    if !pause(delay, stopping) {
+                        break;
+                    }
                     found = ask(session);
                     if !matches!(&found, Ok(None)) {
                         break;
@@ -481,7 +548,9 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 if !not_yet {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(delay));
+                if !pause(delay, stopping) {
+                    break;
+                }
                 asked = rename_once(session, &path, position, &new_name);
             }
             let changes = match asked {
@@ -530,7 +599,9 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
             // is what waits, never the frame loop.
             if !*warm && matches!(&found, Ok(locations) if locations.is_empty()) {
                 for delay in [250u64, 500, 1000, 2000] {
-                    std::thread::sleep(Duration::from_millis(delay));
+                    if !pause(delay, stopping) {
+                        break;
+                    }
                     found = session.definition(&path, position);
                     if !matches!(&found, Ok(locations) if locations.is_empty()) {
                         break;
@@ -649,5 +720,75 @@ mod workspace_edits {
     fn an_empty_answer_is_no_changes() {
         let edit: lsp_types::WorkspaceEdit = serde_json::from_str("{}").unwrap();
         assert!(rename_changes(&edit).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod leaving {
+    use super::*;
+
+    #[test]
+    fn a_retry_pause_ends_as_soon_as_the_application_leaves() {
+        let stopping = AtomicBool::new(false);
+        let started = Instant::now();
+        assert!(pause(40, &stopping), "a pause that was not interrupted");
+        assert!(started.elapsed() >= Duration::from_millis(35));
+
+        stopping.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        assert!(
+            !pause(8000, &stopping),
+            "the pause outlived the request to go"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "the pause lasted {:?} after the stop",
+            started.elapsed()
+        );
+    }
+
+    /// The real thing: a rename that keeps retrying, and a window closing on it.
+    #[test]
+    fn a_busy_worker_does_not_hold_the_window_shut() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(server) = ide_lsp::server_for(Path::new("src/main.rs")) else {
+            println!("no server is known for Rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+        let path = root.join("crates/andy-ide/src/state.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        let mut service = LanguageService::start(server, &root);
+        service.send(Job::Open {
+            path: path.clone(),
+            text,
+        });
+        // A position with no symbol on it: rust-analyzer refuses, and the job spends
+        // the next half a minute retrying. That is what the old exit waited out.
+        service.send(Job::Rename {
+            path,
+            position: Position::new(0, 1),
+            new_name: "zzz".to_owned(),
+        });
+        std::thread::sleep(Duration::from_millis(400));
+
+        let started = Instant::now();
+        service.stop();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "leaving took {:?}",
+            started.elapsed()
+        );
     }
 }
