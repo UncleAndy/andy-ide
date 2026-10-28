@@ -127,6 +127,26 @@ impl Registry {
         self.agents.iter().find(|agent| agent.name == name)
     }
 
+    /// Adds an agent, or replaces the one with that name.
+    ///
+    /// Order is kept: a list that reorders itself when a command is saved is a list a
+    /// person has to read again every time.
+    pub fn remember(&mut self, spec: AgentSpec) {
+        match self.agents.iter_mut().find(|agent| agent.name == spec.name) {
+            Some(existing) => *existing = spec,
+            None => self.agents.push(spec),
+        }
+    }
+
+    /// Writes the list where it is kept.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(path, self.to_toml()).with_context(|| format!("writing {}", path.display()))
+    }
+
     /// The first agent: what the panel opens with.
     pub fn first(&self) -> Option<&AgentSpec> {
         self.agents.first()
@@ -251,5 +271,57 @@ THING_KEY = "1"
 
         let registry = Registry::load(&place).expect("the read");
         assert_eq!(registry.agents.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod saving_tests {
+    use super::*;
+
+    fn hermes() -> AgentSpec {
+        AgentSpec {
+            name: "Hermes".to_owned(),
+            command: "hermes".to_owned(),
+            args: vec!["acp".to_owned()],
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn typed() -> AgentSpec {
+        AgentSpec {
+            name: "agent".to_owned(),
+            command: "/opt/my agent/agent".to_owned(),
+            args: vec!["--stdio".to_owned()],
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_remembered_agent_survives_a_trip_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".andy-ide").join(FILE);
+        let mut registry = Registry::defaults();
+        registry.remember(typed());
+        registry.save(&path).expect("the write");
+
+        let read = Registry::load(&path).expect("the read");
+        assert_eq!(read.agents.len(), 2);
+        assert_eq!(read.agents[1].name, "agent");
+        assert_eq!(read.agents[1].command, "/opt/my agent/agent");
+        assert_eq!(read.agents[1].args, vec!["--stdio".to_owned()]);
+    }
+
+    #[test]
+    fn remembering_the_same_name_replaces_it_and_keeps_the_order() {
+        let mut registry = Registry::defaults();
+        registry.remember(typed());
+        let mut changed = hermes();
+        changed.args = vec!["--acp".to_owned()];
+        registry.remember(changed);
+
+        assert_eq!(registry.agents.len(), 2, "a name was added twice");
+        assert_eq!(registry.agents[0].name, "Hermes");
+        assert_eq!(registry.agents[0].args, vec!["--acp".to_owned()]);
+        assert_eq!(registry.agents[1].name, "agent");
     }
 }

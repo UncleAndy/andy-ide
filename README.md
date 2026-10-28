@@ -104,7 +104,12 @@ installed.
 
 The panel is `Alt+0`: a list of the agents in the file, the conversation as it arrives, a
 field whose Enter sends, and a permission question that stops the turn until it is
-answered. The session lives on a worker thread — the panel posts what was typed, the
+answered. The command that starts it is a field, not a hidden line of a file:
+there is no complete list of ACP agents, so `hermes acp`, a path to something built this
+afternoon, or `npx …` can be typed and started — read as a command line, with quotes and
+escapes, and run without a shell in between, so `;` and `` stay characters of a file
+name rather than becoming a second command. `Remember` writes it into `agents.toml`. The
+session lives on a worker thread — the panel posts what was typed, the
 worker pumps what the agent says — so an answer is drawn while it is still being written.
 
 Plan and state:

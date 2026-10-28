@@ -16,7 +16,11 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     input(ui, state);
 }
 
-/// The agent's name as a menu, and the button that starts and stops it.
+/// The command that starts the agent, the menu that fills it in, and the buttons.
+///
+/// The command is a field and not a label: an ACP agent is any program that speaks the
+/// protocol, and the list of them is never complete. The menu writes a command into the
+/// field — choosing `Hermes` fills in `hermes acp` — and the field is what runs.
 fn header(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         let chosen = state
@@ -34,6 +38,9 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             });
         if named != chosen {
             state.agent.stop();
+            if let Some(spec) = state.agent.registry.get(&named) {
+                state.agent.command = ide_agents::quote_command(spec);
+            }
             state.agent.chosen = Some(named);
             state.agent.status = "start the agent when ready".to_owned();
         }
@@ -45,10 +52,33 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             .on_hover_text("Start or stop the agent process")
             .clicked()
         {
-            state.agent.toggle();
+            if running {
+                state.agent.stop();
+                state.agent.status = "stopped".to_owned();
+            } else {
+                state.agent.start();
+            }
+        }
+        if ui
+            .add_enabled(!running, egui::Button::new("Remember"))
+            .on_hover_text("Write this command into agents.toml")
+            .clicked()
+        {
+            state.agent.remember();
         }
         ui.separator();
         ui.weak(&state.agent.status);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Command");
+        let width = (ui.available_width() - 8.0).max(80.0);
+        ui.add_enabled(
+            !state.agent.running(),
+            egui::TextEdit::singleline(&mut state.agent.command)
+                .hint_text("hermes acp")
+                .desired_width(width),
+        )
+        .on_hover_text("The program that speaks ACP, with its arguments");
     });
 }
 

@@ -61,6 +61,8 @@ pub struct AgentState {
     pub transcript: Vec<Line>,
     /// What is being typed.
     pub input: String,
+    /// The command line that will be run: the source of truth for which agent starts.
+    pub command: String,
     /// What the panel is doing, in one line.
     pub status: String,
     /// Set while a turn is in flight: the panel disables the input rather than queueing.
@@ -69,6 +71,8 @@ pub struct AgentState {
     pub asking: Option<(u64, PermissionRequest)>,
     worker: Option<Worker>,
     root: Option<PathBuf>,
+    /// Where the agents are kept for this project, once a project is known.
+    place: Option<PathBuf>,
 }
 
 impl AgentState {
@@ -93,9 +97,14 @@ impl AgentState {
             return;
         };
         let place = ide_agents::registry::locate(Some(&root), config);
+        self.place = Some(place.clone());
         match Registry::load_or_write(&place) {
             Ok(registry) => {
                 self.chosen = registry.first().map(|agent| agent.name.clone());
+                self.command = registry
+                    .first()
+                    .map(ide_agents::quote_command)
+                    .unwrap_or_default();
                 self.registry = registry;
                 self.status = match &self.chosen {
                     Some(name) => format!("{name}, not started"),
@@ -109,26 +118,31 @@ impl AgentState {
         }
     }
 
-    /// Starts the chosen agent, or stops the one that is running.
-    pub fn toggle(&mut self) {
+    /// Starts what the command field says, exactly as it is written there.
+    ///
+    /// The field, and not the menu, is the source of truth: there is no list of ACP
+    /// agents that is ever complete, and a panel that can only start what somebody wrote
+    /// into a file beforehand is a panel that cannot try an agent a person has just
+    /// built. A command that cannot be read — an unclosed quote, an empty line — is
+    /// refused in words before anything is spawned.
+    pub fn start(&mut self) {
         if self.worker.is_some() {
-            self.stop();
-            self.status = "stopped".to_owned();
+            self.status = "an agent is already running".to_owned();
             return;
         }
-        let Some(name) = self.chosen.clone() else {
-            self.status = "no agent to start".to_owned();
-            return;
-        };
         let Some(root) = self.root.clone() else {
             self.status = "no project: an agent has nowhere to work".to_owned();
             return;
         };
-        let Some(spec) = self.registry.get(&name).cloned() else {
-            self.status = format!("no agent called {name} in agents.toml");
-            return;
+        let spec = match ide_agents::parse_command(&self.command) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.status = format!("{error}");
+                return;
+            }
         };
 
+        let name = spec.name.clone();
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
         let started = std::thread::Builder::new()
@@ -137,9 +151,33 @@ impl AgentState {
         match started {
             Ok(_) => {
                 self.worker = Some(Worker { commands, replies });
+                self.chosen = Some(name.clone());
                 self.status = format!("{name}: starting…");
             }
             Err(error) => self.status = format!("{name} did not start: {error}"),
+        }
+    }
+
+    /// Writes the command into `agents.toml`, so the next start needs no typing.
+    ///
+    /// Nothing is written until it is asked for: a panel that saved every experiment
+    /// would leave a file full of typos to clean up.
+    pub fn remember(&mut self) {
+        let spec = match ide_agents::parse_command(&self.command) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.status = format!("{error}");
+                return;
+            }
+        };
+        let Some(place) = self.place.clone() else {
+            self.status = "no project: there is nowhere to keep an agent".to_owned();
+            return;
+        };
+        self.registry.remember(spec);
+        match self.registry.save(&place) {
+            Ok(()) => self.status = format!("saved to {}", place.display()),
+            Err(error) => self.status = format!("{error}"),
         }
     }
 

@@ -3905,6 +3905,82 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_command_typed_into_the_field_is_what_runs() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+
+        // A command that is in no file anywhere: typed, and started as typed.
+        let typed = format!("{:?} --not-an-argument-it-knows", stand_in().unwrap());
+        gui.app_mut().state.agent.command = typed.clone();
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the typed agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer from the typed agent", |gui| {
+            !answer(gui).is_empty()
+        });
+        assert_eq!(answer(&gui), "Hello");
+
+        // An unreadable command is refused in words, before anything is spawned.
+        gui.app_mut().state.agent.stop();
+        gui.app_mut().state.agent.command = "agent \"unfinished".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        gui.settle();
+        assert!(
+            !gui.app().state.agent.running(),
+            "an unreadable command was started"
+        );
+        assert!(
+            gui.app().state.agent.status.contains("never closed"),
+            "the refusal is not in words: {:?}",
+            gui.app().state.agent.status
+        );
+    }
+
+    #[test]
+    fn remember_writes_the_typed_command_into_the_file() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+
+        let typed = format!("{:?}", stand_in().unwrap());
+        gui.app_mut().state.agent.command = typed.clone();
+        gui.settle();
+        gui.harness.get_by_label("Remember").click();
+        gui.settle();
+
+        let place = gui._project.path().join(".andy-ide").join("agents.toml");
+        let text = std::fs::read_to_string(&place).expect("the file");
+        assert!(
+            text.contains("acp_test_agent"),
+            "the typed command is not in the file: {text}"
+        );
+        let read = ide_agents::Registry::load(&place).expect("reading it back");
+        assert!(
+            read.agents
+                .iter()
+                .any(|agent| agent.name == "acp_test_agent"),
+            "the agent did not come back from the file: {:?}",
+            read.agents
+        );
+    }
+
+    #[test]
     fn a_question_gets_an_answer_that_streams_in() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
