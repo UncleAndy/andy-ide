@@ -65,6 +65,9 @@ cargo build
 cargo run -p andy-ide -- --project ~/projects/RUST/andy-ide
 ```
 
+Started without `--project`, the editor opens the project that was open last, and
+skips the remembered ones whose directory is gone.
+
 Build artifacts go to `$HOME/.cache/andy-ide-target`, never into the repository.
 
 Checks:

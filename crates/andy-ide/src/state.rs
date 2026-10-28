@@ -167,6 +167,10 @@ impl AppState {
             last_write: 0.0,
         };
 
+        // Launched without a project argument, the editor opens the one the user
+        // had open last, the way every other IDE does: starting from an empty
+        // window and picking the project again on every launch is busywork.
+        let project = project.or_else(|| Self::last_project(&state.recent));
         if let Some(root) = project {
             state.open_project(&root);
         }
@@ -180,6 +184,15 @@ impl AppState {
             state.open_file(&rel);
         }
         state
+    }
+
+    /// The project to open when the command line named none.
+    ///
+    /// The newest remembered project that still exists wins. A directory that
+    /// was moved or deleted since the last launch is skipped instead of being
+    /// opened into an error, and the older entries get their chance.
+    fn last_project(recent: &Recent) -> Option<PathBuf> {
+        recent.list().iter().find(|path| path.is_dir()).cloned()
     }
 
     /// Opens a directory as the project: creates `.andy-ide`, shows the cached
@@ -1428,5 +1441,95 @@ mod workspace_tests {
         let stored = workspace.read_state();
         assert_eq!(stored.tabs, vec![PathBuf::from("README.md")]);
         assert_eq!(stored.active, Some(0));
+    }
+}
+
+/// What opens when nobody said which project to open.
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use ide_core::Recent;
+
+    fn remembered(config: &Path, projects: &[&Path]) {
+        let mut recent = Recent::default();
+        // `add` puts its argument in front, so the caller lists the projects in
+        // the order they were opened: the last one ends up newest.
+        for project in projects {
+            recent.add(project.to_path_buf());
+        }
+        recent.save(&config.join("recent.json")).unwrap();
+    }
+
+    #[test]
+    fn without_a_project_argument_the_last_one_opens() {
+        let config = tempfile::tempdir().unwrap();
+        let older = tempfile::tempdir().unwrap();
+        let newer = tempfile::tempdir().unwrap();
+        remembered(config.path(), &[older.path(), newer.path()]);
+
+        let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
+
+        let opened = state
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        assert_eq!(
+            opened.as_deref(),
+            Some(newer.path().canonicalize().unwrap().as_path()),
+            "the last project did not open by itself"
+        );
+    }
+
+    #[test]
+    fn a_project_that_is_gone_is_skipped() {
+        let config = tempfile::tempdir().unwrap();
+        let alive = tempfile::tempdir().unwrap();
+        let gone = config.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        remembered(config.path(), &[alive.path(), &gone]);
+        std::fs::remove_dir(&gone).unwrap();
+
+        let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
+
+        let opened = state
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        assert_eq!(
+            opened.as_deref(),
+            Some(alive.path().canonicalize().unwrap().as_path()),
+            "a deleted project was opened or the older one was not tried"
+        );
+    }
+
+    #[test]
+    fn an_explicit_project_wins_over_the_remembered_one() {
+        let config = tempfile::tempdir().unwrap();
+        let remembered_project = tempfile::tempdir().unwrap();
+        let asked = tempfile::tempdir().unwrap();
+        remembered(config.path(), &[remembered_project.path()]);
+
+        let state = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(asked.path().to_path_buf()),
+            None,
+        );
+
+        let opened = state
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        assert_eq!(
+            opened.as_deref(),
+            Some(asked.path().canonicalize().unwrap().as_path()),
+            "the remembered project overrode the one on the command line"
+        );
+    }
+
+    #[test]
+    fn a_first_launch_starts_with_no_project() {
+        let config = tempfile::tempdir().unwrap();
+        let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
+        assert!(state.project.is_none(), "a project appeared from nowhere");
     }
 }
