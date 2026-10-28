@@ -38,6 +38,10 @@ pub struct HighlightSpan {
     pub start_byte: usize,
     pub end_byte: usize,
     pub kind: TokenKind,
+    /// Position of the query pattern that produced the capture. Tree-sitter
+    /// conventions put the specific patterns after the general ones, so a
+    /// later pattern wins where two captures land on the same bytes.
+    pub priority: u32,
 }
 
 /// Incremental highlighter for one document.
@@ -170,15 +174,62 @@ impl Highlighter {
 
     /// Highlight ranges intersecting lines `first_line..=last_line`.
     ///
-    /// Spans are computed on the whole tree once per change and filtered here;
-    /// the caller asks only for what is on screen.
+    /// Spans covering the given lines, as a partition: sorted, non-overlapping,
+    /// and covering exactly the bytes that have a colour.
+    ///
+    /// Captures nest — a macro name sits inside an identifier, a doc comment
+    /// inside a comment — and painting them in order would colour some bytes
+    /// twice. The window is painted once per byte instead, so the innermost
+    /// capture wins.
     pub fn spans_for_lines(&self, first_line: usize, last_line: usize) -> Vec<HighlightSpan> {
         let range = self.line_byte_range(first_line, last_line);
-        self.spans
-            .iter()
-            .filter(|span| span.end_byte > range.start && span.start_byte < range.end)
-            .copied()
-            .collect()
+        if range.is_empty() {
+            return Vec::new();
+        }
+
+        let mut window: Vec<&HighlightSpan> = Vec::new();
+        for span in &self.spans {
+            if span.end_byte <= range.start {
+                continue;
+            }
+            if span.start_byte >= range.end {
+                // Spans are sorted by start, so the rest are past the window.
+                break;
+            }
+            window.push(span);
+        }
+        // Paint in query order: a later pattern covers the bytes of an earlier
+        // one, which is how tree-sitter highlighting is meant to resolve this.
+        window.sort_by_key(|span| span.priority);
+
+        let mut kinds: Vec<Option<TokenKind>> = vec![None; range.len()];
+        for span in window {
+            let start = span.start_byte.max(range.start) - range.start;
+            let end = span.end_byte.min(range.end) - range.start;
+            for slot in &mut kinds[start..end] {
+                *slot = Some(span.kind);
+            }
+        }
+
+        let mut spans = Vec::new();
+        let mut index = 0;
+        while index < kinds.len() {
+            let Some(kind) = kinds[index] else {
+                index += 1;
+                continue;
+            };
+            let start = index;
+            while index < kinds.len() && kinds[index] == Some(kind) {
+                index += 1;
+            }
+            spans.push(HighlightSpan {
+                start_byte: range.start + start,
+                end_byte: range.start + index,
+                kind,
+                priority: 0,
+            });
+        }
+        spans
     }
 
     /// True when the parse tree contains an error node.
@@ -229,6 +280,7 @@ impl Highlighter {
                     start_byte: node.start_byte(),
                     end_byte: node.end_byte(),
                     kind: refine_kind(node.kind(), kind),
+                    priority: found.pattern_index as u32,
                 });
             }
         }
@@ -244,7 +296,9 @@ impl Highlighter {
         self.line_starts.clear();
         self.line_starts.push(0);
         for (idx, byte) in self.source.bytes().enumerate() {
-            if byte == b'\n' {
+            // A lone `\r` breaks a line too; `\r\n` is one break, not two.
+            let lone_return = byte == b'\r' && self.source.as_bytes().get(idx + 1) != Some(&b'\n');
+            if byte == b'\n' || lone_return {
                 self.line_starts.push(idx + 1);
             }
         }

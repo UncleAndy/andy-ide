@@ -111,3 +111,48 @@ fn only_requested_lines_are_returned() {
             .all(|s| s.end_byte > h.line_byte_range(4, 5).start)
     );
 }
+
+#[test]
+fn spans_do_not_overlap() {
+    let src = include_str!("../../../crates/andy-ide/src/app.rs");
+    let mut h = Highlighter::new(Language::Rust);
+    h.set_text(src);
+    let spans = h.spans_for_lines(0, src.lines().count());
+    let mut previous_end = 0usize;
+    let mut overlaps = Vec::new();
+    for span in &spans {
+        if span.start_byte < previous_end {
+            overlaps.push((span.start_byte, previous_end, span.kind));
+        }
+        previous_end = previous_end.max(span.end_byte);
+    }
+    assert!(
+        overlaps.is_empty(),
+        "{} overlapping spans, first few: {:?}",
+        overlaps.len(),
+        &overlaps[..overlaps.len().min(5)]
+    );
+}
+
+#[test]
+fn nested_captures_resolve_to_the_specific_one() {
+    let src = "//! module doc\n#[derive(Debug)]\npub struct S { field: u32 }\n\
+               impl S { fn m(&self) -> u32 { println!(\"hi\"); self.field } }\n";
+    let mut h = Highlighter::new(Language::Rust);
+    h.set_text(src);
+    let spans = h.spans_for_lines(0, src.lines().count());
+    let kind_at = |needle: &str| {
+        let start = src.find(needle).expect(needle);
+        spans
+            .iter()
+            .find(|span| span.start_byte <= start && span.end_byte > start)
+            .map(|span| span.kind)
+    };
+    assert_eq!(kind_at("module doc"), Some(TokenKind::DocComment));
+    assert_eq!(kind_at("derive"), Some(TokenKind::Attribute));
+    assert_eq!(kind_at("struct"), Some(TokenKind::Keyword));
+    assert_eq!(kind_at("S"), Some(TokenKind::Type));
+    assert_eq!(kind_at("field:"), Some(TokenKind::Variable));
+    assert_eq!(kind_at("println"), Some(TokenKind::Function));
+    assert_eq!(kind_at("hi"), Some(TokenKind::String));
+}

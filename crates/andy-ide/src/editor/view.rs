@@ -363,24 +363,41 @@ fn line_galley(
     font: &FontId,
     line: usize,
 ) -> Option<Arc<Galley>> {
-    if line >= buffer.line_count() {
+    let job = line_job(buffer, spans, font, line);
+    if job.text.is_empty() {
         return None;
+    }
+    Some(ui.ctx().fonts_mut(|fonts| fonts.layout_job(job)))
+}
+
+/// One line as a layout job: every byte of the line lands in exactly one
+/// section, so nothing is drawn twice and nothing is left uncoloured.
+///
+/// The spans are a partition of the text (see `Highlighter::spans_for_lines`);
+/// the walk below still clips to the cursor, so a caller that hands over
+/// overlapping spans cannot duplicate text.
+fn line_job(
+    buffer: &EditorBuffer,
+    spans: &[HighlightSpan],
+    font: &FontId,
+    line: usize,
+) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    if line >= buffer.line_count() {
+        return job;
     }
     let text = buffer.line_text(line);
     let line_start = buffer.line_starts()[line];
     let line_end = line_start + text.len();
-
-    let mut job = LayoutJob::default();
     let mut cursor = line_start;
+
     for span in spans {
-        let start = span.start_byte.max(line_start).min(line_end);
+        let start = span.start_byte.max(line_start).min(line_end).max(cursor);
         let end = span.end_byte.min(line_end);
         if end <= start {
             continue;
         }
-        if start > cursor {
-            push_section(&mut job, &buffer.text()[cursor..start], DEFAULT_FG, font);
-        }
+        push_section(&mut job, &buffer.text()[cursor..start], DEFAULT_FG, font);
         push_section(
             &mut job,
             &buffer.text()[start..end],
@@ -389,13 +406,8 @@ fn line_galley(
         );
         cursor = end;
     }
-    if cursor < line_end {
-        push_section(&mut job, &buffer.text()[cursor..line_end], DEFAULT_FG, font);
-    }
-    if job.text.is_empty() {
-        return None;
-    }
-    Some(ui.ctx().fonts_mut(|fonts| fonts.layout_job(job)))
+    push_section(&mut job, &buffer.text()[cursor..line_end], DEFAULT_FG, font);
+    job
 }
 
 fn paint_galleys(painter: &egui::Painter, layouts: &LineLayouts, origin: Pos2, row_h: f32) {
@@ -726,6 +738,38 @@ mod geometry_tests {
         let text = "fn main() {";
         for col in 0..=text.chars().count() {
             assert_eq!(original_column(text, expanded_column(text, col)), col);
+        }
+    }
+}
+
+#[cfg(test)]
+mod line_job_tests {
+    use super::line_job;
+    use crate::editor::EditorBuffer;
+    use egui::FontId;
+    use std::path::PathBuf;
+
+    /// The layout job may never repeat a byte of the line: a duplicated span
+    /// used to paint the same characters twice, which looked like doubled text.
+    #[test]
+    fn no_line_is_drawn_twice() {
+        let source = include_str!("../../src/app.rs");
+        let buffer = EditorBuffer::from_text(PathBuf::from("app.rs"), source.to_owned());
+        let spans = buffer
+            .highlighter
+            .as_ref()
+            .expect("rust highlighting")
+            .spans_for_lines(0, buffer.line_count());
+        let font = FontId::monospace(14.0);
+
+        for line in 0..buffer.line_count() {
+            let job = line_job(&buffer, &spans, &font, line);
+            let expected: String = buffer.line_text(line).replace('\t', "    ");
+            assert_eq!(
+                job.text, expected,
+                "line {line} was laid out as {:?} but holds {:?}",
+                job.text, expected
+            );
         }
     }
 }

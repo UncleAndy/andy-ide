@@ -80,6 +80,10 @@
 (type_identifier) @type
 (predefined_type) @type.builtin
 
+; General property names come first: tree-sitter lets a later pattern
+; override an earlier one, so the specific rules below win.
+(property_identifier) @property
+
 (function_declaration name: (identifier) @function)
 (generator_function_declaration name: (identifier) @function)
 (method_definition name: (property_identifier) @function.method)
@@ -93,7 +97,6 @@
 (optional_parameter pattern: (identifier) @variable.parameter)
 (shorthand_property_identifier_pattern) @variable
 
-(property_identifier) @property
 (decorator) @attribute
 
 [ "="
