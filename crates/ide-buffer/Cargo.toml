@@ -8,3 +8,4 @@ repository.workspace = true
 description = "Rope-backed text buffer, cursors and undo history"
 
 [dependencies]
+ropey = "1.6.1"
