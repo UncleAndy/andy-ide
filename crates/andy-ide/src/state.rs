@@ -2,8 +2,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
-use ide_core::{Config, FileIndex, Project, Recent, Session, Tabs, TreeOptions};
+use ide_core::{
+    Config, FileIndex, FileIndexCache, Project, Recent, Tabs, TreeOptions, Workspace,
+    WorkspaceState,
+};
 
 use crate::editor::EditorBuffer;
 
@@ -47,14 +51,16 @@ pub struct AppState {
     pub pending: Vec<Action>,
     next_buffer_id: usize,
     config_dir: PathBuf,
+    /// `.andy-ide` of the open project, when it could be created.
+    workspace: Option<Workspace>,
+    /// Background file walk, so startup is not blocked by it.
+    index_job: Option<Receiver<anyhow::Result<(usize, FileIndex)>>>,
+    /// What was last written to `workspace.json`.
+    last_state: Option<WorkspaceState>,
+    last_write: f64,
 }
 
 impl AppState {
-    /// Loads configuration and the recent list, then opens what was asked for.
-    pub fn new(project: Option<PathBuf>, file: Option<PathBuf>) -> Self {
-        Self::with_config_dir(config_dir(), project, file)
-    }
-
     /// Same as [`AppState::new`] but with an explicit configuration directory,
     /// which keeps tests away from the real `~/.config`.
     pub fn with_config_dir(
@@ -80,6 +86,10 @@ impl AppState {
             pending: Vec::new(),
             next_buffer_id: 1,
             config_dir,
+            workspace: None,
+            index_job: None,
+            last_state: None,
+            last_write: 0.0,
         };
 
         if let Some(root) = project {
@@ -97,31 +107,153 @@ impl AppState {
         state
     }
 
-    /// Opens a directory as the project, rebuilding the file index.
+    /// Opens a directory as the project: creates `.andy-ide`, shows the cached
+    /// file index immediately and starts rebuilding it in the background.
     pub fn open_project(&mut self, root: &Path) {
         match Project::open(root) {
             Ok(project) => {
-                match FileIndex::build(project.root(), self.tree.show_hidden) {
-                    Ok(index) => {
-                        self.status = format!("{} files", index.len());
-                        self.index = Some(index);
-                    }
-                    Err(error) => {
-                        self.index = None;
-                        self.status = format!("index failed: {error}");
-                    }
-                }
                 let canonical = project.root().to_path_buf();
-                self.recent.add(canonical.clone());
-                let _ = self.recent.save(&self.config_dir.join("recent.json"));
                 self.project = Some(project);
+                self.workspace = Workspace::open(&canonical).ok();
+                self.index = None;
+                self.index_job = None;
+                self.last_state = None;
+
+                if let Some(cache) = self
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.read::<FileIndexCache>("cache/files.json"))
+                {
+                    let index = cache.index();
+                    self.status = format!("{} files from cache", index.len());
+                    self.index = Some(index);
+                }
+
+                self.start_index_refresh(&canonical);
+                self.recent.add(canonical);
+                let _ = self.recent.save(&self.config_dir.join("recent.json"));
+
                 self.tree.expanded.clear();
                 self.tabs = Tabs::new();
                 self.buffers.clear();
+                self.restore_tabs();
             }
             Err(error) => {
                 self.status = format!("cannot open {}: {error}", root.display());
             }
+        }
+    }
+
+    /// Walks the project in a thread and refreshes both the index and its cache.
+    fn start_index_refresh(&mut self, root: &Path) {
+        let show_hidden = self.tree.show_hidden;
+        let cache_path = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.cache_dir().join("files.json"));
+        let root = root.to_path_buf();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = FileIndex::build(&root, show_hidden);
+            if let Ok(index) = &result
+                && let Some(path) = cache_path
+                && let Ok(text) = serde_json::to_string(&FileIndexCache::new(index.paths()))
+            {
+                let _ = ide_core::fs::write_atomic(&path, text.as_bytes());
+            }
+            let _ = sender.send(result.map(|index| (index.len(), index)));
+        });
+
+        self.index_job = Some(receiver);
+    }
+
+    /// Takes the freshly built index when the background walk has finished.
+    pub fn poll_index(&mut self) {
+        let Some(receiver) = self.index_job.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok((count, index))) => {
+                self.status = format!("{count} files indexed");
+                self.index = Some(index);
+                self.index_job = None;
+            }
+            Ok(Err(error)) => {
+                self.status = format!("index failed: {error}");
+                self.index_job = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.index_job = None;
+            }
+        }
+    }
+
+    /// Reopens the tabs saved in `.andy-ide/workspace.json`.
+    pub fn restore_tabs(&mut self) {
+        let Some(state) = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.read_state())
+        else {
+            return;
+        };
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        for path in state.tabs {
+            if root.join(&path).is_file() {
+                self.open_file(&path);
+            }
+        }
+        if let Some(active) = state.active {
+            self.tabs.set_active(active);
+        }
+        if !self.tabs.is_empty() {
+            self.status = format!("{} tabs restored", self.tabs.len());
+        }
+    }
+
+    /// The dock layout stored with the workspace, if any.
+    pub fn stored_layout(&self) -> Option<String> {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.read_state().layout)
+    }
+
+    /// Writes the workspace file when it changed, at most every 300 ms unless
+    /// `force` is set (used when the window closes).
+    pub fn save_workspace(&mut self, layout: Option<String>, now: f64, force: bool) {
+        let Some(workspace) = self.workspace.as_ref() else {
+            return;
+        };
+        let state = WorkspaceState {
+            tabs: self
+                .tabs
+                .items()
+                .iter()
+                .map(|item| item.path.clone())
+                .collect(),
+            active: self.tabs.active(),
+            layout,
+        };
+        if self.last_state.as_ref() == Some(&state) {
+            return;
+        }
+        if !force && now - self.last_write < 0.3 {
+            return;
+        }
+        match workspace.write_state(&state) {
+            Ok(()) => {
+                self.last_state = Some(state);
+                self.last_write = now;
+            }
+            Err(error) => self.status = format!("cannot save workspace: {error}"),
         }
     }
 
@@ -259,24 +391,6 @@ impl AppState {
         }
     }
 
-    /// Fills the tab list from a saved session, dropping paths that are gone.
-    pub fn restore_session(&mut self) {
-        let session = Session::load(&self.config_dir.join("session.json"));
-        let Some(root) = self
-            .project
-            .as_ref()
-            .map(|project| project.root().to_path_buf())
-        else {
-            return;
-        };
-        for tab in session.tabs {
-            let absolute = root.join(&tab.path);
-            if absolute.is_file() {
-                self.open_file(&tab.path);
-            }
-        }
-    }
-
     /// Tree options for the current settings.
     pub fn tree_options(&self) -> TreeOptions {
         self.tree.options()
@@ -284,7 +398,7 @@ impl AppState {
 }
 
 /// `$XDG_CONFIG_HOME/andy-ide`, falling back to `~/.config/andy-ide`.
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -312,6 +426,14 @@ mod tests {
         let config_dir = tempfile::tempdir().unwrap();
         let mut state = AppState::with_config_dir(config_dir.path().to_path_buf(), None, None);
         state.open_project(dir.path());
+        // The walk happens in a thread; wait for it like the frame loop does.
+        for _ in 0..200 {
+            if state.index.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.poll_index();
+        }
         (dir, state)
     }
 
@@ -321,6 +443,13 @@ mod tests {
         assert!(state.project.is_some());
         assert_eq!(state.index.as_ref().map(FileIndex::len), Some(1));
         assert_eq!(state.recent.list()[0], dir.path().canonicalize().unwrap());
+        assert!(
+            dir.path()
+                .join(".andy-ide/workspace.json")
+                .parent()
+                .unwrap()
+                .is_dir()
+        );
     }
 
     #[test]
@@ -339,5 +468,124 @@ mod tests {
         state.open_project(Path::new("/nonexistent/andy-ide-test"));
         assert!(state.project.is_none());
         assert!(state.status.contains("cannot open"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use ide_core::Workspace;
+
+    fn project_with_file() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# hi\n").unwrap();
+        let config = tempfile::tempdir().unwrap();
+        (dir, config)
+    }
+
+    fn wait_for_index(state: &mut AppState) {
+        for _ in 0..200 {
+            if state.index.is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.poll_index();
+        }
+        panic!("index never arrived");
+    }
+
+    #[test]
+    fn tabs_and_layout_survive_a_restart() {
+        let (project, config) = project_with_file();
+        let mut state = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        state.open_file(Path::new("src/main.rs"));
+        state.open_file(Path::new("README.md"));
+        state.save_workspace(Some("{\"layout\":true}".to_owned()), 10.0, true);
+
+        let mut reopened = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        assert_eq!(reopened.tabs.len(), 2);
+        assert_eq!(reopened.tabs.active(), Some(1));
+        assert_eq!(
+            reopened.stored_layout().as_deref(),
+            Some("{\"layout\":true}")
+        );
+        assert_eq!(reopened.status, "2 tabs restored");
+        wait_for_index(&mut reopened);
+    }
+
+    #[test]
+    fn vanished_files_are_dropped_on_restore() {
+        let (project, config) = project_with_file();
+        let mut state = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        state.open_file(Path::new("src/main.rs"));
+        state.save_workspace(None, 10.0, true);
+
+        std::fs::remove_file(project.path().join("src/main.rs")).unwrap();
+        let reopened = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        assert_eq!(reopened.tabs.len(), 0);
+    }
+
+    #[test]
+    fn the_file_index_is_cached_for_the_next_start() {
+        let (project, config) = project_with_file();
+        let mut state = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        wait_for_index(&mut state);
+        let cache = project.path().join(".andy-ide/cache/files.json");
+        for _ in 0..100 {
+            if cache.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(cache.is_file(), "the walk did not write the cache");
+
+        // A second start shows the cached list before the walk finishes.
+        let reopened = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        let index = reopened.index.as_ref().expect("index from cache");
+        assert_eq!(index.len(), 2);
+        assert!(reopened.status.contains("from cache"));
+    }
+
+    #[test]
+    fn workspace_file_is_written_when_state_changes() {
+        let (project, config) = project_with_file();
+        let mut state = AppState::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        state.open_file(Path::new("README.md"));
+        state.save_workspace(None, 5.0, false);
+
+        let workspace = Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        let stored = workspace.read_state();
+        assert_eq!(stored.tabs, vec![PathBuf::from("README.md")]);
+        assert_eq!(stored.active, Some(0));
     }
 }

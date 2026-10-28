@@ -128,9 +128,9 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 ui.scroll_to_rect(row.expand(3.0), None);
             }
 
-            if response.has_focus() {
-                changed = handle_input(ui, buffer);
-            } else if (response.clicked() || response.dragged())
+            // Pointer first: clicking must place the caret even though the very
+            // same click gives the widget focus.
+            if (response.clicked() || response.dragged())
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 let (line, col) = position_to_line_col(buffer, text_origin, pos, char_w, row_h);
@@ -140,6 +140,10 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 } else {
                     buffer.set_caret(index);
                 }
+            }
+
+            if response.has_focus() {
+                changed |= handle_input(ui, buffer);
             }
         });
 

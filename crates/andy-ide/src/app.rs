@@ -16,30 +16,46 @@ pub struct App {
     state: AppState,
     dock: DockState<Tab>,
     zoom_applied: bool,
+    /// Frames drawn so far; the dock has no real rectangles before the first one.
+    frames: u32,
 }
 
 impl App {
     pub fn new(project: Option<PathBuf>, file: Option<PathBuf>) -> Self {
-        let mut state = AppState::new(project, file);
-        state.restore_session();
+        Self::with_config_dir(crate::state::config_dir(), project, file)
+    }
+
+    /// Same as [`App::new`] with an explicit configuration directory.
+    pub fn with_config_dir(
+        config_dir: PathBuf,
+        project: Option<PathBuf>,
+        file: Option<PathBuf>,
+    ) -> Self {
+        let state = AppState::with_config_dir(config_dir, project, file);
+        let dock = state
+            .stored_layout()
+            .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
+            .unwrap_or_else(default_layout);
         Self {
             state,
-            dock: default_layout(),
+            dock,
             zoom_applied: false,
+            frames: 0,
         }
     }
 }
 
 /// Editor in the middle, projects on the left, problems along the bottom.
 ///
-/// `fraction` is the share of the area kept by the node being split, so the
-/// editor takes the larger part in both splits.
+/// In a split, `fraction` is the share taken by the top (or left) child. With
+/// `Split::Left` the new panel goes left, so it gets the small fraction; with
+/// `Split::Below` the new panel goes bottom, so the fraction is the editor's share.
 fn default_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Editor]);
     dock.split(
         NodePath::MAIN_ROOT,
         Split::Left,
-        0.78,
+        0.22,
         Node::leaf(Tab::Projects),
     );
     dock.split(
@@ -83,6 +99,19 @@ impl App {
 
         self.state.apply_pending();
         self.handle_keys(ui);
+
+        self.frames += 1;
+        self.state.poll_index();
+        // The dock only has real rectangles after a frame, and a layout with
+        // NaN rectangles cannot be read back, so the first frame is skipped.
+        let layout = if self.frames > 1 {
+            serde_json::to_string(&self.dock).ok()
+        } else {
+            None
+        };
+        let now = ui.ctx().input(|input| input.time);
+        let closing = ui.ctx().input(|input| input.viewport().close_requested());
+        self.state.save_workspace(layout, now, closing);
     }
 }
 
@@ -150,6 +179,7 @@ mod tests {
             state: AppState::with_config_dir(config.to_path_buf(), Some(dir.to_path_buf()), None),
             dock: default_layout(),
             zoom_applied: false,
+            frames: 0,
         }
     }
 
@@ -194,6 +224,7 @@ mod tests {
             state: AppState::with_config_dir(config.path().to_path_buf(), None, None),
             dock: default_layout(),
             zoom_applied: false,
+            frames: 0,
         };
         let shapes = draw_frames(&mut app, 1);
         assert!(shapes > 0);
@@ -241,6 +272,7 @@ mod typing_tests {
             ),
             dock: default_layout(),
             zoom_applied: false,
+            frames: 0,
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         (project, config, app)
@@ -355,6 +387,7 @@ mod layout_tests {
             ),
             dock: default_layout(),
             zoom_applied: false,
+            frames: 0,
         };
         app.state.open_file(std::path::Path::new("long.rs"));
         (project, config, app)
@@ -372,5 +405,218 @@ mod layout_tests {
             numbers.len()
         );
         assert_eq!(*numbers.iter().min().unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+
+    fn run(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>, time: f64) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+    }
+
+    fn press(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn release(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    /// A click inside the text must move the caret there.
+    #[test]
+    fn clicking_in_the_text_moves_the_caret() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let text: String = (0..40).map(|n| format!("line number {n}\n")).collect();
+        std::fs::write(project.path().join("a.rs"), text).unwrap();
+        let mut app = App {
+            state: AppState::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            dock: default_layout(),
+            zoom_applied: false,
+            frames: 0,
+        };
+        app.state.open_file(std::path::Path::new("a.rs"));
+        let ctx = egui::Context::default();
+
+        let empty_project = tempfile::tempdir().unwrap();
+        std::fs::write(empty_project.path().join("x.rs"), "").unwrap();
+
+        run(&ctx, &mut app, Vec::new(), 0.1);
+        run(&ctx, &mut app, Vec::new(), 0.2);
+        assert_eq!(app.state.active_buffer().unwrap().caret(), 0);
+
+        // Somewhere in the middle of the visible text.
+        let at = egui::pos2(320.0, 200.0);
+        run(&ctx, &mut app, press(at), 0.3);
+        run(&ctx, &mut app, release(at), 0.4);
+
+        let buffer = app.state.active_buffer().unwrap();
+        let (line, col) = buffer.line_col();
+        assert!(
+            (2..12).contains(&line),
+            "click placed the caret on line {line}, column {col}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod layout_persistence_tests {
+    use super::*;
+    use ide_core::{Workspace, WorkspaceState};
+
+    fn drawn_app() -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "fn main() {}\n").unwrap();
+        let mut app = App {
+            state: AppState::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            dock: default_layout(),
+            zoom_applied: false,
+            frames: 0,
+        };
+        app.state.open_file(std::path::Path::new("a.rs"));
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            output.textures_delta.clear();
+        }
+        (project, config, app)
+    }
+
+    #[test]
+    fn a_drawn_layout_round_trips_through_json() {
+        let (_project, _config, app) = drawn_app();
+        let json = serde_json::to_string(&app.dock).expect("layout serializes");
+        let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
+        assert_eq!(back.iter_all_tabs().count(), 3);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn a_stored_layout_is_restored_at_startup() {
+        let (project, config, app) = drawn_app();
+        let layout = serde_json::to_string(&app.dock).unwrap();
+
+        let workspace = Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&WorkspaceState {
+                tabs: vec![],
+                active: None,
+                layout: Some(layout.clone()),
+            })
+            .unwrap();
+
+        let restored = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        assert_eq!(restored.dock.iter_all_tabs().count(), 3);
+        assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
+    }
+
+    #[test]
+    fn a_broken_layout_falls_back_to_the_default() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&WorkspaceState {
+                tabs: vec![],
+                active: None,
+                layout: Some("{\"nonsense\": true}".to_owned()),
+            })
+            .unwrap();
+
+        let app = App::new(Some(project.path().to_path_buf()), None);
+        let _ = config;
+        assert_eq!(app.dock.iter_all_tabs().count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod autosave_tests {
+    use super::*;
+
+    #[test]
+    fn drawing_frames_saves_the_workspace() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "fn main() {}\n").unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("a.rs"));
+
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        for _ in 0..4 {
+            time += 0.4;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            output.textures_delta.clear();
+        }
+
+        let text = std::fs::read_to_string(
+            project
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".andy-ide/workspace.json"),
+        )
+        .expect("workspace.json written");
+
+        assert!(text.contains("a.rs"), "tabs are saved: {text}");
+        assert!(text.contains("layout"), "layout is saved: {text}");
+        assert!(!text.contains("null"), "the layout has no NaN rectangles");
     }
 }

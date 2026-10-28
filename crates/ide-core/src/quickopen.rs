@@ -12,6 +12,7 @@ use nucleo::Config;
 use nucleo::Matcher;
 use nucleo::Utf32Str;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use serde::{Deserialize, Serialize};
 
 /// One search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,29 @@ pub struct SearchHit {
     pub rel: PathBuf,
     /// Matcher score; higher is a better match. Zero for an empty query.
     pub score: u32,
+}
+
+/// The index as it is kept on disk, under `.andy-ide/cache/files.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIndexCache {
+    /// Seconds since the epoch when the walk ran.
+    pub built_at: u64,
+    /// Paths relative to the project root.
+    pub files: Vec<PathBuf>,
+}
+
+impl FileIndexCache {
+    pub fn new(files: Vec<PathBuf>) -> Self {
+        FileIndexCache {
+            built_at: crate::workspace::now_unix(),
+            files,
+        }
+    }
+
+    /// The cached index, ready to be searched.
+    pub fn index(&self) -> FileIndex {
+        FileIndex::from_paths(self.files.clone())
+    }
 }
 
 /// Every file of a project, for quick-open.
@@ -122,6 +146,22 @@ impl FileIndex {
                 score,
             })
             .collect()
+    }
+
+    /// Builds an index from a list of relative paths, as stored in the cache.
+    pub fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> FileIndex {
+        let mut files: Vec<(String, PathBuf)> = paths
+            .into_iter()
+            .map(|rel| (rel.to_string_lossy().into_owned(), rel))
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.dedup_by(|a, b| a.1 == b.1);
+        FileIndex { files }
+    }
+
+    /// The indexed paths, for writing the cache.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.files.iter().map(|(_, rel)| rel.clone()).collect()
     }
 
     /// How many files the index holds.

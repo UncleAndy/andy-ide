@@ -12,11 +12,13 @@ ide-core = { path = "../ide-core" }
 ide-buffer = { path = "../ide-buffer" }
 ide-syntax = { path = "../ide-syntax" }
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = "0.36.2"
 egui = "0.36.2"
-egui_dock = "0.21.1"
+egui_dock = { version = "0.21.1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

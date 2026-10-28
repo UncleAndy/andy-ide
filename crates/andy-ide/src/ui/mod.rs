@@ -11,7 +11,7 @@ use egui_dock::TabViewer;
 use crate::state::AppState;
 
 /// A panel of the dock area.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Tab {
     Projects,
     Editor,
