@@ -2267,3 +2267,190 @@ mod the_terminal_mouse {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// `Shift` is the terminal's own mouse button: it picks text even out of a program
+/// that wants the mouse for itself.
+mod the_terminal_selection {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn open_terminal(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        rect
+    }
+
+    fn type_text(gui: &mut Gui, text: &str) {
+        gui.harness.event(egui::Event::Text(text.to_owned()));
+        gui.settle();
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    /// A point in the middle of a cell of the panel.
+    fn at(gui: &Gui, rect: egui::Rect, column: u16, row: u16) -> egui::Pos2 {
+        let (cols, rows) = gui.app().state.terminal.size();
+        let cell = egui::vec2(rect.width() / cols as f32, rect.height() / rows as f32);
+        rect.left_top() + egui::vec2((column as f32 + 0.5) * cell.x, (row as f32 + 0.5) * cell.y)
+    }
+
+    /// The row of the screen that holds a line, as `contents()` numbers them.
+    fn row_of(gui: &Gui, needle: &str) -> u16 {
+        gui.app()
+            .state
+            .terminal
+            .contents()
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is not on the screen")) as u16
+    }
+
+    fn drag(gui: &mut Gui, from: egui::Pos2, to: egui::Pos2, shift: bool) {
+        let modifiers = if shift {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
+        };
+        // A real `Shift` is held down for the whole drag, so it is in the input state
+        // of that frame and not only in the events.
+        gui.harness.event(egui::Event::ModifiersChanged(modifiers));
+        gui.harness.event(egui::Event::PointerMoved(from));
+        gui.harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        });
+        gui.settle();
+        gui.harness.event(egui::Event::PointerMoved(to));
+        gui.settle();
+        gui.harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers,
+        });
+        gui.settle();
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    }
+
+    #[test]
+    fn a_shift_drag_picks_the_text_and_leaves_the_program_alone() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        type_text(&mut gui, "printf '\\033[?1000h\\033[?1006h'; cat -v\n");
+        wait_until(&mut gui, "the program to ask for the mouse", |gui| {
+            gui.app().state.terminal.mouse_enabled()
+        });
+        let before = gui.app().state.terminal.contents();
+
+        let row = row_of(&gui, "cat -v");
+        let (from, to) = (at(&gui, rect, 2, row), at(&gui, rect, 6, row));
+        drag(&mut gui, from, to, true);
+        assert!(
+            gui.app().state.terminal.selection.is_some(),
+            "shift+drag selected nothing"
+        );
+        assert_eq!(
+            gui.app().state.terminal.contents(),
+            before,
+            "the click reached a program that was told to keep its hands off"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_drag_picks_a_line_and_ctrl_shift_c_copies_it() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        // The output differs from the command line itself, so waiting for it
+        // cannot be satisfied by the echo of what was typed.
+        type_text(
+            &mut gui,
+            "printf '\\none two\\nthree four\\n' | tr a-z A-Z\n",
+        );
+        wait_until(&mut gui, "the text to be on the screen", |gui| {
+            gui.app().state.terminal.contents().contains("THREE FOUR")
+        });
+
+        let top = row_of(&gui, "ONE TWO");
+        let (from, to) = (at(&gui, rect, 0, top), at(&gui, rect, 10, top + 1));
+        drag(&mut gui, from, to, false);
+        let text = gui
+            .app()
+            .state
+            .terminal
+            .selected_text()
+            .expect("the drag picked nothing");
+        assert_eq!(text, "ONE TWO\nTHREE FOUR", "picked the wrong cells");
+
+        assert!(
+            gui.app().state.terminal.focused,
+            "the terminal did not have the keyboard"
+        );
+        gui.harness.event(egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        });
+        // The clipboard command lives in the output of the frame that asked for it, and
+        // every further frame would replace it.
+        gui.harness.step();
+        let copied = gui
+            .harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            copied.as_deref(),
+            Some("ONE TWO\nTHREE FOUR"),
+            "Ctrl+Shift+C did not copy the selection"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}

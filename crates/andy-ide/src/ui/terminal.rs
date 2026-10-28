@@ -27,12 +27,50 @@ pub struct Terminal {
     pub shown: bool,
     /// Where the panel was last drawn, for the tests that click it.
     pub shown_rect: Option<egui::Rect>,
+    /// The text the user has picked out with the mouse, if any.
+    pub selection: Option<Selection>,
+    /// Whether a drag is in progress, so a moving pointer keeps extending it.
+    dragging: bool,
     /// The cell the pointer was over last frame, so a movement is reported once
     /// rather than sixty times a second.
     mouse_cell: Option<(u16, u16)>,
     /// Scrolling arrives in pixels and is reported in notches; the remainder is
     /// kept here so a slow wheel is not lost.
     scroll_left: f32,
+}
+
+/// The colour under selected cells.
+const SELECTION: egui::Color32 = egui::Color32::from_rgb(38, 79, 120);
+
+/// Text picked out with the mouse, in cells of the screen.
+///
+/// The two ends are kept as they were clicked rather than sorted, so dragging back
+/// over the start of a selection grows it the other way instead of collapsing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// Where the drag began: `(column, row)`.
+    pub anchor: (u16, u16),
+    /// Where the pointer is now.
+    pub head: (u16, u16),
+}
+
+impl Selection {
+    /// The two ends in reading order, start first.
+    pub fn ordered(self) -> ((u16, u16), (u16, u16)) {
+        let key = |(column, row): (u16, u16)| (row, column);
+        if key(self.anchor) <= key(self.head) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// Whether a cell is inside the selection.
+    pub fn contains(self, column: u16, row: u16) -> bool {
+        let (start, end) = self.ordered();
+        let (first, last) = ((start.1, start.0), (end.1, end.0));
+        (row, column) >= first && (row, column) <= last
+    }
 }
 
 impl Default for Terminal {
@@ -51,6 +89,8 @@ impl Terminal {
             focused: false,
             shown: false,
             shown_rect: None,
+            selection: None,
+            dragging: false,
             mouse_cell: None,
             scroll_left: 0.0,
         }
@@ -76,7 +116,7 @@ impl Terminal {
     /// The events are **removed**, not read: with the terminal focused the keys belong
     /// to the shell, and an editor that also saw them would type the same text into the
     /// open file — which is exactly what happened before this was a `take`.
-    pub fn take_keys(&self, ui: &mut Ui) -> Vec<u8> {
+    pub fn take_keys(&mut self, ui: &mut Ui) -> Vec<u8> {
         // Read once per frame, before anything is written: a program that has just
         // turned the mode on expects the very next arrow in the new form.
         let app = self.application_cursor();
@@ -98,6 +138,12 @@ impl Terminal {
                         modifiers,
                         ..
                     } => {
+                        // `Ctrl+Shift+C` copies the selection: a terminal needs its
+                        // own copy key, because `Ctrl+C` there means "stop".
+                        if *key == egui::Key::C && modifiers.ctrl && modifiers.shift {
+                            self.copy_selection(ui);
+                            continue;
+                        }
                         if let Some(byte) = control_letter(*key, *modifiers) {
                             bytes.push(byte);
                         } else if let Some(input) = input_for_key(*key, *modifiers, app) {
@@ -168,6 +214,8 @@ impl Terminal {
         if let Some(focused) = focus_after(rect, pressed_at, response.clicked()) {
             self.focused = focused;
         }
+        let cell_size = egui::vec2(cell_width, cell_height);
+        self.track_selection(ui, rect, cell_size, cols, rows);
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(16, 18, 20));
         // A shell that has finished is worth saying out loud; otherwise the tab looks
@@ -194,6 +242,7 @@ impl Terminal {
         let Some(session) = self.session.as_ref() else {
             return;
         };
+        let selection = self.selection;
         session.with_screen(|screen| {
             for row in 0..rows {
                 for col in 0..cols {
@@ -203,7 +252,19 @@ impl Terminal {
                     let position = rect.left_top()
                         + egui::vec2(col as f32 * cell_width, row as f32 * cell_height);
                     let background = cell.bgcolor();
-                    if background != vt100::Color::Default {
+                    let picked = selection.is_some_and(|selection| selection.contains(col, row));
+                    if picked {
+                        // The selection wins over the program's own background: a
+                        // highlighted cell is what the user is looking for.
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                position,
+                                egui::vec2(cell_width, cell_height),
+                            ),
+                            0.0,
+                            SELECTION,
+                        );
+                    } else if background != vt100::Color::Default {
                         painter.rect_filled(
                             egui::Rect::from_min_size(
                                 position,
@@ -242,6 +303,115 @@ impl Terminal {
         self.forward_mouse(ui, rect, egui::vec2(cell_width, cell_height), cols, rows);
     }
 
+    /// The cell under a point of the panel, clamped to the screen.
+    fn cell_at(
+        rect: egui::Rect,
+        cell: egui::Vec2,
+        pos: egui::Pos2,
+        cols: u16,
+        rows: u16,
+    ) -> (u16, u16) {
+        let column = (((pos.x - rect.left()) / cell.x).floor().max(0.0) as u16).min(cols - 1);
+        let row = (((pos.y - rect.top()) / cell.y).floor().max(0.0) as u16).min(rows - 1);
+        (column, row)
+    }
+
+    /// Follows the pointer and keeps the selection under it.
+    ///
+    /// `Shift` is the terminal's own mouse button: with it held the pointer picks
+    /// text even from a program that wants the mouse, which is the only way to get a
+    /// path out of `mc` or `vim`. Where no program asked for the mouse — a shell at
+    /// its prompt — a plain drag selects too, and nothing is lost by it.
+    fn track_selection(
+        &mut self,
+        ui: &Ui,
+        rect: egui::Rect,
+        cell: egui::Vec2,
+        cols: u16,
+        rows: u16,
+    ) {
+        let (pos, shift, pressed, down, released) = ui.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.modifiers.shift,
+                input.pointer.button_pressed(egui::PointerButton::Primary),
+                input.pointer.button_down(egui::PointerButton::Primary),
+                input.pointer.button_released(egui::PointerButton::Primary),
+            )
+        });
+        let wants_mouse = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.mouse_protocol().enabled);
+        let selecting = shift || !wants_mouse;
+
+        if released {
+            self.dragging = false;
+        }
+        let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
+            return;
+        };
+        let target = Self::cell_at(rect, cell, pos, cols, rows);
+
+        if pressed {
+            if selecting {
+                self.selection = Some(Selection {
+                    anchor: target,
+                    head: target,
+                });
+                self.dragging = true;
+            } else {
+                // A plain click belongs to the program; the old selection goes.
+                self.selection = None;
+                self.dragging = false;
+            }
+            return;
+        }
+        if self.dragging
+            && down
+            && let Some(selection) = self.selection.as_mut()
+        {
+            selection.head = target;
+        }
+    }
+
+    /// The selected text, one line per row, trailing blanks cut.
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let session = self.session.as_ref()?;
+        let (start, end) = selection.ordered();
+        let text = session.with_screen(|screen| {
+            let (rows, cols) = screen.size();
+            let (rows, cols) = (rows.get(), cols.get());
+            let mut lines: Vec<String> = Vec::new();
+            let last_row = end.1.min(rows.saturating_sub(1));
+            for row in start.1..=last_row {
+                let from = if row == start.1 { start.0 } else { 0 };
+                let to = if row == end.1 {
+                    end.0.min(cols.saturating_sub(1))
+                } else {
+                    cols.saturating_sub(1)
+                };
+                let mut line = String::new();
+                for col in from..=to {
+                    if let Some(cell) = screen.cell(row, col) {
+                        line.push_str(cell.contents());
+                    }
+                }
+                lines.push(line.trim_end().to_owned());
+            }
+            lines.join("\n")
+        });
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Puts the selection on the clipboard, where `Ctrl+Shift+C` asks for it.
+    fn copy_selection(&self, ui: &Ui) {
+        if let Some(text) = self.selected_text() {
+            ui.ctx().copy_text(text);
+        }
+    }
+
     /// Sends the pointer to the program, if the program asked for it.
     ///
     /// A terminal has no mouse of its own: the program says `CSI ? 1000 h` and the
@@ -269,14 +439,20 @@ impl Terminal {
             alt: modifiers.alt,
             ctrl: modifiers.ctrl,
         };
+        // With `Shift` held the mouse is the terminal's, not the program's: it picks
+        // text. Programs know this as the shift override, and it is the only way to
+        // copy a line out of `mc` or `vim`, which would otherwise eat every click.
+        if modifiers.shift {
+            self.mouse_cell = None;
+            return;
+        }
         let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
             // Out there the pointer is not our business, and a report about a cell
             // it is not over would be a lie.
             self.mouse_cell = None;
             return;
         };
-        let column = (((pos.x - rect.left()) / cell.x).floor().max(0.0) as u16).min(cols - 1);
-        let row = (((pos.y - rect.top()) / cell.y).floor().max(0.0) as u16).min(rows - 1);
+        let (column, row) = Self::cell_at(rect, cell, pos, cols, rows);
 
         let mut events: Vec<mouse::Event> = Vec::new();
         let mut held: Option<mouse::Button> = None;
@@ -387,6 +563,12 @@ impl Terminal {
         self.session
             .as_ref()
             .is_some_and(ide_term::Session::application_cursor)
+    }
+
+    /// The grid the panel is drawing: columns and rows of cells.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
     }
 
     /// Whether the program in the terminal asked for mouse reports.
@@ -728,5 +910,33 @@ mod focus {
     fn a_frame_without_a_press_leaves_the_focus_alone() {
         assert_eq!(focus_after(rect(), None, false), None);
         assert_eq!(focus_after(rect(), None, true), Some(true));
+    }
+}
+
+#[cfg(test)]
+mod selection {
+    use super::Selection;
+
+    fn selection(anchor: (u16, u16), head: (u16, u16)) -> Selection {
+        Selection { anchor, head }
+    }
+
+    #[test]
+    fn the_ends_are_read_in_reading_order_whichever_way_the_drag_went() {
+        let forwards = selection((2, 1), (7, 3));
+        let backwards = selection((7, 3), (2, 1));
+        assert_eq!(forwards.ordered(), ((2, 1), (7, 3)));
+        assert_eq!(backwards.ordered(), forwards.ordered());
+    }
+
+    #[test]
+    fn a_cell_is_inside_only_where_the_drag_went_over_it() {
+        let picked = selection((4, 1), (2, 3));
+        assert!(!picked.contains(3, 1), "the cell before the anchor");
+        assert!(picked.contains(4, 1), "the anchor itself");
+        assert!(picked.contains(0, 2), "the first cell of a middle row");
+        assert!(picked.contains(2, 3), "the head itself");
+        assert!(!picked.contains(3, 3), "the cell past the head");
+        assert!(!picked.contains(0, 4), "the row after the head");
     }
 }

@@ -48,8 +48,11 @@ strip of the window is one row of tabs, so `Terminal` and `Problems` share it an
 tab is in front uses the whole width. Keys go to the panel that was clicked last, arrows
 and `Home`/`End` follow the cursor-key mode the program asked for, and `F1`..`F12` are
 sent as xterm sends them, and clicks reach a program that asked for the mouse
-(`mc` selects the file under the pointer). `Alt+F12` brings the terminal forward,
-`View` names both panels.
+(`mc` selects the file under the pointer). With `Shift` held the mouse works for the
+terminal again: a drag picks text even out of a program that wants the mouse, and
+`Ctrl+Shift+C` copies it. `Alt+F12` brings the terminal forward, `View` names both
+panels.
+
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 
