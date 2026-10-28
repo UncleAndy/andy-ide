@@ -80,6 +80,11 @@ pub struct AppState {
     pub prompt: Option<Prompt>,
     /// Set when the user chose to leave; the next frame closes the window.
     pub quit_requested: bool,
+    /// Whether the Markdown preview sits beside the source.
+    pub preview_open: bool,
+    /// Layout cache of the Markdown preview.
+    pub preview: crate::ui::preview::Preview,
+    pub commonmark: egui_commonmark::CommonMarkCache,
     /// Keeps the watch alive; dropping it stops the events.
     watcher: Option<ide_core::ProjectWatcher>,
     fs_events: Option<Receiver<FsEvent>>,
@@ -121,6 +126,9 @@ impl AppState {
             layout: None,
             prompt: None,
             quit_requested: false,
+            preview_open: false,
+            preview: crate::ui::preview::Preview::new(),
+            commonmark: egui_commonmark::CommonMarkCache::default(),
             watcher: None,
             fs_events: None,
             next_buffer_id: 1,

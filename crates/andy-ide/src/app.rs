@@ -146,17 +146,24 @@ impl App {
         let close = KeyboardShortcut::new(Modifiers::CTRL, Key::W);
         let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
         let save_all = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::S);
+        // Ctrl+Shift+V would paste: the window layer treats any Ctrl+V as a paste,
+        // whatever else is held down.
+        let preview = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::M);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
         let save_all_pressed = ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&save_all));
+        let preview_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&preview));
         let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
         let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
 
         if save_all_pressed {
             self.state.save_all();
+        }
+        if preview_pressed {
+            self.state.preview_open = !self.state.preview_open;
         }
         if save_pressed {
             self.state.save_active();
@@ -1408,7 +1415,7 @@ mod clipboard_keys_tests {
 }
 
 #[cfg(test)]
-mod external_change_tests {
+mod frame_tests {
     use super::*;
     use ide_core::FsEvent;
     use std::path::PathBuf;
@@ -1718,6 +1725,45 @@ mod external_change_tests {
             "nothing to save, the window may close: {commands:?}"
         );
         assert!(harness.app.state.prompt.is_none());
+    }
+
+    #[test]
+    fn ctrl_shift_m_toggles_the_preview() {
+        let mut harness = Harness::new(&[("README.md", "# Title\n")]);
+        assert!(!harness.app.state.preview_open, "off by default");
+
+        harness.frame(vec![egui::Event::Key {
+            key: egui::Key::M,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        }]);
+        assert!(harness.app.state.preview_open);
+    }
+
+    #[test]
+    fn the_preview_takes_the_text_of_a_markdown_tab() {
+        let mut harness = Harness::new(&[("README.md", "# Title\n\nbody\n")]);
+        harness.app.state.preview_open = true;
+        harness.frame(Vec::new());
+
+        assert_eq!(
+            harness.app.state.preview.shown(),
+            "# Title\n\nbody\n",
+            "the first frame feeds the preview"
+        );
+    }
+
+    #[test]
+    fn turning_the_preview_on_for_rust_draws_the_source_alone() {
+        let mut harness = Harness::new(&[("a.rs", "fn main() {}\n")]);
+        harness.app.state.preview_open = true;
+        // The panel must not split for a file it cannot render, and must not
+        // panic either.
+        harness.frame(Vec::new());
+        harness.frame(Vec::new());
+        assert!(harness.app.state.preview.shown().is_empty());
     }
 
     #[test]
