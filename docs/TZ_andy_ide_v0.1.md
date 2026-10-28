@@ -26,7 +26,7 @@
 | Асинхронность | `tokio` 1.54 | — |
 | Сборка окружения | Nix flake, `nixos-26.05` | — |
 
-**Лицензия.** MIT, файл `LICENSE` (Copyright (c) 2026 Andrey Velikoredchanin). Соответствие лицензии в манифестах — `license = "MIT"`.
+**Лицензия.** Двойная, на выбор пользователя: MIT (файл `LICENSE-MIT`) или Apache-2.0 (файл `LICENSE-APACHE`), правообладатель — Andrey Velikoredchanin. `LICENSE` — указатель на обе. В манифестах — `license = "MIT OR Apache-2.0"`.
 
 **Платформа.** Первичная — Linux (NixOS 26.05), графическое окружение Wayland/X11. Переносимость на macOS и Windows закладывается архитектурно, но не входит в объём первой версии.
 
