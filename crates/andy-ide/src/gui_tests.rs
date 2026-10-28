@@ -829,3 +829,110 @@ mod jumps {
         );
     }
 }
+
+/// The caret blinks so it can be found in the text; it is also the only way to
+/// tell a caret that sits between two identical glyphs from no caret at all.
+mod blink {
+    use super::*;
+
+    /// Reads whether the view lit the caret in the last frame it drew.
+    fn caret_lit(gui: &Gui) -> bool {
+        gui.harness
+            .ctx
+            .data(|data| data.get_temp::<bool>(egui::Id::new("andy-ide-caret-lit")))
+            .expect("the editor did not publish whether the caret was lit")
+    }
+
+    /// Steps the harness for `seconds` of simulated time, 60 frames a second.
+    fn advance(gui: &mut Gui, seconds: f32) {
+        for _ in 0..(seconds * 60.0).round() as u32 {
+            gui.harness.step();
+        }
+    }
+
+    #[test]
+    fn the_caret_blinks_and_comes_back() {
+        let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+        assert!(caret_lit(&gui), "the caret is dark right after a click");
+
+        advance(&mut gui, 0.7);
+        assert!(
+            !caret_lit(&gui),
+            "the caret never goes dark: it does not blink"
+        );
+
+        advance(&mut gui, 0.6);
+        assert!(
+            caret_lit(&gui),
+            "the caret never comes back after going dark"
+        );
+    }
+
+    #[test]
+    fn typing_lights_the_caret_again() {
+        let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+        advance(&mut gui, 0.7);
+        assert!(
+            !caret_lit(&gui),
+            "the caret is still lit after half a second"
+        );
+
+        // A key press has to make the caret visible at once, wherever the blink
+        // was: otherwise a letter lands while the caret is dark and the user
+        // cannot see where it went.
+        gui.harness.event(egui::Event::Text("x".to_owned()));
+        gui.harness.step();
+        assert!(caret_lit(&gui), "the caret stayed dark after typing");
+    }
+
+    #[test]
+    fn a_dark_caret_is_not_drawn() {
+        let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+        advance(&mut gui, 0.7);
+        assert!(!caret_lit(&gui));
+        // The view still has to say where the caret is: the scroll follow reads
+        // that, and a jump needs the position even while the caret is dark.
+        let published = gui.harness.ctx.data(|data| {
+            data.get_temp::<(egui::Pos2, egui::Rect)>(egui::Id::new("andy-ide-caret-on-screen"))
+        });
+        assert!(
+            published.is_some(),
+            "a dark caret is not drawn and its position is not published either"
+        );
+    }
+}
+
+/// A blinking caret in an idle window only works if the view asks for the next
+/// frame itself: egui repaints on input or on request, and a caret that waits for
+/// a key press would freeze in whatever half of the blink it was in.
+mod blink_repaints {
+    use super::*;
+
+    #[test]
+    fn a_still_caret_asks_for_the_next_frame() {
+        let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+        // Nothing moved in the last frame, so only the blink can want a repaint.
+        gui.harness.step();
+        let delay = gui
+            .harness
+            .output()
+            .viewport_output
+            .values()
+            .map(|viewport| viewport.repaint_delay)
+            .min()
+            .expect("a viewport");
+        assert!(
+            delay > std::time::Duration::ZERO && delay <= std::time::Duration::from_millis(600),
+            "an idle caret did not ask for a repaint in time to blink: {delay:?}, causes {:?}",
+            gui.harness.ctx.repaint_causes()
+        );
+    }
+}

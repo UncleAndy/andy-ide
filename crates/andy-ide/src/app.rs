@@ -1249,6 +1249,19 @@ mod caret_visibility_tests {
         }
 
         fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) -> egui::FullOutput {
+            self.key_rows(key, modifiers).1
+        }
+
+        /// Presses a key and returns the caret rows of the last frame that painted
+        /// a caret, with the frame's output.
+        ///
+        /// The caret blinks, so the last frame drawn may well be a dark one: a test
+        /// that looks only at it would report a caret that is not there.
+        fn key_rows(
+            &mut self,
+            key: egui::Key,
+            modifiers: egui::Modifiers,
+        ) -> (Vec<f32>, egui::FullOutput) {
             self.frame(vec![egui::Event::Key {
                 key,
                 physical_key: None,
@@ -1258,11 +1271,17 @@ mod caret_visibility_tests {
             }]);
             // Smooth scrolling needs a few frames to arrive; the answer is what
             // the last of them painted.
+            let mut lit = None;
             let mut output = None;
             for _ in 0..8 {
-                output = Some(self.frame(Vec::new()));
+                let frame = self.frame(Vec::new());
+                let rows = Self::caret_rows(&frame);
+                if !rows.is_empty() {
+                    lit = Some(rows);
+                }
+                output = Some(frame);
             }
-            output.expect("frames drawn")
+            (lit.unwrap_or_default(), output.expect("frames drawn"))
         }
 
         /// Y of the carets that were painted this frame, in screen points.
@@ -1279,18 +1298,41 @@ mod caret_visibility_tests {
         }
     }
 
+    /// A caret that is always painted is easy to lose in the text: the bar sits
+    /// between two glyphs and reads as one of them. It blinks in the real draw
+    /// path, not only in the view's own test.
+    #[test]
+    fn the_caret_blinks_in_the_drawn_output() {
+        let mut harness = Harness::with_lines(20);
+        harness.key(egui::Key::End, egui::Modifiers::CTRL);
+
+        // 1.2 s at 0.1 s a frame: two turns of a 0.53 s blink, so the caret has to
+        // be seen and lost more than once.
+        let mut lit = 0;
+        let mut dark = 0;
+        for _ in 0..12 {
+            if Harness::caret_rows(&harness.frame(Vec::new())).is_empty() {
+                dark += 1;
+            } else {
+                lit += 1;
+            }
+        }
+        assert!(
+            lit >= 3 && dark >= 3,
+            "the caret did not blink in the drawn output: lit {lit}, dark {dark} frames"
+        );
+    }
+
     #[test]
     fn ctrl_home_leaves_the_caret_where_it_can_be_seen() {
         let mut harness = Harness::with_lines(200);
         harness.key(egui::Key::End, egui::Modifiers::CTRL);
-        let output = harness.key(egui::Key::End, egui::Modifiers::CTRL);
-        let rows = Harness::caret_rows(&output);
+        let (rows, _output) = harness.key_rows(egui::Key::End, egui::Modifiers::CTRL);
         assert!(!rows.is_empty(), "no caret was painted");
         let visible = rows.iter().any(|y| (0.0..700.0).contains(y));
         assert!(visible, "the caret is off screen after Ctrl+End: {rows:?}");
 
-        let output = harness.key(egui::Key::Home, egui::Modifiers::CTRL);
-        let rows = Harness::caret_rows(&output);
+        let (rows, _output) = harness.key_rows(egui::Key::Home, egui::Modifiers::CTRL);
         assert!(
             rows.iter().any(|y| (0.0..700.0).contains(y)),
             "the caret is off screen after Ctrl+Home: {rows:?}"

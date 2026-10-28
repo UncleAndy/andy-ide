@@ -21,6 +21,14 @@ use super::edit::Motion;
 /// Caret width in points.
 const CARET_WIDTH: f32 = 1.5;
 
+/// How long the caret stays lit and dark in turn, in seconds.
+///
+/// Lit and dark halves are equal: the caret is visible half the time, so it is
+/// easy to find without being a permanent bar in the text. 0.53 s is the blink of
+/// a terminal cursor, and it does not divide evenly into the frame time, so the
+/// caret cannot strobe in step with a 60 Hz repaint.
+const CARET_BLINK: f64 = 0.53;
+
 /// Colours of the text area for one theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
@@ -215,9 +223,11 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
             }
 
             let mut navigated = false;
+            let mut typed = false;
             if response.has_focus() {
                 let (text_changed, moved) = handle_input(ui, buffer);
                 changed |= text_changed;
+                typed = text_changed;
                 navigated = moved;
             }
 
@@ -233,42 +243,62 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 first_line,
                 last_line,
             );
-            paint_selection(
-                PaintCtx {
-                    painter: &painter,
-                    palette,
-                    origin: text_origin,
-                    char_w,
-                    row_h,
-                },
-                buffer,
-                &layouts,
-                first_line,
-                last_line,
-            );
+            let paint_ctx = || PaintCtx {
+                painter: &painter,
+                palette,
+                origin: text_origin,
+                char_w,
+                row_h,
+            };
+            paint_selection(paint_ctx(), buffer, &layouts, first_line, last_line);
             paint_galleys(&painter, palette, &layouts, text_origin, row_h);
             let (caret_line, _) = buffer.line_col();
             let caret_galley = layouts
                 .galley(caret_line)
                 .cloned()
                 .or_else(|| line_galley(ui, buffer, &spans, &font, palette, caret_line));
-            let caret_pos = paint_caret(
-                &painter,
-                palette,
-                buffer,
-                caret_galley.as_ref(),
-                text_origin,
-                char_w,
-                row_h,
-            );
+            // A caret that is always drawn is easy to lose in the text: the bar blends
+            // with the glyphs next to it. It blinks instead, and a move or a letter
+            // lights it at once so the user sees where the text went.
+            let tracked = response.id.with("last_caret");
+            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
+            let caret = buffer.caret();
+            // A jump the application asked for (a definition, a diagnostic, a
+            // reference in the list) has no key press behind it, so it is
+            // announced by the buffer: the caret must end up in sight.
+            let reveal = buffer.take_reveal();
+            // A reveal only relaxes the need for a key press: the view still
+            // scrolls just when the caret is out of sight, so a second frame of
+            // the same request cannot drag the text further than the first.
+            let moved = typed || navigated || reveal || previous != Some(caret);
+            let blinking = response.id.with("caret-blink");
+            let now = ui.input(|input| input.time);
+            // A caret that just moved is lit: it blinks from the moment the user
+            // stops, not from the moment the window opened.
+            let since: f64 = if moved {
+                ui.data_mut(|data| data.insert_temp(blinking, now));
+                now
+            } else {
+                ui.data(|data| data.get_temp(blinking)).unwrap_or(now)
+            };
+            let lit = moved || caret_lit(now - since);
+            ui.data_mut(|data| data.insert_temp(Id::new("andy-ide-caret-lit"), lit));
+            // A window that is otherwise idle does not repaint, so the caret has to
+            // ask for the frame in which its state turns over.
+            let interval = if moved {
+                CARET_BLINK
+            } else {
+                CARET_BLINK - (now - since).rem_euclid(CARET_BLINK)
+            };
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(interval));
+
+            let caret_pos = paint_caret(paint_ctx(), buffer, caret_galley.as_ref(), lit);
 
             // The view followed the caret in the same frame, so the caret is where
             // it was asked to be, and the scroll target is in screen coordinates:
             // the scroll area compares it with its clip rect.
             let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
-            let tracked = response.id.with("last_caret");
-            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
-            let caret = buffer.caret();
             let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
             let (remember, outside) = caret_follow(previous, caret, viewport, row);
             if remember {
@@ -277,10 +307,6 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
             // A wheel scroll moves the view and leaves the caret alone: chasing
             // it then would fight the wheel. Only a caret move or an explicit
             // navigation key pulls the view.
-            // A jump the application asked for (a definition, a diagnostic, a
-            // reference in the list) has no key press behind it, so it is
-            // announced by the buffer: the caret must end up in sight.
-            let reveal = buffer.take_reveal();
             // A reveal only relaxes the need for a key press: the view still
             // scrolls just when the caret is out of sight, so a second frame of
             // the same request cannot drag the text further than the first.
@@ -568,15 +594,24 @@ fn paint_galleys(
     }
 }
 
+/// Draws the caret and returns where it is, lit or not.
+///
+/// The position is needed even when the caret is dark: the view follows the
+/// caret and a jump scrolls to it, and both have to work in the dark half of the
+/// blink.
 fn paint_caret(
-    painter: &egui::Painter,
-    palette: Palette,
+    ctx: PaintCtx<'_>,
     buffer: &EditorBuffer,
     galley: Option<&Arc<Galley>>,
-    origin: Pos2,
-    char_w: f32,
-    row_h: f32,
+    lit: bool,
 ) -> Pos2 {
+    let PaintCtx {
+        painter,
+        palette,
+        origin,
+        char_w,
+        row_h,
+    } = ctx;
     let (line, col) = buffer.line_col();
     let text = buffer.line_text(line);
     let x = match galley {
@@ -590,12 +625,25 @@ fn paint_caret(
     };
     let y = origin.y + (line as f32) * row_h;
     let position = Pos2::new(origin.x + x, y);
-    painter.rect_filled(
-        Rect::from_min_size(position, Vec2::new(CARET_WIDTH, row_h)),
-        CornerRadius::ZERO,
-        palette.caret,
-    );
+    if lit {
+        painter.rect_filled(
+            Rect::from_min_size(position, Vec2::new(CARET_WIDTH, row_h)),
+            CornerRadius::ZERO,
+            palette.caret,
+        );
+    }
     position
+}
+
+/// Whether the caret is lit `elapsed` seconds after the user last moved it.
+///
+/// Lit and dark halves are equal. A negative or absent time counts as the
+/// moment of the move, so a caller without a clock gets a visible caret.
+fn caret_lit(elapsed: f64) -> bool {
+    if elapsed.is_nan() || elapsed < 0.0 {
+        return true;
+    }
+    ((elapsed / CARET_BLINK) as u64).is_multiple_of(2)
 }
 
 /// How far to scroll while a selection drag leaves the viewport.
@@ -1186,5 +1234,31 @@ mod char_boundary_fuzz_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod blink_tests {
+    use super::{CARET_BLINK, caret_lit};
+
+    #[test]
+    fn the_caret_is_lit_at_the_moment_it_moves() {
+        assert!(caret_lit(0.0), "a caret that just moved is dark");
+        assert!(
+            caret_lit(-1.0),
+            "a negative time should count as a fresh move"
+        );
+        assert!(
+            caret_lit(f64::NAN),
+            "a missing clock should leave the caret lit"
+        );
+    }
+
+    #[test]
+    fn the_caret_spends_half_its_time_dark() {
+        assert!(caret_lit(CARET_BLINK * 0.9));
+        assert!(!caret_lit(CARET_BLINK * 1.1), "the caret never goes dark");
+        assert!(caret_lit(CARET_BLINK * 2.1), "the caret never comes back");
+        assert!(!caret_lit(CARET_BLINK * 3.1));
     }
 }
