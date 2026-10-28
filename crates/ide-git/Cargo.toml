@@ -1,0 +1,10 @@
+[package]
+name = "ide-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Repository state, diffs and history for andy-ide"
+
+[dependencies]

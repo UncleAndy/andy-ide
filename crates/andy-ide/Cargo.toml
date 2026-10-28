@@ -1,0 +1,16 @@
+[package]
+name = "andy-ide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The andy-ide application"
+
+[dependencies]
+ide-core = { path = "../ide-core" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe = "0.36.2"
+egui = "0.36.2"

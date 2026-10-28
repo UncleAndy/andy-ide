@@ -1,0 +1,58 @@
+{
+  description = "andy-ide development environment";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nixpkgs, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+
+        # Libraries the window system and the GL context need at run time.
+        # wayland/libxkbcommon for Wayland sessions, the xorg set for X11,
+        # libGL for the glow renderer.
+        graphicsLibs = with pkgs; [
+          libxkbcommon
+          wayland
+          libGL
+          fontconfig
+          freetype
+        ];
+
+        xorgLibs = with pkgs; [
+          libx11
+          libxcursor
+          libxrandr
+          libxi
+          libxext
+        ];
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          name = "andy-ide-dev";
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            gcc
+            rustc
+            cargo
+            clippy
+            rustfmt
+            rust-analyzer
+            git
+          ];
+
+          buildInputs = graphicsLibs ++ xorgLibs;
+
+          shellHook = ''
+            # target/ inside the repository is not writable by every user on
+            # this host; keep build artifacts in the user's cache.
+            export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$HOME/.cache/andy-ide-target}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (graphicsLibs ++ xorgLibs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          '';
+        };
+      });
+}

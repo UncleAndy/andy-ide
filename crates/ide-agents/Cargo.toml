@@ -1,0 +1,10 @@
+[package]
+name = "ide-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Agent registry and ACP/MCP client"
+
+[dependencies]
