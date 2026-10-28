@@ -200,9 +200,12 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             // navigation key pulls the view.
             let pull = outside && (navigated || previous.is_none());
             if pull && !drag_scrolled {
-                ui.scroll_to_rect(
+                // Instant, like an editor: a smooth animation would leave the
+                // caret off screen for a moment after Ctrl+Home.
+                ui.scroll_to_rect_animation(
                     Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0),
                     None,
+                    egui::style::ScrollAnimation::none(),
                 );
             }
         });
