@@ -12,16 +12,38 @@ use std::time::Duration;
 
 use ide_lsp::registry::ServerConfig;
 use ide_lsp::{LspSession, uri_to_path};
-use lsp_types::{Location, Position};
+use lsp_types::{DocumentSymbol, Location, Position, SymbolInformation};
 
 /// Something the editor wants from the server.
 #[derive(Debug)]
 pub enum Job {
-    Open { path: PathBuf, text: String },
-    Change { path: PathBuf, text: String },
-    Close { path: PathBuf },
-    Definition { path: PathBuf, position: Position },
-    References { path: PathBuf, position: Position },
+    Open {
+        path: PathBuf,
+        text: String,
+    },
+    Change {
+        path: PathBuf,
+        text: String,
+    },
+    Close {
+        path: PathBuf,
+    },
+    Definition {
+        path: PathBuf,
+        position: Position,
+    },
+    References {
+        path: PathBuf,
+        position: Position,
+    },
+    /// The outline of one file.
+    Symbols {
+        path: PathBuf,
+    },
+    /// The symbols of the workspace whose name matches `query`.
+    WorkspaceSymbols {
+        query: String,
+    },
 }
 
 /// What came back.
@@ -39,6 +61,16 @@ pub enum Outcome {
     References {
         from: PathBuf,
         locations: Vec<Location>,
+    },
+    /// The outline of one file, as the server nested it.
+    Symbols {
+        from: PathBuf,
+        symbols: Vec<DocumentSymbol>,
+    },
+    /// The symbols of the workspace that answer `query`.
+    WorkspaceSymbols {
+        query: String,
+        symbols: Vec<SymbolInformation>,
     },
     /// Something went wrong; the text is for the status bar, the editor keeps
     /// working.
@@ -205,6 +237,34 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 from: path,
                 locations,
             },
+            Err(error) => Outcome::Failed(format!("{error:#}")),
+        }),
+        Job::Symbols { path } => {
+            let mut found = session.document_symbols(&path);
+            // Same cold start as a definition: an empty outline before the
+            // server has indexed the file means "not yet", not "nothing here".
+            if !*warm && matches!(&found, Ok(symbols) if symbols.is_empty()) {
+                for delay in [250u64, 500, 1000, 2000] {
+                    std::thread::sleep(Duration::from_millis(delay));
+                    found = session.document_symbols(&path);
+                    if !matches!(&found, Ok(symbols) if symbols.is_empty()) {
+                        break;
+                    }
+                }
+            }
+            if matches!(&found, Ok(symbols) if !symbols.is_empty()) {
+                *warm = true;
+            }
+            Some(match found {
+                Ok(symbols) => Outcome::Symbols {
+                    from: path,
+                    symbols,
+                },
+                Err(error) => Outcome::Failed(format!("{error:#}")),
+            })
+        }
+        Job::WorkspaceSymbols { query } => Some(match session.workspace_symbols(&query) {
+            Ok(symbols) => Outcome::WorkspaceSymbols { query, symbols },
             Err(error) => Outcome::Failed(format!("{error:#}")),
         }),
         Job::Definition { path, position } => {

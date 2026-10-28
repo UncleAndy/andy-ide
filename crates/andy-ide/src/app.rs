@@ -135,6 +135,14 @@ impl App {
         if let Some(action) = chosen {
             self.state.pending.push(action);
         }
+        // The project-symbol search: its query goes out after the typing has
+        // settled, and its answers arrive through `poll_lsp`.
+        self.state
+            .poll_symbol_search(ui.ctx().input(|input| input.time));
+        let picked_symbol = self.state.symbols.show(ui.ctx());
+        if let Some(action) = picked_symbol {
+            self.state.pending.push(action);
+        }
         self.state.poll_navigation();
         self.state.apply_pending();
 
@@ -210,6 +218,33 @@ impl App {
         if close_pressed && let Some(index) = self.state.tabs.active() {
             self.state.close_tab(index);
         }
+        // The project symbols keep the key the spec gives them. IntelliJ puts
+        // the file structure on Ctrl+F12 and the project search on
+        // Ctrl+Alt+Shift+N, and so does this editor.
+        let project_symbols = ui.ctx().input_mut(|input| {
+            input.consume_key(
+                Modifiers::CTRL.plus(Modifiers::SHIFT).plus(Modifiers::ALT),
+                Key::N,
+            )
+        });
+        if project_symbols {
+            self.state.open_symbol_search();
+        }
+        let file_symbols = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::F12));
+        if file_symbols {
+            self.state.file_symbols();
+        }
+        // Shift+F12 before the bare key: `consume_key` treats a Shift it was not
+        // asked about as irrelevant, so checking plain F12 first swallowed the
+        // reference list and went to the definition instead.
+        let references = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F12));
+        if references {
+            self.state.find_references();
+        }
         // F12 is the usual "go to definition" everywhere else, and it is a bare
         // key, so it is read from the events rather than as a shortcut.
         let f12 = ui
@@ -217,12 +252,6 @@ impl App {
             .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F12));
         if f12 {
             self.state.goto_definition();
-        }
-        let references = ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F12));
-        if references {
-            self.state.find_references();
         }
     }
 }
@@ -2234,6 +2263,12 @@ mod navigation_tests {
     }
 }
 
+/// Real language servers are heavy and share the cargo cache, so the tests that
+/// start one take this lock: they queue instead of starving each other and each
+/// other's timeouts.
+#[cfg(test)]
+pub(crate) static REAL_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The whole chain with the real server: a caret in the editor, F12, the worker
 /// thread, rust-analyzer, and the answer opening the file at the declaration.
 ///
@@ -2248,6 +2283,9 @@ mod real_navigation_tests {
 
     #[test]
     fn f12_finds_the_definition_with_rust_analyzer() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(server) = ide_lsp::server_for(std::path::Path::new("src/main.rs")) else {
             println!("no server is known for Rust: the check was skipped");
             return;
@@ -2473,6 +2511,9 @@ mod real_reference_tests {
 
     #[test]
     fn shift_f12_lists_the_uses_with_rust_analyzer() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(server) = ide_lsp::server_for(std::path::Path::new("src/main.rs")) else {
             println!("no server is known for Rust: the check was skipped");
             return;
@@ -2541,5 +2582,359 @@ mod real_reference_tests {
             "a preview is empty: {hits:?}"
         );
         app.state.lsp.take();
+    }
+}
+
+/// The outline (`Ctrl+F12`) and the project symbols (`Ctrl+Shift+F12`) before a
+/// server is involved: what the rows look like, and what a missing server says.
+#[cfg(test)]
+mod symbols_tests {
+    use super::*;
+    use crate::lsp::Outcome;
+    use crate::ui::results::SymbolKind;
+    use lsp_types::{DocumentSymbol, Position, Range, SymbolInformation, SymbolKind as Lsp};
+    use std::path::Path;
+
+    fn project(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = project.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, text).unwrap();
+        }
+        let app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        (project, config, app)
+    }
+
+    fn range(line: u32, character: u32) -> Range {
+        Range {
+            start: Position { line, character },
+            end: Position {
+                line,
+                character: character + 1,
+            },
+        }
+    }
+
+    fn symbol(
+        name: &str,
+        kind: Lsp,
+        line: u32,
+        children: Option<Vec<DocumentSymbol>>,
+    ) -> DocumentSymbol {
+        DocumentSymbol {
+            name: name.to_owned(),
+            detail: None,
+            kind,
+            tags: None,
+            // Deprecated in the protocol in favour of `tags`; the field is still
+            // required by the struct, so a test fixture fills it.
+            #[allow(deprecated)]
+            deprecated: None,
+            range: range(line, 0),
+            selection_range: range(line, 4),
+            children,
+        }
+    }
+
+    fn outline() -> Vec<DocumentSymbol> {
+        vec![symbol(
+            "App",
+            Lsp::STRUCT,
+            0,
+            Some(vec![
+                symbol("draw", Lsp::METHOD, 10, None),
+                symbol(
+                    "Inner",
+                    Lsp::STRUCT,
+                    20,
+                    Some(vec![symbol("new", Lsp::FUNCTION, 25, None)]),
+                ),
+            ]),
+        )]
+    }
+
+    #[test]
+    fn an_outline_flattens_children_under_their_parent() {
+        let (_project, _config, mut app) = project(&[("a.rs", "x\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state.apply_outcome(Outcome::Symbols {
+            from: "a.rs".into(),
+            symbols: outline(),
+        });
+
+        let hits = &app.state.results.hits;
+        let rows: Vec<(&str, usize, SymbolKind)> = hits
+            .iter()
+            .map(|hit| (hit.text.as_str(), hit.depth, hit.kind.unwrap()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("App", 0, SymbolKind::Type),
+                ("draw", 1, SymbolKind::Method),
+                ("Inner", 1, SymbolKind::Type),
+                ("new", 2, SymbolKind::Function),
+            ],
+            "the outline is not in reading order with its nesting"
+        );
+        assert_eq!(hits[3].line, 25, "a row points at the wrong line");
+        assert_eq!(hits[3].character, 4, "a row points at the wrong column");
+    }
+
+    #[test]
+    fn an_outline_opens_the_list_with_its_title() {
+        let (_project, _config, mut app) = project(&[("a.rs", "x\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state.apply_outcome(Outcome::Symbols {
+            from: "a.rs".into(),
+            symbols: outline(),
+        });
+
+        assert!(app.state.results.open, "the outline did not open");
+        assert_eq!(
+            app.state.results.title.as_deref(),
+            Some("Symbols in a.rs: 4")
+        );
+        assert_eq!(app.state.status, "4 symbols in a.rs");
+        assert_eq!(app.state.results.hits[0].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn an_empty_outline_says_so_instead_of_opening_a_blank_list() {
+        let (_project, _config, mut app) = project(&[("a.rs", "x\n")]);
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state.apply_outcome(Outcome::Symbols {
+            from: "a.rs".into(),
+            symbols: Vec::new(),
+        });
+
+        assert!(!app.state.results.open, "an empty outline opened a list");
+        assert_eq!(app.state.status, "no symbols in a.rs");
+    }
+
+    #[test]
+    fn project_symbols_are_made_relative_and_sorted() {
+        let (proj, _config, mut app) = project(&[("a.rs", "x\n"), ("b/c.rs", "y\n")]);
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.rs");
+        std::fs::write(&far, "z\n").unwrap();
+
+        let information = |path: &std::path::Path, line: u32, name: &str| SymbolInformation {
+            name: name.to_owned(),
+            kind: Lsp::FUNCTION,
+            tags: None,
+            #[allow(deprecated)]
+            deprecated: None,
+            location: lsp_types::Location {
+                uri: ide_lsp::path_to_uri(path).unwrap(),
+                range: range(line, 0),
+            },
+            container_name: None,
+        };
+        // The search asks, then an answer comes back: the answer is only taken
+        // while the field is up and the query still matches.
+        app.state.symbols.open();
+        app.state.symbols.query = "i".to_owned();
+        app.state.apply_outcome(Outcome::WorkspaceSymbols {
+            query: "i".to_owned(),
+            symbols: vec![
+                information(&far, 0, "far"),
+                information(&proj.path().join("b/c.rs"), 3, "second"),
+                information(&proj.path().join("a.rs"), 7, "first"),
+            ],
+        });
+
+        let hits = &app.state.symbols.hits;
+        assert_eq!(hits.len(), 3);
+        // Sorted by path: the absolute one comes first, as `/tmp/...` sorts
+        // before any relative path.
+        assert_eq!(
+            hits[0].path, far,
+            "a symbol outside the project lost its path"
+        );
+        let paths: Vec<&Path> = hits.iter().map(|hit| hit.path.as_path()).collect();
+        assert!(paths.contains(&Path::new("a.rs")), "{paths:?}");
+        assert!(paths.contains(&Path::new("b/c.rs")), "{paths:?}");
+        assert_eq!(
+            app.state.symbols.hits[0].kind,
+            Some(crate::ui::results::SymbolKind::Function)
+        );
+    }
+
+    #[test]
+    fn asking_for_symbols_without_a_server_explains_itself() {
+        let (_project, _config, mut app) = project(&[("notes.txt", "text\n")]);
+        app.state.open_file(std::path::Path::new("notes.txt"));
+
+        app.state.file_symbols();
+        assert_eq!(app.state.status, "no language server for notes.txt");
+        assert!(
+            app.state.lsp.is_none(),
+            "a server was started for a text file"
+        );
+        assert!(!app.state.results.open);
+
+        app.state.open_symbol_search();
+        assert_eq!(app.state.status, "no language server for notes.txt");
+        assert!(!app.state.symbols.open, "the field opened without a server");
+    }
+
+    #[test]
+    fn the_symbol_search_with_no_file_open_asks_for_one() {
+        let (_project, _config, mut app) = project(&[("a.rs", "x\n")]);
+        app.state.open_symbol_search();
+        assert_eq!(
+            app.state.status,
+            "open a file first: its language picks the server"
+        );
+    }
+}
+
+/// The outline and the project symbols through the real server.
+#[cfg(test)]
+mod real_symbol_tests {
+    use super::*;
+
+    const SOURCE: &str = "pub struct Point {\n    pub x: i32,\n    pub y: i32,\n}\n\nimpl Point {\n    pub fn new(x: i32, y: i32) -> Self {\n        Self { x, y }\n    }\n\n    pub fn sum(&self) -> i32 {\n        self.x + self.y\n    }\n}\n\npub const ORIGIN: Point = Point { x: 0, y: 0 };\n\npub fn make() -> Point {\n    Point::new(1, 2)\n}\n";
+
+    fn started_app() -> Option<(tempfile::TempDir, tempfile::TempDir, App)> {
+        let server = ide_lsp::server_for(std::path::Path::new("src/lib.rs"))?;
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return None;
+        }
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), SOURCE).unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/lib.rs"));
+        Some((project, config, app))
+    }
+
+    /// Polls until the list has something in it, asking again if the server was
+    /// still indexing.
+    fn wait_for_list(app: &mut App, ask: fn(&mut AppState)) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            app.state.poll_lsp();
+            if app.state.results.open {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            if !app.state.status.contains("looking for") {
+                ask(&mut app.state);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    #[test]
+    fn ctrl_f12_lists_the_symbols_of_the_file() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some((_project, _config, mut app)) = started_app() else {
+            return;
+        };
+        app.state.file_symbols();
+        assert!(wait_for_list(&mut app, |state| state.file_symbols()));
+
+        let names: Vec<&str> = app
+            .state
+            .results
+            .hits
+            .iter()
+            .map(|hit| hit.text.as_str())
+            .collect();
+        assert!(names.contains(&"Point"), "the struct is missing: {names:?}");
+        assert!(names.contains(&"new"), "the method is missing: {names:?}");
+        assert!(
+            names.contains(&"make"),
+            "the function is missing: {names:?}"
+        );
+        assert!(
+            names.contains(&"ORIGIN"),
+            "the constant is missing: {names:?}"
+        );
+
+        // `new` is nested in the impl block, so it must be drawn deeper than the
+        // struct it belongs to.
+        let deepest = app
+            .state
+            .results
+            .hits
+            .iter()
+            .find(|hit| hit.text == "new")
+            .map(|hit| hit.depth)
+            .unwrap_or(0);
+        assert!(deepest > 0, "the method is not nested under its impl");
+        println!("outline: {} rows", app.state.results.hits.len());
+    }
+
+    #[test]
+    fn ctrl_shift_f12_finds_a_symbol_by_name() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some((_project, _config, mut app)) = started_app() else {
+            return;
+        };
+        app.state.open_symbol_search();
+        assert!(app.state.symbols.open, "the search did not open");
+        app.state.symbols.query = "make".to_owned();
+
+        // Frames drive the debounce and the answer, exactly as the window does.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut now = 0.0;
+        loop {
+            now += 0.1;
+            app.state.poll_symbol_search(now);
+            app.state.poll_lsp();
+            if !app.state.symbols.hits.is_empty() || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let names: Vec<&str> = app
+            .state
+            .symbols
+            .hits
+            .iter()
+            .map(|hit| hit.text.as_str())
+            .collect();
+        assert!(
+            names.contains(&"make"),
+            "the search found nothing for make: {names:?}"
+        );
+        assert!(
+            app.state
+                .symbols
+                .hits
+                .iter()
+                .all(|hit| hit.path.ends_with("src/lib.rs")),
+            "a project symbol came from another file"
+        );
+        println!("search make: {} rows", app.state.symbols.hits.len());
     }
 }

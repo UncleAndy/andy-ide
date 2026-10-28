@@ -540,18 +540,8 @@ mod the_reference_list {
 
     fn two_hits() -> Vec<Hit> {
         vec![
-            Hit {
-                path: PathBuf::from("a.rs"),
-                line: 2,
-                character: 0,
-                text: "three".to_owned(),
-            },
-            Hit {
-                path: PathBuf::from("b.rs"),
-                line: 1,
-                character: 2,
-                text: "beta".to_owned(),
-            },
+            Hit::reference(PathBuf::from("a.rs"), 2, 0, "three".to_owned()),
+            Hit::reference(PathBuf::from("b.rs"), 1, 2, "beta".to_owned()),
         ]
     }
 
@@ -934,5 +924,254 @@ mod blink_repaints {
             "an idle caret did not ask for a repaint in time to blink: {delay:?}, causes {:?}",
             gui.harness.ctx.repaint_causes()
         );
+    }
+}
+
+/// The outline `Ctrl+F12` puts on screen.
+mod the_symbol_list {
+    use super::*;
+    use crate::ui::results::SymbolKind;
+
+    fn outline() -> Vec<crate::ui::results::Hit> {
+        use crate::ui::results::Hit;
+        vec![
+            Hit::symbol("a.rs".into(), 0, 4, "App".to_owned(), 0, SymbolKind::Type),
+            Hit::symbol(
+                "a.rs".into(),
+                4,
+                8,
+                "draw".to_owned(),
+                1,
+                SymbolKind::Method,
+            ),
+            Hit::symbol(
+                "a.rs".into(),
+                9,
+                0,
+                "run".to_owned(),
+                0,
+                SymbolKind::Function,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_outline_shows_the_tree_and_enter_jumps_to_a_symbol() {
+        let text: String = (0..10)
+            .map(|n| format!("abcdefghijklmnopqrst{n}\n"))
+            .collect();
+        let mut gui = Gui::new(&[("a.rs", &text)], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .results
+            .show_symbols("Symbols in a.rs: 3".to_owned(), outline());
+        gui.settle();
+
+        assert!(
+            gui.harness
+                .query_by_label_contains("Symbols in a.rs: 3")
+                .is_some(),
+            "the outline has no title"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("type App").is_some(),
+            "the first symbol is not in the list"
+        );
+        assert!(
+            gui.harness
+                .query_by_label_contains("  method draw")
+                .is_some(),
+            "a nested symbol is not indented under its parent"
+        );
+
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        let buffer = gui.app().state.active_buffer().expect("a buffer");
+        assert_eq!(buffer.line_col().0, 4, "Enter did not jump to the method");
+        assert_eq!(buffer.line_col().1, 8, "the caret is not on the name");
+        assert!(!gui.app().state.results.open, "the outline stayed open");
+    }
+}
+
+/// The F12 chords, against the real input state: `consume_key` ignores a Shift it
+/// was not asked about, so the order the chords are read in decides who wins.
+mod f12_chords {
+
+    /// Reads the chords in the order `App::handle_keys` reads them, against the
+    /// real input state, and says which one fired.
+    fn fired(key: egui::Key, modifiers: egui::Modifiers) -> Vec<&'static str> {
+        let mut fired = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 300.0),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut output = egui::Context::default().run_ui(input, |ui| {
+            let project = ui.ctx().input_mut(|input| {
+                input.consume_key(
+                    egui::Modifiers::CTRL
+                        .plus(egui::Modifiers::SHIFT)
+                        .plus(egui::Modifiers::ALT),
+                    egui::Key::N,
+                )
+            });
+            if project {
+                fired.push("project symbols");
+            }
+            let file = ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
+            if file {
+                fired.push("file symbols");
+            }
+            let references = ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12));
+            if references {
+                fired.push("references");
+            }
+            let definition = ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F12));
+            if definition {
+                fired.push("definition");
+            }
+        });
+        // The frame produced a font texture that nobody renders here; dropping it
+        // without saying so panics in `epaint`.
+        output.textures_delta.clear();
+        fired
+    }
+
+    #[test]
+    fn each_chord_asks_for_exactly_one_thing() {
+        assert_eq!(
+            fired(
+                egui::Key::N,
+                egui::Modifiers::CTRL
+                    .plus(egui::Modifiers::SHIFT)
+                    .plus(egui::Modifiers::ALT)
+            ),
+            vec!["project symbols"],
+            "Ctrl+Alt+Shift+N was taken by a less specific chord"
+        );
+        assert_eq!(
+            fired(egui::Key::F12, egui::Modifiers::CTRL),
+            vec!["file symbols"]
+        );
+        // Shift+F12 before the bare key: `consume_key` ignores a Shift it was
+        // not asked about, so plain F12 first would swallow the reference list.
+        assert_eq!(
+            fired(egui::Key::F12, egui::Modifiers::SHIFT),
+            vec!["references"]
+        );
+        assert_eq!(
+            fired(egui::Key::F12, egui::Modifiers::NONE),
+            vec!["definition"]
+        );
+    }
+}
+
+/// The project-symbol search `Ctrl+Alt+Shift+N` opens.
+mod the_symbol_search {
+    use super::*;
+    use crate::ui::results::{Hit, SymbolKind};
+
+    fn text() -> String {
+        (0..10)
+            .map(|n| format!("abcdefghijklmnopqrst{n}\n"))
+            .collect()
+    }
+
+    fn hits() -> Vec<Hit> {
+        vec![
+            Hit::symbol(
+                "a.rs".into(),
+                2,
+                4,
+                "draw".to_owned(),
+                0,
+                SymbolKind::Function,
+            ),
+            Hit::symbol(
+                "a.rs".into(),
+                7,
+                6,
+                "run".to_owned(),
+                0,
+                SymbolKind::Function,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_field_lists_what_the_server_found_and_enter_jumps() {
+        let text = text();
+        let mut gui = Gui::new(&[("a.rs", &text)], Some("a.rs"));
+        gui.settle();
+
+        gui.app_mut().state.symbols.open();
+        gui.app_mut().state.symbols.query = "r".to_owned();
+        gui.app_mut().state.symbols.apply("r", hits());
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label_contains("fn draw").is_some(),
+            "the first match is not in the list"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("fn run").is_some(),
+            "the second match is not in the list"
+        );
+
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        let buffer = gui.app().state.active_buffer().expect("a buffer");
+        assert_eq!(
+            buffer.line_col(),
+            (7, 6),
+            "Enter did not open the second match"
+        );
+        assert!(!gui.app().state.symbols.open, "the field stayed open");
+    }
+
+    #[test]
+    fn escape_closes_the_field_and_typing_reaches_the_query() {
+        let text = text();
+        let mut gui = Gui::new(&[("a.rs", &text)], Some("a.rs"));
+        gui.settle();
+
+        gui.app_mut().state.symbols.open();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("type a name").is_some(),
+            "the field does not say what to do"
+        );
+
+        gui.harness.event(egui::Event::Text("run".to_owned()));
+        gui.settle();
+        assert_eq!(
+            gui.app().state.symbols.query,
+            "run",
+            "typing did not reach the query"
+        );
+
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(!gui.app().state.symbols.open, "Escape left the field open");
     }
 }

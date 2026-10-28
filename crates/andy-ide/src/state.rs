@@ -16,8 +16,9 @@ use crate::editor::EditorBuffer;
 pub enum Action {
     /// Open (or focus) a file, path relative to the project root.
     OpenFile(PathBuf),
-    /// Open a file at a line (0-based), for diagnostics and navigation.
-    OpenFileAt(PathBuf, u32),
+    /// Open a file at a line and character (both 0-based), for diagnostics and
+    /// navigation. A diagnostic has no column of its own, so it passes 0.
+    OpenFileAt(PathBuf, u32, u32),
     /// Close the tab at this index, asking first when it has unsaved changes.
     CloseTab(usize),
     /// Close the tab at this index whatever it holds.
@@ -91,6 +92,8 @@ pub struct AppState {
     pub quick_open: crate::ui::quick_open::QuickOpen,
     /// Where a symbol is used, once the server has answered.
     pub results: crate::ui::results::Results,
+    /// The project-symbol search (`Ctrl+Shift+F12`).
+    pub symbols: crate::ui::symbols::SymbolSearch,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -147,6 +150,7 @@ impl AppState {
             preview_open: false,
             quick_open: crate::ui::quick_open::QuickOpen::new(),
             results: crate::ui::results::Results::new(),
+            symbols: crate::ui::symbols::SymbolSearch::new(),
             lsp: None,
             lsp_status: String::new(),
             last_sync: 0.0,
@@ -595,6 +599,75 @@ impl AppState {
         self.navigate(true);
     }
 
+    /// Shows the structure of the file in the active tab.
+    pub fn file_symbols(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            return;
+        };
+        let path = buffer.path.clone();
+        if !self.start_server_for(&path) {
+            return;
+        }
+        if let Some(lsp) = self.lsp.as_ref() {
+            self.status = "looking for symbols...".to_owned();
+            lsp.send(crate::lsp::Job::Symbols { path });
+        }
+    }
+
+    /// Opens the project-symbol search (`Ctrl+Shift+F12`).
+    ///
+    /// The server is the one that understands the file in front of the user: a
+    /// project with two languages has two servers, and asking the wrong one for
+    /// workspace symbols answers nothing useful.
+    pub fn open_symbol_search(&mut self) {
+        let path = self
+            .active_buffer()
+            .map(|buffer| buffer.path.clone())
+            .or_else(|| self.tabs.items().first().map(|item| item.path.clone()));
+        let Some(path) = path else {
+            self.status = "open a file first: its language picks the server".to_owned();
+            return;
+        };
+        if !self.start_server_for(&path) {
+            return;
+        }
+        self.symbols.open();
+        self.status = "type a name: the server searches the project".to_owned();
+    }
+
+    /// Sends the query the search has settled on, and asks for the frame that
+    /// will be needed when the debounce runs out.
+    ///
+    /// Called once per frame; `now` is the egui clock. The debounce lives in
+    /// [`crate::ui::symbols::SymbolSearch`], so a fast typist costs one request
+    /// per pause rather than one per letter.
+    pub fn poll_symbol_search(&mut self, now: f64) {
+        if !self.symbols.open {
+            return;
+        }
+        if let Some(query) = self.symbols.due(now)
+            && let Some(lsp) = self.lsp.as_ref()
+        {
+            lsp.send(crate::lsp::Job::WorkspaceSymbols { query });
+        }
+    }
+
+    /// Starts the server for `path` and announces the open documents.
+    ///
+    /// Returns whether there is a server to ask; when there is not, the status
+    /// line already says why.
+    fn start_server_for(&mut self, path: &Path) -> bool {
+        self.ensure_lsp(path);
+        if self.lsp.is_none() {
+            self.status = self.lsp_status.clone();
+            return false;
+        }
+        // Whatever is already open has to be announced: the server was not there
+        // when those tabs were opened.
+        self.replay_documents();
+        true
+    }
+
     /// Sends a navigation request for the symbol under the caret.
     ///
     /// `references` picks the wider question; the rest of the way is the same,
@@ -606,14 +679,9 @@ impl AppState {
         let path = buffer.path.clone();
         let position = ide_lsp::byte_to_position(buffer.text(), buffer.caret_byte());
 
-        self.ensure_lsp(&path);
-        if self.lsp.is_none() {
-            self.status = self.lsp_status.clone();
+        if !self.start_server_for(&path) {
             return;
         }
-        // Whatever is already open has to be announced: the server was not
-        // there when those tabs were opened.
-        self.replay_documents();
         if let Some(lsp) = self.lsp.as_ref() {
             self.status = if references {
                 "looking for references...".to_owned()
@@ -680,12 +748,12 @@ impl AppState {
             let Ok(rel) = absolute.strip_prefix(&root) else {
                 continue;
             };
-            let hit = Hit {
-                path: rel.to_path_buf(),
-                line: location.range.start.line,
-                character: location.range.start.character,
-                text: self.line_at(rel, location.range.start.line),
-            };
+            let hit = Hit::reference(
+                rel.to_path_buf(),
+                location.range.start.line,
+                location.range.start.character,
+                self.line_at(rel, location.range.start.line),
+            );
             if hits.iter().any(|known| {
                 known.path == hit.path && known.line == hit.line && known.character == hit.character
             }) {
@@ -700,6 +768,88 @@ impl AppState {
                 .then(left.character.cmp(&right.character))
         });
         hits
+    }
+
+    /// Flattens the server's nested outline into rows, parents before children.
+    ///
+    /// The list is a flat `selectable_label` per row, so the tree is carried by
+    /// the indentation of `depth` rather than by collapsing headers: an outline
+    /// of thirty rows is easier to scan than a tree that has to be opened.
+    fn outline_of(
+        &self,
+        from: &Path,
+        symbols: &[lsp_types::DocumentSymbol],
+    ) -> Vec<crate::ui::results::Hit> {
+        use crate::ui::results::{Hit, SymbolKind};
+
+        fn walk(
+            symbols: &[lsp_types::DocumentSymbol],
+            path: &Path,
+            depth: usize,
+            rows: &mut Vec<Hit>,
+        ) {
+            for symbol in symbols {
+                rows.push(Hit::symbol(
+                    path.to_path_buf(),
+                    symbol.selection_range.start.line,
+                    symbol.selection_range.start.character,
+                    symbol.name.clone(),
+                    depth,
+                    SymbolKind::from_lsp(symbol.kind),
+                ));
+                if let Some(children) = &symbol.children {
+                    walk(children, path, depth + 1, rows);
+                }
+            }
+        }
+
+        let mut rows = Vec::new();
+        walk(symbols, from, 0, &mut rows);
+        rows
+    }
+
+    /// Turns the server's flat list of project symbols into rows.
+    ///
+    /// A symbol outside the project keeps its absolute path so that the list can
+    /// still open it, the same way a definition outside the project is opened.
+    fn workspace_hits(
+        &self,
+        symbols: Vec<lsp_types::SymbolInformation>,
+    ) -> Vec<crate::ui::results::Hit> {
+        use crate::ui::results::{Hit, SymbolKind};
+
+        let root = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        let mut rows: Vec<Hit> = Vec::new();
+        for symbol in symbols {
+            let Some(absolute) = ide_lsp::uri_to_path(&symbol.location.uri) else {
+                continue;
+            };
+            let path = match &root {
+                Some(root) => match absolute.strip_prefix(root) {
+                    Ok(rel) => rel.to_path_buf(),
+                    Err(_) => absolute.clone(),
+                },
+                None => absolute.clone(),
+            };
+            rows.push(Hit::symbol(
+                path,
+                symbol.location.range.start.line,
+                symbol.location.range.start.character,
+                symbol.name,
+                0,
+                SymbolKind::from_lsp(symbol.kind),
+            ));
+        }
+        rows.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.character.cmp(&right.character))
+        });
+        rows
     }
 
     /// The text of one line: from the buffer when the file is open (it may hold
@@ -766,6 +916,28 @@ impl AppState {
             crate::lsp::Outcome::Failed(message) => self.status = message,
             crate::lsp::Outcome::NoDefinition { from } => {
                 self.status = format!("no definition for the symbol in {}", display_name(&from));
+            }
+            crate::lsp::Outcome::Symbols { from, symbols } => {
+                let hits = self.outline_of(&from, &symbols);
+                let count = hits.len();
+                if count == 0 {
+                    self.status = format!("no symbols in {}", display_name(&from));
+                    return;
+                }
+                self.results
+                    .show_symbols(format!("Symbols in {}: {count}", display_name(&from)), hits);
+                self.status = format!("{count} symbols in {}", display_name(&from));
+            }
+            crate::lsp::Outcome::WorkspaceSymbols { query, symbols } => {
+                let hits = self.workspace_hits(symbols);
+                let count = hits.len();
+                // The answer carries its question: a slow server may answer a
+                // query the user has already typed past, and that answer must
+                // not replace what is on screen.
+                self.symbols.apply(&query, hits);
+                if self.symbols.open {
+                    self.status = format!("{count} symbols match «{query}»");
+                }
             }
             crate::lsp::Outcome::References { from, locations } => {
                 let hits = self.hits_from(locations);
@@ -1016,16 +1188,17 @@ impl AppState {
         for action in std::mem::take(&mut self.pending) {
             match action {
                 Action::OpenFile(rel) => self.open_file(&rel),
-                Action::OpenFileAt(rel, line) => {
+                Action::OpenFileAt(rel, line, character) => {
                     self.open_file(&rel);
+                    // The server counts characters in UTF-16 units, so the column
+                    // is turned into a byte offset the same way a request is.
                     let byte = self
                         .active_buffer()
                         .map(|buffer| {
-                            buffer
-                                .line_starts()
-                                .get(line as usize)
-                                .copied()
-                                .unwrap_or(0)
+                            ide_lsp::position_to_byte(
+                                buffer.text(),
+                                lsp_types::Position { line, character },
+                            )
                         })
                         .unwrap_or(0);
                     self.place_caret(&rel, byte);

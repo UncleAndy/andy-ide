@@ -17,8 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use lsp_types::{
     DocumentSymbol, GotoDefinitionResponse, Hover, InitializeResult, Location, Position,
-    PublishDiagnosticsParams, ReferenceParams, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri,
+    PublishDiagnosticsParams, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Uri,
 };
 use serde_json::{Value, json};
 
@@ -371,6 +371,17 @@ impl LspSession {
         let result = self
             .process
             .request("textDocument/documentSymbol", Some(params))?;
+        Ok(serde_json::from_value(result).unwrap_or_default())
+    }
+
+    /// The symbols of the whole workspace whose name matches `query`.
+    ///
+    /// An empty query means "everything", which is what `Ctrl+Shift+F12` asks
+    /// for. Servers that do not implement `workspace/symbol` return an error;
+    /// the caller shows it in the status bar rather than failing silently.
+    pub fn workspace_symbols(&mut self, query: &str) -> Result<Vec<SymbolInformation>> {
+        let params = json!({ "query": query });
+        let result = self.process.request("workspace/symbol", Some(params))?;
         Ok(serde_json::from_value(result).unwrap_or_default())
     }
 

@@ -53,6 +53,6 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         });
 
     if let Some((path, line)) = go_to {
-        state.pending.push(Action::OpenFileAt(path, line));
+        state.pending.push(Action::OpenFileAt(path, line, 0));
     }
 }
