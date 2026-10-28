@@ -11,6 +11,19 @@ use ide_core::{
 
 use crate::editor::EditorBuffer;
 
+/// Font size that maps to zoom factor 1.0: the configured size scales the whole
+/// interface, so there is one number to remember instead of two.
+pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+/// Limits of the interface zoom, the same egui puts on its own keyboard zoom.
+pub const MIN_ZOOM: f32 = 0.2;
+pub const MAX_ZOOM: f32 = 5.0;
+
+/// How quiet the zoom keys have to be before the size is written to the config.
+/// Holding `Ctrl`+`+` changes the factor every frame, and writing the file that
+/// often would be a write storm for a value nobody reads mid-frame.
+pub const ZOOM_SAVE_DELAY: f64 = 0.4;
+
 /// Something the interface asked for, applied after the frame is drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -98,6 +111,9 @@ pub struct AppState {
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
     pub lsp_status: String,
+    /// When the zoom last changed, in input time, and the size last written.
+    zoom_changed_at: f64,
+    saved_font_size: f32,
     /// When documents were last sent to the server, in input time.
     pub last_sync: f64,
     /// Diagnostics per file, as the problems panel shows them.
@@ -129,6 +145,7 @@ impl AppState {
     ) -> Self {
         let config = Config::load_or_default(&config_dir.join("config.toml"));
         let recent = Recent::load(&config_dir.join("recent.json"));
+        let saved_font_size = config.font_size;
 
         let mut state = Self {
             tree: TreeState {
@@ -153,6 +170,8 @@ impl AppState {
             symbols: crate::ui::symbols::SymbolSearch::new(),
             lsp: None,
             lsp_status: String::new(),
+            zoom_changed_at: 0.0,
+            saved_font_size,
             last_sync: 0.0,
             diagnostics: std::collections::BTreeMap::new(),
             preview: crate::ui::preview::Preview::new(),
@@ -356,6 +375,48 @@ impl AppState {
     pub fn pause_watching(&mut self) {
         self.watcher = None;
         self.fs_events = None;
+    }
+
+    /// Remembers the zoom of the whole interface, which egui changes itself on
+    /// `Ctrl`+`+`, `Ctrl`+`-` and `Ctrl`+`0`.
+    ///
+    /// The value lives in `config.toml` as a font size, so there is one number
+    /// for "how big everything is" instead of a zoom that multiplies a size.
+    /// Holding a zoom key changes the factor every few frames; writing the file
+    /// each time would be a write storm, so the write waits until the keys have
+    /// been quiet for [`ZOOM_SAVE_DELAY`] and the returned duration says when the
+    /// window should come back to do it. `None` means there is nothing left to
+    /// write.
+    pub fn remember_zoom(&mut self, zoom: f32, now: f64) -> Option<std::time::Duration> {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        // Two decimals is more than the tenths egui steps in, and keeps the
+        // comparison from chasing the noise of `f32` multiplication.
+        let size = (zoom * DEFAULT_FONT_SIZE * 100.0).round() / 100.0;
+        if (size - self.config.font_size).abs() > 0.01 {
+            self.config.font_size = size;
+            self.zoom_changed_at = now;
+        }
+        if self.config.font_size == self.saved_font_size {
+            return None;
+        }
+        let left = ZOOM_SAVE_DELAY - (now - self.zoom_changed_at);
+        if left > 0.0 {
+            return Some(std::time::Duration::from_secs_f64(left));
+        }
+        self.save_config();
+        self.saved_font_size = self.config.font_size;
+        None
+    }
+
+    /// Writes a zoom that is still waiting for its delay.
+    ///
+    /// Closing the window inside those four tenths of a second would otherwise
+    /// take the last zoom with it: the frame that writes it never comes.
+    pub fn flush_zoom(&mut self) {
+        if self.config.font_size != self.saved_font_size {
+            self.save_config();
+            self.saved_font_size = self.config.font_size;
+        }
     }
 
     /// Writes the configuration back, so a theme change survives a restart.
@@ -1531,5 +1592,101 @@ mod launch_tests {
         let config = tempfile::tempdir().unwrap();
         let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
         assert!(state.project.is_none(), "a project appeared from nowhere");
+    }
+}
+
+/// The zoom of the interface, remembered between launches.
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    fn config_text(config: &Path) -> String {
+        std::fs::read_to_string(config.join("config.toml")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_zoom_change_is_written_after_the_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+        assert_eq!(state.config.font_size, DEFAULT_FONT_SIZE);
+
+        let wait = state.remember_zoom(1.3, 10.0);
+        assert!(wait.is_some(), "the write was not scheduled");
+        assert_eq!(state.config.font_size, 18.2);
+        assert!(
+            !config_text(dir.path()).contains("font_size"),
+            "the file was written before the delay ran out"
+        );
+
+        // The frame that comes after the delay does the write.
+        let later = 10.0 + ZOOM_SAVE_DELAY + 0.01;
+        assert!(state.remember_zoom(1.3, later).is_none());
+        assert!(
+            config_text(dir.path()).contains("font_size = 18.2"),
+            "the zoom was not written: {}",
+            config_text(dir.path())
+        );
+    }
+
+    #[test]
+    fn a_second_change_moves_the_write_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+
+        state.remember_zoom(1.1, 0.0);
+        // A key pressed again before the delay ran out re-arms the wait: the
+        // file is written once the keys have been quiet, not on a fixed clock.
+        let second = ZOOM_SAVE_DELAY / 2.0;
+        let wait = state.remember_zoom(1.2, second);
+        assert_eq!(
+            wait,
+            Some(std::time::Duration::from_secs_f64(ZOOM_SAVE_DELAY)),
+            "the wait was not counted from the last change"
+        );
+        assert_eq!(state.config.font_size, 16.8);
+        assert!(
+            !config_text(dir.path()).contains("font_size"),
+            "the file was written before the keys went quiet"
+        );
+
+        assert!(
+            state
+                .remember_zoom(1.2, second + ZOOM_SAVE_DELAY + 0.001)
+                .is_none()
+        );
+        assert!(config_text(dir.path()).contains("font_size = 16.8"));
+    }
+
+    #[test]
+    fn the_same_zoom_asks_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+        // The zoom of the first frame is the configured one, not a change.
+        assert!(state.remember_zoom(1.0, 0.0).is_none());
+        assert!(state.remember_zoom(1.0, 5.0).is_none());
+        assert_eq!(state.config.font_size, DEFAULT_FONT_SIZE);
+        assert!(!config_text(dir.path()).contains("font_size"));
+    }
+
+    #[test]
+    fn a_saved_zoom_comes_back_on_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut state = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+            state.remember_zoom(1.5, 0.0);
+            assert!(state.remember_zoom(1.5, ZOOM_SAVE_DELAY + 0.01).is_none());
+        }
+        let again = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+        assert_eq!(again.config.font_size, 21.0);
+    }
+
+    #[test]
+    fn the_saved_zoom_stays_within_what_the_window_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::with_config_dir(dir.path().to_path_buf(), None, None);
+        state.remember_zoom(9.0, 0.0);
+        assert_eq!(state.config.font_size, MAX_ZOOM * DEFAULT_FONT_SIZE);
+        state.remember_zoom(0.01, 1.0);
+        assert_eq!(state.config.font_size, MIN_ZOOM * DEFAULT_FONT_SIZE);
     }
 }

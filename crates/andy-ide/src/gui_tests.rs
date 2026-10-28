@@ -19,42 +19,62 @@ use crate::state::Prompt;
 struct Gui {
     harness: Harness<'static, App>,
     _project: tempfile::TempDir,
-    _config: tempfile::TempDir,
+    _config: Option<tempfile::TempDir>,
+}
+
+/// Builds the real window on a project and a configuration directory.
+///
+/// A frame a quarter of a second long (the harness default) would put two clicks
+/// 250 ms apart, outside egui's double-click window, so the clock here ticks at
+/// 60 frames a second like a real window.
+fn window(
+    project: &Path,
+    config: &Path,
+    files: &[(&str, &str)],
+    open: Option<&str>,
+) -> Harness<'static, App> {
+    for (name, text) in files {
+        let path = project.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    let mut app = App::with_config_dir(config.to_path_buf(), Some(project.to_path_buf()), None);
+    if let Some(name) = open {
+        app.state.open_file(Path::new(name));
+    }
+
+    let mut harness = Harness::builder()
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    harness.set_size(egui::vec2(1200.0, 800.0));
+    harness.run();
+    harness
 }
 
 impl Gui {
     fn new(files: &[(&str, &str)], open: Option<&str>) -> Self {
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        for (name, text) in files {
-            let path = project.path().join(name);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(path, text).unwrap();
-        }
-
-        let mut app = App::with_config_dir(
-            config.path().to_path_buf(),
-            Some(project.path().to_path_buf()),
-            None,
-        );
-        if let Some(name) = open {
-            app.state.open_file(Path::new(name));
-        }
-
-        // A frame a quarter of a second long (the default) would put two clicks
-        // 250 ms apart, outside egui double-click window, so the clock here
-        // ticks at 60 frames a second like a real window.
-        let mut harness = Harness::builder()
-            .with_step_dt(1.0 / 60.0)
-            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
-        harness.set_size(egui::vec2(1200.0, 800.0));
-        harness.run();
+        let harness = window(project.path(), config.path(), files, open);
         Self {
             harness,
             _project: project,
-            _config: config,
+            _config: Some(config),
+        }
+    }
+
+    /// A window on a configuration directory that an earlier window wrote: what
+    /// the next launch of the editor sees.
+    fn reopened(config: &Path, files: &[(&str, &str)], open: Option<&str>) -> Self {
+        let project = tempfile::tempdir().unwrap();
+        let harness = window(project.path(), config, files, open);
+        Self {
+            harness,
+            _project: project,
+            _config: None,
         }
     }
 
@@ -1173,5 +1193,160 @@ mod the_symbol_search {
         gui.harness.key_press(egui::Key::Escape);
         gui.settle();
         assert!(!gui.app().state.symbols.open, "Escape left the field open");
+    }
+}
+
+/// The zoom of the interface, and whether it is still there after a restart.
+mod the_zoom {
+    use super::*;
+    use crate::state::{DEFAULT_FONT_SIZE, ZOOM_SAVE_DELAY};
+
+    fn config_text(config: &Path) -> String {
+        std::fs::read_to_string(config.join("config.toml")).unwrap_or_default()
+    }
+
+    /// Steps the window for a while, the way a real window ticks after a key.
+    fn run_for(gui: &mut Gui, seconds: f64) {
+        let frames = (seconds * 60.0).ceil() as usize;
+        for _ in 0..frames {
+            gui.harness.step();
+        }
+    }
+
+    #[test]
+    fn ctrl_plus_makes_everything_larger_and_clearly_so() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let before = gui.harness.output().pixels_per_point;
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+        run_for(&mut gui, 1.0 / 60.0);
+
+        let after = gui.harness.output().pixels_per_point;
+        assert!(
+            after > before,
+            "Ctrl+Plus did not enlarge anything: {before} -> {after}"
+        );
+        assert!(
+            (gui.app().state.config.font_size - DEFAULT_FONT_SIZE * 1.1).abs() < 0.01,
+            "the zoom was not read back from the window: {}",
+            gui.app().state.config.font_size
+        );
+    }
+
+    #[test]
+    fn the_zoom_is_written_once_the_keys_go_quiet() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[("a.rs", "fn a() {}\n")], Some("a.rs"));
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+        run_for(&mut gui, 1.0 / 60.0);
+        assert!(
+            !config_text(config.path()).contains("font_size"),
+            "the config was written before the keys went quiet"
+        );
+
+        run_for(&mut gui, ZOOM_SAVE_DELAY + 0.1);
+        assert!(
+            config_text(config.path()).contains("font_size = 15.4"),
+            "the zoom was not written: {}",
+            config_text(config.path())
+        );
+    }
+
+    #[test]
+    fn the_zoom_comes_back_on_the_next_launch() {
+        let config = tempfile::tempdir().unwrap();
+        let saved = {
+            let mut gui = Gui::reopened(config.path(), &[("a.rs", "fn a() {}\n")], Some("a.rs"));
+            gui.harness
+                .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+            gui.harness
+                .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+            run_for(&mut gui, ZOOM_SAVE_DELAY + 0.3);
+            gui.harness.output().pixels_per_point
+        };
+
+        let gui = Gui::reopened(config.path(), &[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let now = gui.harness.output().pixels_per_point;
+        assert!(
+            (now - saved).abs() < 0.001,
+            "the next launch opened at {now} instead of {saved}"
+        );
+        assert!(
+            (gui.app().state.config.font_size - DEFAULT_FONT_SIZE * 1.2).abs() < 0.01,
+            "the remembered size is {} instead of {}",
+            gui.app().state.config.font_size,
+            DEFAULT_FONT_SIZE * 1.2
+        );
+    }
+
+    #[test]
+    fn ctrl_0_puts_the_zoom_back_and_remembers_that() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let original = gui.harness.output().pixels_per_point;
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+        run_for(&mut gui, ZOOM_SAVE_DELAY + 0.1);
+        assert!(config_text(config.path()).contains("font_size = 16.8"));
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+        run_for(&mut gui, ZOOM_SAVE_DELAY + 0.1);
+
+        assert!(
+            (gui.harness.output().pixels_per_point - original).abs() < 0.001,
+            "Ctrl+0 did not put the zoom back"
+        );
+        assert!(
+            config_text(config.path()).contains("font_size = 14"),
+            "the reset was not written: {}",
+            config_text(config.path())
+        );
+    }
+}
+
+/// A zoom that is still waiting for its delay when the window closes would be
+/// lost: no frame comes to write it.
+mod a_zoom_written_on_the_way_out {
+    use super::*;
+
+    fn config_text(config: &Path) -> String {
+        std::fs::read_to_string(config.join("config.toml")).unwrap_or_default()
+    }
+
+    #[test]
+    fn closing_the_window_writes_a_zoom_that_was_still_waiting() {
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui::reopened(config.path(), &[], None);
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Plus);
+        gui.harness.step();
+        gui.harness.step();
+        assert!(
+            !config_text(config.path()).contains("font_size"),
+            "the delay was skipped, so this test proves nothing"
+        );
+
+        gui.harness.input_mut().viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        gui.harness.step();
+
+        assert!(
+            config_text(config.path()).contains("font_size = 15.4"),
+            "the zoom died with the window: {}",
+            config_text(config.path())
+        );
     }
 }

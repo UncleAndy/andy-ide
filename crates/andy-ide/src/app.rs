@@ -5,14 +5,11 @@ use std::path::PathBuf;
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style};
 
-use crate::state::{AppState, display_name};
+use crate::state::{AppState, DEFAULT_FONT_SIZE, MAX_ZOOM, MIN_ZOOM, display_name};
 use crate::ui::{Tab, Viewer};
 
-/// Font size that maps to zoom factor 1.0; the configured size scales the UI.
 /// How often the dock layout is turned into JSON while the app runs.
 const LAYOUT_SERIALIZE_SECS: f64 = 0.5;
-
-const DEFAULT_FONT_SIZE: f32 = 14.0;
 
 /// The window's contents.
 pub struct App {
@@ -86,7 +83,17 @@ impl App {
         if !self.zoom_applied {
             self.zoom_applied = true;
             let zoom = self.state.config.font_size / DEFAULT_FONT_SIZE;
-            ui.ctx().set_zoom_factor(zoom.clamp(0.6, 2.5));
+            ui.ctx().set_zoom_factor(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
+        }
+
+        // egui changes the zoom itself on `Ctrl`+`+`, `Ctrl`+`-` and `Ctrl`+`0`,
+        // so the window reads it back every frame instead of keeping a number of
+        // its own. A change is written to the config once the keys go quiet, and
+        // the frame that will do it is asked for here: an idle window would
+        // otherwise never come back and the zoom would be lost on exit.
+        let now = ui.input(|input| input.time);
+        if let Some(wait) = self.state.remember_zoom(ui.ctx().zoom_factor(), now) {
+            ui.ctx().request_repaint_after(wait);
         }
 
         egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state));
@@ -152,6 +159,7 @@ impl App {
         if self.state.quit_requested {
             // The user answered the question already: let the window go.
             self.state.quit_requested = false;
+            self.state.flush_zoom();
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         } else if closing && !self.state.quit_decided && self.state.has_unsaved() {
             // Never lose edits to a stray click on the window's cross. The
@@ -163,6 +171,10 @@ impl App {
                 self.state.prompt = Some(crate::state::Prompt::Quit);
             }
             closing = false;
+        }
+        // The last zoom of the session must not wait for the next launch.
+        if closing {
+            self.state.flush_zoom();
         }
         // Serializing the dock on every frame costs more than it is worth;
         // layouts change when the user drags a split, not sixty times a second.
