@@ -8,3 +8,9 @@ repository.workspace = true
 description = "Repository state, diffs and history for andy-ide"
 
 [dependencies]
+anyhow.workspace = true
+gix = { version = "0.90.0", default-features = false, features = ["status", "sha1"] }
+gix-status = "0.37"
+
+[dev-dependencies]
+tempfile = "3.27.0"
