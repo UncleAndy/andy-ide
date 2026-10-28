@@ -94,6 +94,12 @@ impl App {
             crate::ui::status::bar(ui, &self.state);
         });
 
+        // The theme reaches both the widgets and the text area.
+        ui.ctx().set_visuals(match self.state.config.theme {
+            ide_core::Theme::Dark => egui::Visuals::dark(),
+            ide_core::Theme::Light => egui::Visuals::light(),
+        });
+
         egui::CentralPanel::default().show(ui, |ui| {
             let mut viewer = Viewer {
                 state: &mut self.state,
@@ -106,6 +112,16 @@ impl App {
         self.state.apply_pending();
         self.handle_keys(ui);
         self.state.poll_fs_events();
+        // Quick-open and the prompts are modals: they sit above the dock.
+        let picked = {
+            let index = self.state.index.as_ref();
+            self.state.quick_open.show(ui.ctx(), index)
+        };
+        if let Some(path) = picked {
+            self.state
+                .pending
+                .push(crate::state::Action::OpenFile(path));
+        }
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
         self.state.apply_pending();
 
@@ -149,6 +165,7 @@ impl App {
         // Ctrl+Shift+V would paste: the window layer treats any Ctrl+V as a paste,
         // whatever else is held down.
         let preview = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::M);
+        let quick_open = KeyboardShortcut::new(Modifiers::CTRL, Key::P);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
@@ -156,6 +173,9 @@ impl App {
             .ctx()
             .input_mut(|input| input.consume_shortcut(&save_all));
         let preview_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&preview));
+        let quick_open_pressed = ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&quick_open));
         let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
         let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
 
@@ -164,6 +184,9 @@ impl App {
         }
         if preview_pressed {
             self.state.preview_open = !self.state.preview_open;
+        }
+        if quick_open_pressed {
+            self.state.quick_open.open();
         }
         if save_pressed {
             self.state.save_active();
@@ -200,6 +223,26 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState) {
                 .changed()
             {
                 state.status = "hidden files toggled".to_owned();
+            }
+            if ui
+                .checkbox(&mut state.preview_open, "markdown preview")
+                .changed()
+            {
+                state.status = "markdown preview toggled".to_owned();
+            }
+            if ui.button("quick open	Ctrl+P").clicked() {
+                state.quick_open.open();
+                ui.close();
+            }
+            ui.separator();
+            let mut dark = state.config.theme == ide_core::Theme::Dark;
+            if ui.checkbox(&mut dark, "dark theme").changed() {
+                state.config.theme = if dark {
+                    ide_core::Theme::Dark
+                } else {
+                    ide_core::Theme::Light
+                };
+                state.save_config();
             }
         });
 
@@ -1798,5 +1841,170 @@ mod frame_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_open_and_theme_tests {
+    use super::*;
+
+    fn app_with(files: &[(&str, &str)]) -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(project.path().join(name), text).unwrap();
+        }
+        let app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        (app, project, config)
+    }
+
+    fn frame(
+        ctx: &egui::Context,
+        app: &mut App,
+        time: &mut f64,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        *time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 700.0),
+            )),
+            time: Some(*time),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        output
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn ctrl_p_opens_the_field_and_enter_opens_the_file() {
+        let (mut app, _project, _config) = app_with(&[("alpha.rs", "a\n"), ("beta.rs", "b\n")]);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&ctx, &mut app, &mut time, Vec::new());
+        frame(&ctx, &mut app, &mut time, Vec::new());
+        assert!(app.state.tabs.is_empty());
+
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![key(egui::Key::P, egui::Modifiers::CTRL)],
+        );
+        assert!(app.state.quick_open.open, "the field is up");
+
+        // The query narrows the list down to beta.rs.
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![egui::Event::Text("beta".to_owned())],
+        );
+        assert_eq!(app.state.quick_open.query, "beta");
+
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        frame(&ctx, &mut app, &mut time, Vec::new());
+
+        assert!(!app.state.quick_open.open, "the field closes after a pick");
+        let open: Vec<_> = app
+            .state
+            .tabs
+            .items()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(open, vec![std::path::PathBuf::from("beta.rs")]);
+    }
+
+    #[test]
+    fn escape_closes_the_field_without_opening_anything() {
+        let (mut app, _project, _config) = app_with(&[("alpha.rs", "a\n")]);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&ctx, &mut app, &mut time, Vec::new());
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![key(egui::Key::P, egui::Modifiers::CTRL)],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        frame(&ctx, &mut app, &mut time, Vec::new());
+
+        assert!(!app.state.quick_open.open);
+        assert!(app.state.tabs.is_empty());
+    }
+
+    #[test]
+    fn the_light_theme_keeps_keywords_readable() {
+        use crate::editor::view::Palette;
+        use ide_core::Theme;
+        use ide_syntax::TokenKind;
+
+        let dark = Palette::for_theme(Theme::Dark);
+        let light = Palette::for_theme(Theme::Light);
+        let keyword_dark = dark.token(TokenKind::Keyword);
+        let keyword_light = light.token(TokenKind::Keyword);
+
+        assert_ne!(keyword_dark, keyword_light, "the schemes differ");
+        // On a light background the text has to be darker than the paper.
+        let brightness = u32::from(keyword_light.r())
+            + u32::from(keyword_light.g())
+            + u32::from(keyword_light.b());
+        assert!(
+            brightness < 400,
+            "light keyword {keyword_light:?} is washed out"
+        );
+        assert_eq!(light.foreground, light.token(TokenKind::Operator).clone());
+    }
+
+    #[test]
+    fn a_tab_whose_file_is_gone_is_not_restored() {
+        let (mut app, project, _config) = app_with(&[("here.rs", "a\n")]);
+        let workspace = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("workspace.json"),
+            r#"{"tabs":["here.rs","gone.rs"],"active":1,"layout":null}"#,
+        )
+        .unwrap();
+
+        app.state.open_project(project.path());
+
+        let open: Vec<_> = app
+            .state
+            .tabs
+            .items()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(open, vec![std::path::PathBuf::from("here.rs")]);
     }
 }

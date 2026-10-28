@@ -3,6 +3,7 @@
 pub mod editor;
 pub mod preview;
 pub mod prompt;
+pub mod quick_open;
 pub mod status;
 pub mod tabs;
 pub mod tree;

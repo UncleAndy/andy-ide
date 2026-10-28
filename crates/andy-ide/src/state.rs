@@ -82,6 +82,8 @@ pub struct AppState {
     pub quit_requested: bool,
     /// Whether the Markdown preview sits beside the source.
     pub preview_open: bool,
+    /// The quick-open field.
+    pub quick_open: crate::ui::quick_open::QuickOpen,
     /// Layout cache of the Markdown preview.
     pub preview: crate::ui::preview::Preview,
     pub commonmark: egui_commonmark::CommonMarkCache,
@@ -127,6 +129,7 @@ impl AppState {
             prompt: None,
             quit_requested: false,
             preview_open: false,
+            quick_open: crate::ui::quick_open::QuickOpen::new(),
             preview: crate::ui::preview::Preview::new(),
             commonmark: egui_commonmark::CommonMarkCache::default(),
             watcher: None,
@@ -315,6 +318,14 @@ impl AppState {
     pub fn pause_watching(&mut self) {
         self.watcher = None;
         self.fs_events = None;
+    }
+
+    /// Writes the configuration back, so a theme change survives a restart.
+    pub fn save_config(&mut self) {
+        let path = self.config_dir.join("config.toml");
+        if let Err(error) = self.config.save(&path) {
+            self.status = format!("cannot save config: {error}");
+        }
     }
 
     /// Whether any buffer holds unsaved edits.

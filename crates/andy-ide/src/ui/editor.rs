@@ -3,6 +3,7 @@
 use egui::Ui;
 
 use crate::editor::view;
+use crate::editor::view::Palette;
 use crate::state::AppState;
 use crate::ui::preview;
 use crate::ui::tabs;
@@ -33,10 +34,11 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         }
     });
 
+    let palette = Palette::for_theme(state.config.theme);
     let split = state.preview_open && markdown;
     if !split {
         let changed = match state.active_buffer_mut() {
-            Some(buffer) => view::ui(ui, buffer),
+            Some(buffer) => view::ui(ui, buffer, palette),
             None => false,
         };
         if changed {
@@ -63,7 +65,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 if let Some(buffer) = state.active_buffer_mut() {
-                    changed = view::ui(ui, buffer);
+                    changed = view::ui(ui, buffer, palette);
                 }
             },
         );

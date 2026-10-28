@@ -11,6 +11,7 @@ use egui::{
     Color32, CornerRadius, Event, FontId, Galley, Key, Pos2, Rect, Sense, TextFormat, TextStyle,
     Ui, Vec2,
 };
+use ide_core::Theme;
 use ide_syntax::{HighlightSpan, TokenKind};
 
 use super::EditorBuffer;
@@ -20,15 +21,82 @@ use super::edit::Motion;
 /// Caret width in points.
 const CARET_WIDTH: f32 = 1.5;
 
-const SELECTION_BG: Color32 = Color32::from_rgb(38, 79, 120);
-const CARET: Color32 = Color32::from_rgb(220, 220, 220);
-const GUTTER_BG: Color32 = Color32::from_rgb(30, 30, 30);
-const GUTTER_FG: Color32 = Color32::from_rgb(110, 110, 110);
-const GUTTER_FG_ACTIVE: Color32 = Color32::from_rgb(200, 200, 200);
-const DEFAULT_FG: Color32 = Color32::from_rgb(212, 212, 212);
+/// Colours of the text area for one theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub selection: Color32,
+    pub caret: Color32,
+    pub gutter_bg: Color32,
+    pub gutter_fg: Color32,
+    pub gutter_fg_active: Color32,
+    pub foreground: Color32,
+}
+
+impl Palette {
+    pub const DARK: Palette = Palette {
+        selection: Color32::from_rgb(38, 79, 120),
+        caret: Color32::from_rgb(220, 220, 220),
+        gutter_bg: Color32::from_rgb(30, 30, 30),
+        gutter_fg: Color32::from_rgb(110, 110, 110),
+        gutter_fg_active: Color32::from_rgb(200, 200, 200),
+        foreground: Color32::from_rgb(212, 212, 212),
+    };
+
+    pub const LIGHT: Palette = Palette {
+        selection: Color32::from_rgb(181, 213, 255),
+        caret: Color32::from_rgb(20, 20, 20),
+        gutter_bg: Color32::from_rgb(240, 240, 240),
+        gutter_fg: Color32::from_rgb(140, 140, 140),
+        gutter_fg_active: Color32::from_rgb(40, 40, 40),
+        foreground: Color32::from_rgb(30, 30, 30),
+    };
+
+    pub fn for_theme(theme: Theme) -> Palette {
+        match theme {
+            Theme::Dark => Palette::DARK,
+            Theme::Light => Palette::LIGHT,
+        }
+    }
+
+    /// Colour of one token; the light scheme has to stay readable on white.
+    pub fn token(self, kind: TokenKind) -> Color32 {
+        match (self.foreground, kind) {
+            _ if self == Palette::LIGHT => match kind {
+                TokenKind::Keyword => Color32::from_rgb(160, 32, 160),
+                TokenKind::Type => Color32::from_rgb(0, 110, 110),
+                TokenKind::Function | TokenKind::Method => Color32::from_rgb(110, 80, 0),
+                TokenKind::Variable => Color32::from_rgb(20, 60, 140),
+                TokenKind::Constant => Color32::from_rgb(0, 90, 160),
+                TokenKind::String => Color32::from_rgb(170, 60, 20),
+                TokenKind::Escape => Color32::from_rgb(140, 90, 0),
+                TokenKind::Number => Color32::from_rgb(60, 120, 20),
+                TokenKind::Comment | TokenKind::DocComment => Color32::from_rgb(90, 130, 80),
+                TokenKind::Attribute => Color32::from_rgb(20, 60, 140),
+                TokenKind::Operator => Color32::from_rgb(30, 30, 30),
+                TokenKind::Punctuation => Color32::from_rgb(90, 90, 90),
+                TokenKind::Error => Color32::from_rgb(200, 30, 30),
+            },
+            _ => match kind {
+                TokenKind::Keyword => Color32::from_rgb(197, 134, 192),
+                TokenKind::Type => Color32::from_rgb(78, 201, 176),
+                TokenKind::Function | TokenKind::Method => Color32::from_rgb(220, 220, 170),
+                TokenKind::Variable => Color32::from_rgb(156, 220, 254),
+                TokenKind::Constant => Color32::from_rgb(79, 193, 255),
+                TokenKind::String => Color32::from_rgb(206, 145, 120),
+                TokenKind::Escape => Color32::from_rgb(215, 186, 125),
+                TokenKind::Number => Color32::from_rgb(181, 206, 168),
+                TokenKind::Comment | TokenKind::DocComment => Color32::from_rgb(106, 153, 85),
+                TokenKind::Attribute => Color32::from_rgb(156, 220, 254),
+                TokenKind::Operator => Color32::from_rgb(212, 212, 212),
+                TokenKind::Punctuation => Color32::from_rgb(128, 128, 128),
+                TokenKind::Error => Color32::from_rgb(244, 71, 71),
+            },
+        }
+    }
+}
 
 /// Draws the buffer and handles its input. Returns true when the text changed.
-pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
+pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
     let font = TextStyle::Monospace.resolve(ui.style());
     let (char_w, row_h) = ui
         .ctx()
@@ -96,7 +164,8 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 .as_ref()
                 .map(|highlighter| highlighter.spans_for_lines(first_line, last_line))
                 .unwrap_or_default();
-            let layouts = LineLayouts::build(ui, buffer, &spans, &font, first_line, last_line);
+            let layouts =
+                LineLayouts::build(ui, buffer, &spans, &font, palette, first_line, last_line);
 
             // Input comes before painting: the caret this frame is the one the
             // key press asked for, so it is drawn where it belongs and the view
@@ -148,6 +217,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             paint_gutter(
                 ui,
                 &painter,
+                palette,
                 buffer,
                 rect,
                 origin,
@@ -159,6 +229,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             paint_selection(
                 PaintCtx {
                     painter: &painter,
+                    palette,
                     origin: text_origin,
                     char_w,
                     row_h,
@@ -168,14 +239,15 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 first_line,
                 last_line,
             );
-            paint_galleys(&painter, &layouts, text_origin, row_h);
+            paint_galleys(&painter, palette, &layouts, text_origin, row_h);
             let (caret_line, _) = buffer.line_col();
             let caret_galley = layouts
                 .galley(caret_line)
                 .cloned()
-                .or_else(|| line_galley(ui, buffer, &spans, &font, caret_line));
+                .or_else(|| line_galley(ui, buffer, &spans, &font, palette, caret_line));
             let caret_pos = paint_caret(
                 &painter,
+                palette,
                 buffer,
                 caret_galley.as_ref(),
                 text_origin,
@@ -235,6 +307,7 @@ fn caret_follow(previous: Option<usize>, caret: usize, viewport: Rect, row: Rect
 fn paint_gutter(
     _ui: &Ui,
     painter: &egui::Painter,
+    palette: Palette,
     buffer: &EditorBuffer,
     rect: Rect,
     origin: Pos2,
@@ -244,16 +317,16 @@ fn paint_gutter(
     last_line: usize,
 ) {
     let gutter = Rect::from_min_max(origin, Pos2::new(origin.x + gutter_width, rect.max.y));
-    painter.rect_filled(gutter, CornerRadius::ZERO, GUTTER_BG);
+    painter.rect_filled(gutter, CornerRadius::ZERO, palette.gutter_bg);
 
     let (caret_line, _) = buffer.line_col();
     let font = FontId::monospace(row_h * 0.72);
     for line in first_line..last_line {
         let y = origin.y + (line as f32) * row_h;
         let color = if line == caret_line {
-            GUTTER_FG_ACTIVE
+            palette.gutter_fg_active
         } else {
-            GUTTER_FG
+            palette.gutter_fg
         };
         painter.text(
             Pos2::new(origin.x + gutter_width - 4.0, y),
@@ -283,11 +356,12 @@ impl LineLayouts {
         buffer: &EditorBuffer,
         spans: &[HighlightSpan],
         font: &FontId,
+        palette: Palette,
         first_line: usize,
         last_line: usize,
     ) -> Self {
         let galleys = (first_line..last_line)
-            .map(|line| line_galley(ui, buffer, spans, font, line))
+            .map(|line| line_galley(ui, buffer, spans, font, palette, line))
             .collect();
         Self {
             first_line,
@@ -304,6 +378,7 @@ impl LineLayouts {
 /// Everything the selection and the caret need to draw on the same grid.
 struct PaintCtx<'a> {
     painter: &'a egui::Painter,
+    palette: Palette,
     origin: Pos2,
     char_w: f32,
     row_h: f32,
@@ -318,6 +393,7 @@ fn paint_selection(
 ) {
     let PaintCtx {
         painter,
+        palette,
         origin,
         char_w,
         row_h,
@@ -363,7 +439,7 @@ fn paint_selection(
                 Pos2::new(origin.x + x1.max(x0 + 2.0), y + row_h),
             ),
             CornerRadius::ZERO,
-            SELECTION_BG,
+            palette.selection,
         );
     }
 }
@@ -374,9 +450,10 @@ fn line_galley(
     buffer: &EditorBuffer,
     spans: &[HighlightSpan],
     font: &FontId,
+    palette: Palette,
     line: usize,
 ) -> Option<Arc<Galley>> {
-    let job = line_job(buffer, spans, font, line);
+    let job = line_job(buffer, spans, font, palette, line);
     if job.text.is_empty() {
         return None;
     }
@@ -393,6 +470,7 @@ fn line_job(
     buffer: &EditorBuffer,
     spans: &[HighlightSpan],
     font: &FontId,
+    palette: Palette,
     line: usize,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
@@ -411,13 +489,13 @@ fn line_job(
             continue;
         }
         let plain = text_slice(buffer.text(), cursor, start);
-        push_section(&mut job, plain, DEFAULT_FG, font);
+        push_section(&mut job, plain, palette.foreground, font);
         let coloured = text_slice(buffer.text(), start, end);
-        push_section(&mut job, coloured, token_color(span.kind), font);
+        push_section(&mut job, coloured, palette.token(span.kind), font);
         cursor = end;
     }
     let rest = text_slice(buffer.text(), cursor, line_end);
-    push_section(&mut job, rest, DEFAULT_FG, font);
+    push_section(&mut job, rest, palette.foreground, font);
     job
 }
 
@@ -441,17 +519,24 @@ fn floor_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-fn paint_galleys(painter: &egui::Painter, layouts: &LineLayouts, origin: Pos2, row_h: f32) {
+fn paint_galleys(
+    painter: &egui::Painter,
+    palette: Palette,
+    layouts: &LineLayouts,
+    origin: Pos2,
+    row_h: f32,
+) {
     for (index, galley) in layouts.galleys.iter().enumerate() {
         let Some(galley) = galley else { continue };
         let line = layouts.first_line + index;
         let y = origin.y + (line as f32) * row_h;
-        painter.galley(Pos2::new(origin.x, y), galley.clone(), DEFAULT_FG);
+        painter.galley(Pos2::new(origin.x, y), galley.clone(), palette.foreground);
     }
 }
 
 fn paint_caret(
     painter: &egui::Painter,
+    palette: Palette,
     buffer: &EditorBuffer,
     galley: Option<&Arc<Galley>>,
     origin: Pos2,
@@ -474,7 +559,7 @@ fn paint_caret(
     painter.rect_filled(
         Rect::from_min_size(position, Vec2::new(CARET_WIDTH, row_h)),
         CornerRadius::ZERO,
-        CARET,
+        palette.caret,
     );
     position
 }
@@ -578,24 +663,6 @@ fn push_section(job: &mut LayoutJob, text: &str, color: Color32, font: &FontId) 
             ..Default::default()
         },
     });
-}
-
-fn token_color(kind: TokenKind) -> Color32 {
-    match kind {
-        TokenKind::Keyword => Color32::from_rgb(197, 134, 192),
-        TokenKind::Type => Color32::from_rgb(78, 201, 176),
-        TokenKind::Function | TokenKind::Method => Color32::from_rgb(220, 220, 170),
-        TokenKind::Variable => Color32::from_rgb(156, 220, 254),
-        TokenKind::Constant => Color32::from_rgb(79, 193, 255),
-        TokenKind::String => Color32::from_rgb(206, 145, 120),
-        TokenKind::Escape => Color32::from_rgb(215, 186, 125),
-        TokenKind::Number => Color32::from_rgb(181, 206, 168),
-        TokenKind::Comment | TokenKind::DocComment => Color32::from_rgb(106, 153, 85),
-        TokenKind::Attribute => Color32::from_rgb(156, 220, 254),
-        TokenKind::Operator => Color32::from_rgb(212, 212, 212),
-        TokenKind::Punctuation => Color32::from_rgb(128, 128, 128),
-        TokenKind::Error => Color32::from_rgb(244, 71, 71),
-    }
 }
 
 /// Applies keyboard and clipboard events.
@@ -862,7 +929,7 @@ mod geometry_tests {
 
 #[cfg(test)]
 mod line_job_tests {
-    use super::line_job;
+    use super::{Palette, line_job};
     use crate::editor::EditorBuffer;
     use egui::FontId;
     use std::path::PathBuf;
@@ -881,7 +948,7 @@ mod line_job_tests {
         let font = FontId::monospace(14.0);
 
         for line in 0..buffer.line_count() {
-            let job = line_job(&buffer, &spans, &font, line);
+            let job = line_job(&buffer, &spans, &font, Palette::DARK, line);
             let expected: String = buffer.line_text(line).replace('\t', "    ");
             assert_eq!(
                 job.text, expected,
@@ -926,7 +993,7 @@ mod char_boundary_tests {
         // And the layout must survive too, which is where the panic happened.
         let font = FontId::monospace(14.0);
         for line in 0..buffer.line_count() {
-            let _ = line_job(buffer, &spans, &font, line);
+            let _ = line_job(buffer, &spans, &font, Palette::DARK, line);
         }
     }
 
@@ -966,7 +1033,7 @@ mod char_boundary_tests {
         }];
 
         let font = FontId::monospace(14.0);
-        let job = line_job(&buffer, &spans, &font, 0);
+        let job = line_job(&buffer, &spans, &font, Palette::DARK, 0);
         assert_eq!(
             job.text,
             buffer.line_text(0),
