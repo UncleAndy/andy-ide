@@ -15,23 +15,36 @@ enum Asked {
     UnstageSelected,
     StageAll,
     Commit,
+    History,
 }
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.git.refresh(false);
 
-    ui.horizontal(|ui| match state.git.branch() {
-        Some(branch) => {
-            ui.strong(branch);
-            let total = state.git.changes.len();
-            ui.separator();
-            ui.weak(format!(
-                "{total} {}",
-                if total == 1 { "change" } else { "changes" }
-            ));
+    let mut asked = None;
+    ui.horizontal(|ui| {
+        match state.git.branch() {
+            Some(branch) => {
+                ui.strong(branch);
+                let total = state.git.changes.len();
+                ui.separator();
+                ui.weak(format!(
+                    "{total} {}",
+                    if total == 1 { "change" } else { "changes" }
+                ));
+            }
+            None => {
+                ui.strong("Git");
+            }
         }
-        None => {
-            ui.strong("Git");
+        // History is reachable whether or not the work tree is clean: a clean
+        // repository is exactly when a person goes looking at what came before.
+        if ui
+            .button("Show history")
+            .on_hover_text("List the commits behind HEAD")
+            .clicked()
+        {
+            asked = Some(Asked::History);
         }
     });
     ui.separator();
@@ -42,7 +55,6 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         return;
     }
 
-    let mut asked = None;
     if !state.git.changes.is_empty() {
         ui.horizontal(|ui| {
             if ui
@@ -99,6 +111,9 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     if state.git.changes.is_empty() {
         ui.add_space(6.0);
         ui.weak("Nothing has changed since the last commit.");
+        // The buttons above are live even then: History is exactly what a person
+        // looks at when the work tree is clean, and a commit is what makes it so.
+        apply(state, asked);
         return;
     }
 
@@ -173,11 +188,17 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         state.pending.push(Action::OpenFile(path));
     }
 
+    apply(state, asked);
+}
+
+/// Carries out what the buttons were asked to do, once the list has been drawn.
+fn apply(state: &mut AppState, asked: Option<Asked>) {
     match asked {
         Some(Asked::StageSelected) => state.git.stage_selected(),
         Some(Asked::UnstageSelected) => state.git.unstage_selected(),
         Some(Asked::StageAll) => state.git.stage_all(),
         Some(Asked::Commit) => state.git.commit(),
+        Some(Asked::History) => state.git.show_history = true,
         None => {}
     }
 }

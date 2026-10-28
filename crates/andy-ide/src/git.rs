@@ -1,4 +1,4 @@
-//! What the Git panel shows, kept apart from how it is drawn.
+//! What the Git panels show, kept apart from how they are drawn.
 //!
 //! The repository is opened once per project and its state is re-read on a timer:
 //! a status walk is not free, and a panel that runs it on every frame would eat the
@@ -7,10 +7,25 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ide_git::{Area, Change, FileDiff, Repo};
+use ide_git::{Area, Change, Commit, Repo};
 
-/// How often the panel re-reads the repository while it is on screen.
+/// How often the panels re-read the repository while they are on screen.
 pub const REFRESH: Duration = Duration::from_millis(1200);
+
+/// How much history the panel keeps: enough to find yesterday's commit, not the
+/// whole of a decade-old repository.
+pub const HISTORY: usize = 200;
+
+/// One diff, ready to be drawn — a working change or a commit.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DiffView {
+    /// What the diff is of.
+    pub title: String,
+    /// What it is compared against.
+    pub note: String,
+    /// The unified diff.
+    pub text: String,
+}
 
 /// The repository behind the current project, and what it last said.
 #[derive(Default)]
@@ -21,12 +36,18 @@ pub struct GitState {
     pub changes: Vec<Change>,
     /// The change the panel has selected, by index into `changes`.
     pub selected: Option<usize>,
-    /// The diff of the selected change, once asked for.
-    pub diff: Option<FileDiff>,
+    /// The last read of the history, newest first.
+    pub commits: Vec<Commit>,
+    /// The commit the history panel has selected, by index into `commits`.
+    pub commit_selected: Option<usize>,
+    /// The diff on screen, once asked for.
+    pub diff: Option<DiffView>,
     /// Why the diff could not be made, if it could not.
     pub diff_error: Option<String>,
     /// Set when a fresh diff should be brought to the front.
     pub show_diff: bool,
+    /// Set when the history panel should be brought to the front.
+    pub show_history: bool,
     /// What went wrong on the last read, if anything.
     pub error: Option<String>,
     /// The message being written for the next commit.
@@ -51,6 +72,7 @@ impl GitState {
         self.repo = root.and_then(Repo::discover);
         self.last_read = None;
         self.changes.clear();
+        self.commits.clear();
         self.error = None;
         if self.repo.is_none() {
             self.error = Some("This project is not a repository.".to_owned());
@@ -86,6 +108,18 @@ impl GitState {
             }
             Err(error) => self.error = Some(format!("{error}")),
         }
+        match repo.log(HISTORY) {
+            Ok(commits) => {
+                self.commits = commits;
+                if self
+                    .commit_selected
+                    .is_some_and(|index| index >= self.commits.len())
+                {
+                    self.commit_selected = None;
+                }
+            }
+            Err(error) => self.error = Some(format!("{error}")),
+        }
     }
 
     /// The staged half of the list.
@@ -116,8 +150,44 @@ impl GitState {
         };
         let side = change.side();
         match repo.diff(&change.path, side) {
-            Ok(diff) => {
-                self.diff = Some(diff);
+            Ok(file) => {
+                self.diff = Some(DiffView {
+                    title: file.path.display().to_string(),
+                    note: match file.side {
+                        ide_git::Side::Staged => "against HEAD".to_owned(),
+                        ide_git::Side::Worktree => "against the index".to_owned(),
+                    },
+                    text: file.unified,
+                });
+                self.diff_error = None;
+                self.show_diff = true;
+            }
+            Err(error) => {
+                self.diff = None;
+                self.diff_error = Some(format!("{error}"));
+            }
+        }
+    }
+
+    /// Reads the diff of the selected commit into `diff`.
+    pub fn open_selected_commit(&mut self) {
+        let Some(commit) = self
+            .commit_selected
+            .and_then(|index| self.commits.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(repo) = &self.repo else {
+            return;
+        };
+        match repo.commit_diff(&commit.id) {
+            Ok(text) => {
+                self.diff = Some(DiffView {
+                    title: format!("{} {}", commit.short, commit.summary),
+                    note: commit.author,
+                    text,
+                });
                 self.diff_error = None;
                 self.show_diff = true;
             }

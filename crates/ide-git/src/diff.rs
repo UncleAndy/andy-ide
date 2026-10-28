@@ -124,7 +124,7 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 /// A unified diff of two texts, with the names `git` itself would use.
-fn unified(old: &[u8], new: &[u8], path: &Path) -> String {
+pub(crate) fn unified(old: &[u8], new: &[u8], path: &Path) -> String {
     let old = String::from_utf8_lossy(old);
     let new = String::from_utf8_lossy(new);
     let name = path.display();

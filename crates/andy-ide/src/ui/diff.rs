@@ -1,4 +1,8 @@
-//! The diff panel: one file's change, line by line, with the markers still on.
+//! The diff panel: one change, line by line, with the markers still on.
+//!
+//! The same panel answers for a working change and for a commit: a diff is a diff,
+//! and two panels that differ only in where the text came from would be two places to
+//! look for the same thing.
 
 use egui::{Color32, RichText, Ui};
 
@@ -23,19 +27,18 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     };
 
     ui.horizontal(|ui| {
-        ui.strong(diff.path.display().to_string());
-        ui.separator();
-        ui.weak(match diff.side {
-            ide_git::Side::Staged => "against HEAD",
-            ide_git::Side::Worktree => "against the index",
-        });
+        ui.strong(diff.title.clone());
+        if !diff.note.is_empty() {
+            ui.separator();
+            ui.weak(diff.note.clone());
+        }
     });
     ui.separator();
 
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for line in diff.lines() {
+            for line in diff.text.lines() {
                 let (colour, text) = colour_of(line);
                 ui.label(
                     RichText::new(text)

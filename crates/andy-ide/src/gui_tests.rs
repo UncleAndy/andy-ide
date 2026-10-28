@@ -3109,9 +3109,9 @@ mod the_git_panel {
             .clone()
             .expect("Enter did not read a diff");
         assert!(
-            diff.unified.contains("-two") && diff.unified.contains("+TWO"),
+            diff.text.contains("-two") && diff.text.contains("+TWO"),
             "the diff is wrong: {}",
-            diff.unified
+            diff.text
         );
         assert!(
             gui.harness.query_by_label("+TWO").is_some(),
@@ -3238,6 +3238,78 @@ mod the_git_panel {
             .collect();
         assert_eq!(staged, vec!["a.txt"], "the wrong file was staged");
         assert_eq!(worktree, vec!["b.txt"], "the other file was staged too");
+    }
+
+    #[test]
+    fn the_history_lists_the_commits_and_shows_what_one_changed() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(gui._project.path(), "second");
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("Show history").click();
+        gui.settle();
+        gui.settle();
+
+        let summaries: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .commits
+            .iter()
+            .map(|commit| commit.summary.clone())
+            .collect();
+        assert_eq!(
+            summaries,
+            vec!["second".to_owned(), "first".to_owned()],
+            "the history is not newest first"
+        );
+        assert!(
+            gui.harness
+                .query_all_by_label_contains("second")
+                .next()
+                .is_some(),
+            "the commits are not on screen"
+        );
+
+        // The newest commit is the first row.
+        let row = gui
+            .app()
+            .state
+            .git
+            .commits
+            .iter()
+            .position(|commit| commit.summary == "second")
+            .expect("the commit");
+        let label = format!(
+            "{}  {}  ({})",
+            gui.app().state.git.commits[row].short,
+            "second",
+            "Test"
+        );
+        gui.harness.get_by_label(&label).click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+
+        let diff = gui
+            .app()
+            .state
+            .git
+            .diff
+            .clone()
+            .expect("Enter did not read the commit's diff");
+        assert!(
+            diff.text.contains("+two") && !diff.text.contains("-one"),
+            "the commit diff is wrong: {}",
+            diff.text
+        );
+        assert!(
+            gui.harness.query_by_label("+two").is_some(),
+            "the diff panel is not on screen"
+        );
     }
 
     #[test]

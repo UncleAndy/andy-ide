@@ -9,7 +9,7 @@ description = "Repository state, diffs and history for andy-ide"
 
 [dependencies]
 anyhow.workspace = true
-gix = { version = "0.90.0", default-features = false, features = ["status", "sha1"] }
+gix = { version = "0.90.0", default-features = false, features = ["status", "sha1", "revision", "blob-diff"] }
 gix-status = "0.37"
 similar = "3.2.1"
 

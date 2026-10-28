@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 use gix::status::index_worktree::Item as WorktreeItem;
 
 pub mod diff;
+pub mod log;
 pub mod ops;
 pub use diff::{FileDiff, Side};
 use gix_status::index_as_worktree::{Change as WorktreeChange, EntryStatus};
+pub use log::Commit;
 
 /// Version of the crate, taken from its manifest.
 pub fn version() -> &'static str {

@@ -73,7 +73,8 @@ diff cannot disturb the work in progress. `Stage`, `Unstage` and `Stage all` mov
 changes into the index and `Commit` writes them with the message in the field. Reading
 is native; writing is the real `git`, so hooks, signing and commit templates behave
 exactly as they do on the command line, and a hook's refusal is shown in its own
-words.
+words. `Show history` lists the last two hundred commits newest first; `Enter` on one
+of them shows what it changed, in the same `Diff` tab.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).

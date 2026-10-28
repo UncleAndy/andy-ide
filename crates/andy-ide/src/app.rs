@@ -84,7 +84,8 @@ fn default_layout() -> DockState<Tab> {
 /// version that split the strip.
 fn with_terminal(dock: DockState<Tab>) -> DockState<Tab> {
     let dock = place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Git);
-    place_beside_problems(dock, Tab::Diff)
+    let dock = place_beside_problems(dock, Tab::Diff);
+    place_beside_problems(dock, Tab::History)
 }
 
 /// Puts `tab` in the bottom leaf, beside the problems, where it belongs.
@@ -207,6 +208,9 @@ impl App {
         self.state.git.follow(root);
         if std::mem::take(&mut self.state.git.show_diff) {
             bring_to_front(&mut self.dock, Tab::Diff);
+        }
+        if std::mem::take(&mut self.state.git.show_history) {
+            bring_to_front(&mut self.dock, Tab::History);
         }
         self.handle_keys(ui);
         self.state.poll_fs_events();
@@ -403,7 +407,7 @@ impl App {
 ///
 /// The keyboard follows to that pane: a panel brought forward is the one that is
 /// about to be used.
-fn bring_to_front(dock: &mut DockState<Tab>, tab: Tab) {
+pub(crate) fn bring_to_front(dock: &mut DockState<Tab>, tab: Tab) {
     if let Some(path) = dock.find_tab(&tab) {
         dock.set_focused_node_and_surface(path.node_path());
         let _ = dock.set_active_tab(path);
@@ -512,13 +516,14 @@ mod tests {
     fn default_layout_holds_every_panel() {
         let dock = default_layout();
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(tabs.len(), 6, "every panel is part of the layout: {tabs:?}");
+        assert_eq!(tabs.len(), 7, "every panel is part of the layout: {tabs:?}");
         assert!(tabs.contains(&Tab::Projects));
         assert!(tabs.contains(&Tab::Editor));
         assert!(tabs.contains(&Tab::Problems));
         assert!(tabs.contains(&Tab::Terminal));
         assert!(tabs.contains(&Tab::Git));
         assert!(tabs.contains(&Tab::Diff));
+        assert!(tabs.contains(&Tab::History));
     }
 
     #[test]
@@ -850,7 +855,7 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 6);
+        assert_eq!(back.iter_all_tabs().count(), 7);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
@@ -873,7 +878,7 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 6);
+        assert_eq!(restored.dock.iter_all_tabs().count(), 7);
         assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
     }
 
@@ -892,7 +897,7 @@ mod layout_persistence_tests {
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 6);
+        assert_eq!(app.dock.iter_all_tabs().count(), 7);
     }
 }
 
@@ -3757,7 +3762,7 @@ mod the_bottom_strip {
             terminal.node_path(),
             "the terminal still has a pane of its own"
         );
-        assert_eq!(tab_count_in_the_problems_leaf(&dock), 4);
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 5);
         let git = dock.find_tab(&Tab::Git).expect("a git tab");
         assert_eq!(
             problems.node_path(),
@@ -3798,7 +3803,7 @@ mod the_bottom_strip {
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(problems.node_path(), terminal.node_path());
-        assert_eq!(tidied.iter_all_tabs().count(), 5, "a tab was duplicated");
+        assert_eq!(tidied.iter_all_tabs().count(), 6, "a tab was duplicated");
     }
 
     /// A layout written before the Git panel existed must gain one, not lose it.
@@ -3839,6 +3844,6 @@ mod the_bottom_strip {
             active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
             Some(Tab::Problems)
         );
-        assert_eq!(tidied.iter_all_tabs().count(), 5);
+        assert_eq!(tidied.iter_all_tabs().count(), 6);
     }
 }

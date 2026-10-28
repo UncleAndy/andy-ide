@@ -3,6 +3,7 @@
 pub mod diff;
 pub mod editor;
 pub mod git;
+pub mod history;
 pub mod hover;
 pub mod preview;
 pub mod problems;
@@ -30,6 +31,7 @@ pub enum Tab {
     Terminal,
     Git,
     Diff,
+    History,
 }
 
 impl Tab {
@@ -41,6 +43,7 @@ impl Tab {
             Tab::Terminal => "Terminal",
             Tab::Git => "Git",
             Tab::Diff => "Diff",
+            Tab::History => "History",
         }
     }
 }
@@ -69,6 +72,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Terminal => self.state.terminal.show(ui),
             Tab::Git => git::panel(ui, self.state),
             Tab::Diff => diff::panel(ui, self.state),
+            Tab::History => history::panel(ui, self.state),
         }
     }
 
