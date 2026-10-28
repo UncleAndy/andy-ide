@@ -32,8 +32,10 @@ session and layout restore, atomic save, filesystem watching, Markdown preview, 
 light themes. Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
 Milestone M2 (navigation through a language server) is under way: the LSP client in
-`ide-lsp` speaks the protocol to a real child process, `F12` goes to the definition and
-the problems panel shows what the server published. Plan and state:
+`ide-lsp` speaks the protocol to a real child process, `F12` and `Ctrl+Click` go to the
+definition, `Shift+F12` lists the places a symbol is used, `Ctrl+F12` shows the structure
+of the file and `Ctrl+Alt+Shift+N` searches the symbols of the project. The problems
+panel shows what the server published. Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
 
 ## Crates
