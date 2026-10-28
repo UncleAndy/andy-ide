@@ -1195,3 +1195,191 @@ mod caret_visibility_tests {
         assert_eq!(harness.app.state.active_buffer().unwrap().caret(), 0);
     }
 }
+
+#[cfg(test)]
+mod clipboard_keys_tests {
+    use super::*;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn with_text(name: &str, text: &str) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join(name), text).unwrap();
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            app.state.open_file(std::path::Path::new(name));
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+            output
+        }
+
+        fn focus_editor(&mut self) {
+            let at = egui::pos2(320.0, 150.0);
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) -> egui::FullOutput {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }])
+        }
+
+        fn select_first_line(&mut self) {
+            self.key_with(egui::Key::Home, egui::Modifiers::CTRL);
+        }
+
+        fn text(&self) -> String {
+            self.app.state.active_buffer().unwrap().text().to_owned()
+        }
+
+        fn selection(&self) -> String {
+            self.app.state.active_buffer().unwrap().selected_text()
+        }
+
+        fn copied(&self, output: &egui::FullOutput) -> Option<String> {
+            output.platform_output.commands.iter().find_map(|command| {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+        }
+
+        fn asked_for_a_paste(&self, output: &egui::FullOutput) -> bool {
+            output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| viewport.commands.iter())
+                .any(|command| matches!(command, egui::ViewportCommand::RequestPaste))
+        }
+    }
+
+    #[test]
+    fn shift_delete_cuts_the_selection() {
+        let mut harness = Harness::with_text("a.rs", "keep and cut\n");
+        harness.focus_editor();
+        harness.select_first_line();
+        for _ in 0..4 {
+            harness.key_with(egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        }
+        assert_eq!(harness.selection(), "keep");
+
+        let output = harness.key_with(egui::Key::Delete, egui::Modifiers::SHIFT);
+        assert_eq!(harness.copied(&output).as_deref(), Some("keep"));
+        assert_eq!(harness.text(), " and cut\n");
+    }
+
+    #[test]
+    fn ctrl_insert_copies_the_selection() {
+        let mut harness = Harness::with_text("a.rs", "keep and cut\n");
+        harness.focus_editor();
+        harness.select_first_line();
+        for _ in 0..4 {
+            harness.key_with(egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        }
+
+        let output = harness.key_with(egui::Key::Insert, egui::Modifiers::CTRL);
+        assert_eq!(harness.copied(&output).as_deref(), Some("keep"));
+        assert_eq!(harness.text(), "keep and cut\n", "copying changes nothing");
+    }
+
+    #[test]
+    fn shift_insert_asks_the_backend_for_the_clipboard() {
+        let mut harness = Harness::with_text("a.rs", "ab\n");
+        harness.focus_editor();
+
+        let output = harness.key_with(egui::Key::Insert, egui::Modifiers::SHIFT);
+        assert!(
+            harness.asked_for_a_paste(&output),
+            "the editor must ask the window for the clipboard text"
+        );
+        assert_eq!(harness.text(), "ab\n", "asking changes nothing by itself");
+    }
+
+    #[test]
+    fn plain_delete_still_deletes_forward() {
+        let mut harness = Harness::with_text("a.rs", "ab\n");
+        harness.focus_editor();
+        harness.select_first_line();
+
+        harness.key_with(egui::Key::Delete, egui::Modifiers::NONE);
+        assert_eq!(harness.text(), "b\n");
+    }
+
+    #[test]
+    fn copying_without_a_selection_takes_the_whole_line() {
+        let mut harness = Harness::with_text("a.rs", "first\nsecond\n");
+        harness.focus_editor();
+        harness.select_first_line();
+        harness.key_with(egui::Key::ArrowDown, egui::Modifiers::NONE);
+
+        let output = harness.key_with(egui::Key::Insert, egui::Modifiers::CTRL);
+        assert_eq!(harness.copied(&output).as_deref(), Some("second\n"));
+        assert_eq!(harness.text(), "first\nsecond\n");
+    }
+
+    #[test]
+    fn cutting_without_a_selection_removes_the_line() {
+        let mut harness = Harness::with_text("a.rs", "first\nsecond\nthird\n");
+        harness.focus_editor();
+        harness.select_first_line();
+        harness.key_with(egui::Key::ArrowDown, egui::Modifiers::NONE);
+
+        let output = harness.key_with(egui::Key::Delete, egui::Modifiers::SHIFT);
+        assert_eq!(harness.copied(&output).as_deref(), Some("second\n"));
+        assert_eq!(harness.text(), "first\nthird\n");
+    }
+}

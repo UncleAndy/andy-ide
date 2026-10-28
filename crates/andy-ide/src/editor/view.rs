@@ -602,6 +602,53 @@ fn token_color(kind: TokenKind) -> Color32 {
 ///
 /// Returns `(text changed, caret moved)`: the second flag tells the view that
 /// the user asked for a caret motion, even if the caret could not move.
+/// The text a copy takes: the selection, or the line under the caret.
+///
+/// An editor without a selection copies the whole line, terminator included,
+/// which is what every editor people come from does.
+fn text_to_copy(buffer: &EditorBuffer) -> String {
+    if buffer.has_selection() {
+        return buffer.selected_text();
+    }
+    let (line, _) = buffer.line_col();
+    let starts = buffer.line_starts();
+    let start = starts[line];
+    let end = starts
+        .get(line + 1)
+        .copied()
+        .unwrap_or_else(|| buffer.text().len());
+    buffer.text()[start..end].to_owned()
+}
+
+fn copy_to_clipboard(ui: &Ui, buffer: &EditorBuffer) {
+    let text = text_to_copy(buffer);
+    if !text.is_empty() {
+        ui.ctx().copy_text(text);
+    }
+}
+
+/// Copies and removes; returns whether the buffer changed.
+fn cut_to_clipboard(ui: &Ui, buffer: &mut EditorBuffer) -> bool {
+    let text = text_to_copy(buffer);
+    if text.is_empty() {
+        return false;
+    }
+    ui.ctx().copy_text(text);
+    if !buffer.has_selection() {
+        let (line, _) = buffer.line_col();
+        let start = buffer.line_starts()[line];
+        let end = buffer
+            .line_starts()
+            .get(line + 1)
+            .copied()
+            .unwrap_or_else(|| buffer.text().len());
+        buffer.set_caret(start);
+        buffer.set_drag_caret(end);
+    }
+    buffer.insert_text("");
+    true
+}
+
 fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
     let mut changed = false;
     let mut navigated = false;
@@ -617,20 +664,8 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                 buffer.insert_text(&text);
                 changed = true;
             }
-            Event::Copy => {
-                let selection = buffer.selected_text();
-                if !selection.is_empty() {
-                    ui.ctx().copy_text(selection);
-                }
-            }
-            Event::Cut => {
-                let selection = buffer.selected_text();
-                if !selection.is_empty() {
-                    ui.ctx().copy_text(selection);
-                    buffer.insert_text("");
-                    changed = true;
-                }
-            }
+            Event::Copy => copy_to_clipboard(ui, buffer),
+            Event::Cut => changed |= cut_to_clipboard(ui, buffer),
             Event::Key {
                 key,
                 pressed: true,
@@ -690,6 +725,20 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                     Key::Backspace => {
                         buffer.backspace();
                         changed = true;
+                    }
+                    // The Windows-only bindings of the keyboard come as plain
+                    // key presses here, so the editor maps them itself.
+                    Key::Delete if modifiers.shift => {
+                        changed |= cut_to_clipboard(ui, buffer);
+                    }
+                    Key::Insert if modifiers.shift => {
+                        // The backend owns the clipboard: ask it to read the
+                        // text and send it back as a paste event.
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    }
+                    Key::Insert if modifiers.ctrl || modifiers.command => {
+                        copy_to_clipboard(ui, buffer);
                     }
                     Key::Delete => {
                         buffer.delete_forward();
