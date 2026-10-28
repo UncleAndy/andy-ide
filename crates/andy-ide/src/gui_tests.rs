@@ -2454,3 +2454,131 @@ mod the_terminal_selection {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// `Ctrl+Insert` copies in the terminal too, the same chord the editor uses.
+mod the_terminal_copy_chord {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn open_terminal(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+        rect
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    fn copied(gui: &Gui) -> Option<String> {
+        gui.harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn ctrl_insert_copies_the_selection_and_sends_nothing_to_the_shell() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        gui.harness.event(egui::Event::Text(
+            "printf '\\none two\\nthree four\\n' | tr a-z A-Z\n".to_owned(),
+        ));
+        gui.settle();
+        wait_until(&mut gui, "the text to be on the screen", |gui| {
+            gui.app().state.terminal.contents().contains("THREE FOUR")
+        });
+        let (cols, rows) = gui.app().state.terminal.size();
+        let cell = egui::vec2(rect.width() / cols as f32, rect.height() / rows as f32);
+        let row = gui
+            .app()
+            .state
+            .terminal
+            .contents()
+            .lines()
+            .position(|line| line.contains("ONE TWO"))
+            .expect("ONE TWO is on the screen") as u16;
+        let point = |column: u16, row: u16| {
+            rect.left_top()
+                + egui::vec2((column as f32 + 0.5) * cell.x, (row as f32 + 0.5) * cell.y)
+        };
+        // A plain drag picks the text: no program here asked for the mouse.
+        let press = |gui: &mut Gui, pos, pressed: bool| {
+            gui.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            gui.settle();
+        };
+        gui.harness.event(egui::Event::PointerMoved(point(0, row)));
+        press(&mut gui, point(0, row), true);
+        gui.harness
+            .event(egui::Event::PointerMoved(point(10, row + 1)));
+        gui.settle();
+        press(&mut gui, point(10, row + 1), false);
+        assert_eq!(
+            gui.app().state.terminal.selected_text().as_deref(),
+            Some("ONE TWO\nTHREE FOUR")
+        );
+        let before = gui.app().state.terminal.contents();
+
+        gui.harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness.step();
+        assert_eq!(
+            copied(&gui).as_deref(),
+            Some("ONE TWO\nTHREE FOUR"),
+            "Ctrl+Insert did not copy the selection"
+        );
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.contents(),
+            before,
+            "the copy chord was typed into the shell"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}

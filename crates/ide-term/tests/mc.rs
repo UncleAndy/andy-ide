@@ -6,6 +6,7 @@
 //!
 //! The checks need `mc` installed; without it they say so and pass.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ide_term::keys::{Direction, Input, Mods};
@@ -16,8 +17,14 @@ fn mc_is_installed() -> bool {
 }
 
 fn with_files() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("andy-ide-mc");
-    let _ = std::fs::remove_dir_all(&dir);
+    // A directory per call: the tests run side by side, and one of them clearing a
+    // shared one while another `mc` is running in it fails the other test.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "andy-ide-mc-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     for name in ["alpha.rs", "beta.rs", "gamma.rs"] {
         std::fs::write(dir.join(name), "x").unwrap();

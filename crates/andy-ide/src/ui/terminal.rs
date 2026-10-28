@@ -117,6 +117,7 @@ impl Terminal {
     /// to the shell, and an editor that also saw them would type the same text into the
     /// open file — which is exactly what happened before this was a `take`.
     pub fn take_keys(&mut self, ui: &mut Ui) -> Vec<u8> {
+        // debug
         // Read once per frame, before anything is written: a program that has just
         // turned the mode on expects the very next arrow in the new form.
         let app = self.application_cursor();
@@ -138,9 +139,13 @@ impl Terminal {
                         modifiers,
                         ..
                     } => {
-                        // `Ctrl+Shift+C` copies the selection: a terminal needs its
-                        // own copy key, because `Ctrl+C` there means "stop".
-                        if *key == egui::Key::C && modifiers.ctrl && modifiers.shift {
+                        // `Ctrl+Shift+C` and `Ctrl+Insert` copy the selection: a
+                        // terminal needs a copy key of its own, because `Ctrl+C`
+                        // there means "stop". `Ctrl+Insert` is the one the editor
+                        // already uses for the same thing.
+                        let copying = (*key == egui::Key::C && modifiers.ctrl && modifiers.shift)
+                            || (*key == egui::Key::Insert && modifiers.ctrl);
+                        if copying {
                             self.copy_selection(ui);
                             continue;
                         }
@@ -150,6 +155,9 @@ impl Terminal {
                             bytes.extend_from_slice(&input.bytes());
                         }
                     }
+                    // Some backends turn a copy chord into this event instead of a key;
+                    // the panel treats it as its own copy either way.
+                    egui::Event::Copy => self.copy_selection(ui),
                     egui::Event::Paste(text) => bytes.extend_from_slice(text.as_bytes()),
                     _ => {}
                 }
@@ -167,6 +175,7 @@ impl Terminal {
             let mine = matches!(
                 event,
                 egui::Event::Text(_)
+                    | egui::Event::Copy
                     | egui::Event::Paste(_)
                     | egui::Event::Key { pressed: true, .. }
             );
