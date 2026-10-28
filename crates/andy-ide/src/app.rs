@@ -31,18 +31,21 @@ impl App {
 }
 
 /// Editor in the middle, projects on the left, problems along the bottom.
+///
+/// `fraction` is the share of the area kept by the node being split, so the
+/// editor takes the larger part in both splits.
 fn default_layout() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Editor]);
     dock.split(
         NodePath::MAIN_ROOT,
         Split::Left,
-        0.22,
+        0.78,
         Node::leaf(Tab::Projects),
     );
     dock.split(
         NodePath::MAIN_ROOT,
         Split::Below,
-        0.28,
+        0.72,
         Node::leaf(Tab::Problems),
     );
     dock
@@ -301,5 +304,73 @@ mod typing_tests {
         let buffer = app.state.active_buffer().unwrap();
         assert_eq!(buffer.line_count(), 2);
         assert_eq!(buffer.caret(), 12);
+    }
+}
+#[cfg(test)]
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// Painted line numbers, i.e. the rows the editor laid out this frame.
+    fn painted_numbers(app: &mut App) -> Vec<usize> {
+        let ctx = egui::Context::default();
+        let mut output = None;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                ..Default::default()
+            };
+            let mut frame = ctx.run_ui(input, |ui| app.draw(ui));
+            frame.textures_delta.clear();
+            output = Some(frame);
+        }
+        let mut output = output.expect("frames drawn");
+        let numbers = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => text.galley.text().trim().parse::<usize>().ok(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        output.textures_delta.clear();
+        numbers
+    }
+
+    fn app_with_long_file() -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let text: String = (1..=400)
+            .map(|n| format!("let value_{n} = {n};\n"))
+            .collect();
+        std::fs::write(project.path().join("long.rs"), text).unwrap();
+        let mut app = App {
+            state: AppState::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            dock: default_layout(),
+            zoom_applied: false,
+        };
+        app.state.open_file(std::path::Path::new("long.rs"));
+        (project, config, app)
+    }
+
+    /// The editor pane must take most of the window: a split fraction that is
+    /// applied the wrong way round leaves the editor a narrow strip.
+    #[test]
+    fn editor_pane_gets_the_bulk_of_the_window() {
+        let (_project, _config, mut app) = app_with_long_file();
+        let numbers = painted_numbers(&mut app);
+        assert!(
+            numbers.len() >= 20,
+            "only {} line numbers were laid out; the editor pane is too small",
+            numbers.len()
+        );
+        assert_eq!(*numbers.iter().min().unwrap(), 1);
     }
 }

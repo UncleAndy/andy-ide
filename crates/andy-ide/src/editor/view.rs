@@ -111,12 +111,21 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             );
             let caret_pos = paint_caret(&painter, buffer, text_origin, char_w, row_h);
 
-            // Keep the caret on screen while moving with the keyboard.
-            if !viewport.contains(caret_pos) {
-                ui.scroll_to_rect(
-                    Rect::from_min_size(caret_pos, Vec2::new(char_w, row_h)).expand(3.0),
-                    None,
-                );
+            // Keep the caret on screen while it moves, and only then: scrolling
+            // must never fight the user's wheel. The viewport is reported in
+            // content coordinates, the caret is painted in screen coordinates,
+            // so the caret is shifted into content space before comparing.
+            let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
+            let tracked = response.id.with("last_caret");
+            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
+            let caret = buffer.caret();
+            let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
+            let (remember, scroll) = caret_follow(previous, caret, viewport, row);
+            if remember {
+                ui.data_mut(|data| data.insert_temp(tracked, caret));
+            }
+            if scroll {
+                ui.scroll_to_rect(row.expand(3.0), None);
             }
 
             if response.has_focus() {
@@ -135,6 +144,20 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
         });
 
     changed
+}
+
+/// Decides whether the view follows the caret this frame.
+///
+/// Returns `(remember, scroll)`. The caret is followed only when it actually
+/// moved: a wheel scroll leaves the caret where it is, and scrolling the view
+/// back to it would make the wheel feel broken. Both rectangles are in content
+/// coordinates — the scroll area reports the viewport that way, and the caller
+/// shifts the caret there before asking.
+fn caret_follow(previous: Option<usize>, caret: usize, viewport: Rect, row: Rect) -> (bool, bool) {
+    if previous == Some(caret) {
+        return (false, false);
+    }
+    (true, !viewport.contains_rect(row))
 }
 
 /// Line numbers along the left edge, in a muted colour.
@@ -460,4 +483,49 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
     }
 
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caret_follow;
+    use egui::{Rect, pos2};
+
+    fn viewport() -> Rect {
+        Rect::from_min_max(pos2(0.0, 200.0), pos2(600.0, 400.0))
+    }
+
+    fn row(y: f32) -> Rect {
+        Rect::from_min_size(pos2(12.0, y), egui::vec2(1.0, 18.0))
+    }
+
+    #[test]
+    fn a_still_caret_is_never_chased() {
+        // The caret sits above the viewport after a wheel scroll, but it did not
+        // move: the view must stay where the user put it.
+        assert_eq!(
+            caret_follow(Some(0), 0, viewport(), row(0.0)),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn moving_the_caret_inside_the_viewport_only_remembers_it() {
+        assert_eq!(
+            caret_follow(Some(0), 7, viewport(), row(300.0)),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn moving_the_caret_out_of_the_viewport_scrolls() {
+        assert_eq!(
+            caret_follow(Some(7), 40, viewport(), row(900.0)),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn the_first_frame_does_not_scroll_when_the_caret_is_visible() {
+        assert_eq!(caret_follow(None, 0, viewport(), row(200.0)), (true, false));
+    }
 }
