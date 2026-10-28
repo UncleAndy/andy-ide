@@ -43,6 +43,9 @@ pub struct EditorBuffer {
     /// because the first frame of a fresh scroll area may not know its size yet
     /// and would swallow the scroll.
     reveal_caret: u8,
+    /// Where the pointer rests in the text, in line and column, with the screen
+    /// position of the hint. Set by the view every frame it draws.
+    pub hover: Option<(usize, usize, egui::Pos2)>,
 }
 
 impl EditorBuffer {
@@ -74,6 +77,7 @@ impl EditorBuffer {
             max_line_chars: 0,
             nav_request: None,
             reveal_caret: 0,
+            hover: None,
         };
         buffer.refresh();
         buffer

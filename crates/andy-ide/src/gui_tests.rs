@@ -1427,3 +1427,114 @@ mod the_maximized_window {
         );
     }
 }
+
+/// The hint that follows the pointer.
+mod the_hint {
+    use super::*;
+    use crate::lsp::Outcome;
+    use crate::ui::hover::HOVER_DELAY;
+
+    /// A window with a plain-text file: no language server is registered for it,
+    /// so the test drives the answer itself instead of waiting for rust-analyzer.
+    fn window() -> Gui {
+        Gui::new(
+            &[("notes.txt", "alpha beta\ngamma delta\n")],
+            Some("notes.txt"),
+        )
+    }
+
+    fn rest_on_text(gui: &mut Gui) {
+        gui.harness.hover_at(egui::pos2(315.0, 125.0));
+        gui.harness.step();
+    }
+
+    fn run_for(gui: &mut Gui, seconds: f64) {
+        let frames = (seconds * 60.0).ceil() as usize;
+        for _ in 0..frames {
+            gui.harness.step();
+        }
+    }
+
+    fn hint_on_screen(gui: &Gui, text: &str) -> bool {
+        gui.harness.query_by_label(text).is_some()
+    }
+
+    /// Answers the question the window has asked about the spot it is on.
+    fn answer(gui: &mut Gui, text: &str) {
+        let spot = gui
+            .app()
+            .state
+            .hover_spot()
+            .expect("the pointer is not on the text");
+        gui.app_mut().state.apply_outcome(Outcome::Hover {
+            path: spot.path,
+            line: spot.line,
+            character: spot.character,
+            text: Some(text.to_owned()),
+        });
+        gui.settle();
+    }
+
+    #[test]
+    fn nothing_is_shown_before_the_pointer_rests() {
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        answer(&mut gui, "```text\nalpha\n```");
+        assert!(
+            gui.app().state.hover.text().is_none(),
+            "a hint was taken for a pointer that only just arrived"
+        );
+    }
+
+    #[test]
+    fn a_resting_pointer_shows_what_the_server_said() {
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+
+        assert!(
+            hint_on_screen(&gui, "alpha"),
+            "the signature is not on screen"
+        );
+        assert!(
+            hint_on_screen(&gui, "The first letter."),
+            "the documentation is not on screen"
+        );
+    }
+
+    #[test]
+    fn the_hint_goes_away_when_the_pointer_leaves() {
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```");
+        assert!(hint_on_screen(&gui, "alpha"));
+
+        gui.harness.remove_cursor();
+        gui.harness.step();
+
+        assert!(
+            !hint_on_screen(&gui, "alpha"),
+            "the hint stayed after the pointer left"
+        );
+    }
+
+    #[test]
+    fn a_modal_takes_the_hint_away() {
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```");
+        assert!(hint_on_screen(&gui, "alpha"));
+
+        gui.app_mut().state.results.open = true;
+        gui.harness.step();
+
+        assert!(
+            !hint_on_screen(&gui, "alpha"),
+            "the hint hangs over a modal"
+        );
+    }
+}

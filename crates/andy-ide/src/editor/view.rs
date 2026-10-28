@@ -222,6 +222,18 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 }
             }
 
+            // A pointer that rests on the text asks what is under it. Published
+            // every frame rather than as an event, so a pointer that leaves the
+            // text (or the window) leaves nothing behind.
+            buffer.hover = ui
+                .input(|input| input.pointer.hover_pos())
+                .filter(|pos| rect.contains(*pos) && !response.dragged())
+                .map(|pos| {
+                    let (line, col) =
+                        position_to_line_col(buffer, &layouts, text_origin, pos, row_h);
+                    (line, col, pos)
+                });
+
             let mut navigated = false;
             let mut typed = false;
             if response.has_focus() {

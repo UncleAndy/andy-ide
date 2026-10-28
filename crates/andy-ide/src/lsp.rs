@@ -36,6 +36,11 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// What the symbol at one position is: signature and documentation.
+    Hover {
+        path: PathBuf,
+        position: Position,
+    },
     /// The outline of one file.
     Symbols {
         path: PathBuf,
@@ -62,6 +67,14 @@ pub enum Outcome {
         from: PathBuf,
         locations: Vec<Location>,
     },
+    /// What the server says about the symbol at a position. `text: None` means it
+    /// said nothing, which is the usual answer over whitespace.
+    Hover {
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        text: Option<String>,
+    },
     /// The outline of one file, as the server nested it.
     Symbols {
         from: PathBuf,
@@ -80,6 +93,36 @@ pub enum Outcome {
         path: PathBuf,
         lines: Vec<DiagnosticLine>,
     },
+}
+
+/// The text of a hover answer, whatever shape the server sent it in.
+///
+/// The protocol has three shapes for the same thing — a plain string, an array
+/// of marked strings (language-tagged code, then prose) and a markup block that
+/// says whether it holds Markdown. The window paints one text, so they are all
+/// brought to one, separated by blank lines.
+pub fn hover_text(hover: &lsp_types::Hover) -> Option<String> {
+    let pieces: Vec<String> = match &hover.contents {
+        lsp_types::HoverContents::Scalar(marked) => vec![marked_string_text(marked)],
+        lsp_types::HoverContents::Array(marked) => marked.iter().map(marked_string_text).collect(),
+        lsp_types::HoverContents::Markup(markup) => vec![markup.value.clone()],
+    };
+    let text = pieces
+        .into_iter()
+        .map(|piece| piece.trim().to_owned())
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn marked_string_text(marked: &lsp_types::MarkedString) -> String {
+    match marked {
+        lsp_types::MarkedString::String(text) => text.clone(),
+        lsp_types::MarkedString::LanguageString(code) => {
+            format!("```{}\n{}\n```", code.language, code.value)
+        }
+    }
 }
 
 /// One diagnostic as the panel shows it.
@@ -263,6 +306,42 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 Err(error) => Outcome::Failed(format!("{error:#}")),
             })
         }
+        Job::Hover { path, position } => {
+            // A cold server answers "nothing" — or refuses with `ContentModified`
+            // while it is still loading the project — and the pointer is still on
+            // the symbol, so the question is asked again. After the first real
+            // answer, "nothing" is the truth and is taken as one.
+            let ask = |session: &mut LspSession| -> Result<Option<String>, anyhow::Error> {
+                match session.hover(&path, position) {
+                    Ok(hover) => Ok(hover.as_ref().and_then(hover_text)),
+                    Err(error) if ide_lsp::is_content_modified(&error) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            };
+            let mut found = ask(session);
+            if !*warm && matches!(&found, Ok(None)) {
+                for delay in [250u64, 500, 1000, 2000] {
+                    std::thread::sleep(Duration::from_millis(delay));
+                    found = ask(session);
+                    if !matches!(&found, Ok(None)) {
+                        break;
+                    }
+                }
+            }
+            if matches!(&found, Ok(Some(_))) {
+                *warm = true;
+            }
+            let text = match found {
+                Ok(text) => text,
+                Err(error) => return Some(Outcome::Failed(format!("{error:#}"))),
+            };
+            Some(Outcome::Hover {
+                path,
+                line: position.line,
+                character: position.character,
+                text,
+            })
+        }
         Job::WorkspaceSymbols { query } => Some(match session.workspace_symbols(&query) {
             Ok(symbols) => Outcome::WorkspaceSymbols { query, symbols },
             Err(error) => Outcome::Failed(format!("{error:#}")),
@@ -293,5 +372,71 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 Err(error) => Outcome::Failed(format!("{error:#}")),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hover_text;
+    use lsp_types::{
+        Hover, HoverContents, LanguageString, MarkedString, MarkupContent, MarkupKind, Range,
+    };
+
+    fn at() -> Range {
+        Range::new(
+            lsp_types::Position::new(0, 0),
+            lsp_types::Position::new(0, 1),
+        )
+    }
+
+    #[test]
+    fn a_markup_answer_keeps_its_text() {
+        let hover = Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "```rust\nfn a()\n```".to_owned(),
+            }),
+            range: Some(at()),
+        };
+        assert_eq!(hover_text(&hover).as_deref(), Some("```rust\nfn a()\n```"));
+    }
+
+    #[test]
+    fn an_array_of_marked_strings_becomes_one_text() {
+        let hover = Hover {
+            contents: HoverContents::Array(vec![
+                MarkedString::LanguageString(LanguageString {
+                    language: "rust".to_owned(),
+                    value: "fn a()".to_owned(),
+                }),
+                MarkedString::String("Does a thing.".to_owned()),
+            ]),
+            range: None,
+        };
+        assert_eq!(
+            hover_text(&hover).as_deref(),
+            Some("```rust\nfn a()\n```\n\nDoes a thing.")
+        );
+    }
+
+    #[test]
+    fn a_plain_string_is_a_plain_answer() {
+        let hover = Hover {
+            contents: HoverContents::Scalar(MarkedString::String("Point".to_owned())),
+            range: None,
+        };
+        assert_eq!(hover_text(&hover).as_deref(), Some("Point"));
+    }
+
+    #[test]
+    fn an_empty_answer_is_no_answer() {
+        let hover = Hover {
+            contents: HoverContents::Scalar(MarkedString::String("   ".to_owned())),
+            range: None,
+        };
+        assert!(
+            hover_text(&hover).is_none(),
+            "whitespace was taken for a hint"
+        );
     }
 }

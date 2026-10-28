@@ -107,6 +107,7 @@ pub struct AppState {
     pub results: crate::ui::results::Results,
     /// The project-symbol search (`Ctrl+Shift+F12`).
     pub symbols: crate::ui::symbols::SymbolSearch,
+    pub hover: crate::ui::hover::Hover,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -168,6 +169,7 @@ impl AppState {
             quick_open: crate::ui::quick_open::QuickOpen::new(),
             results: crate::ui::results::Results::new(),
             symbols: crate::ui::symbols::SymbolSearch::new(),
+            hover: crate::ui::hover::Hover::new(),
             lsp: None,
             lsp_status: String::new(),
             zoom_changed_at: 0.0,
@@ -405,6 +407,65 @@ impl AppState {
         }
         self.save_config();
         None
+    }
+
+    /// Asks the server what the pointer is resting on, once the pointer has
+    /// rested long enough.
+    ///
+    /// Returns how long the window should wait before the question becomes due,
+    /// so an idle window comes back to ask it; `None` means nothing is pending.
+    pub fn track_hover(&mut self, now: f64) -> Option<std::time::Duration> {
+        let spot = self.hover_spot();
+        self.hover.look_at(spot, now);
+        self.hover.forget_if_modal(self.modal_open());
+
+        let Some(spot) = self.hover.due(now) else {
+            return self.hover.wait();
+        };
+        if !self.start_server_for(&spot.path) {
+            // Without a server there is nothing to ask; the spot is remembered as
+            // answered so the question is not repeated every frame.
+            self.hover.asked(spot);
+            return None;
+        }
+        let Some(lsp) = &self.lsp else {
+            return None;
+        };
+        lsp.send(crate::lsp::Job::Hover {
+            path: spot.path.clone(),
+            position: lsp_types::Position::new(spot.line, spot.character),
+        });
+        self.hover.asked(spot);
+        None
+    }
+
+    /// Where the pointer rests, as the view of the active tab last saw it.
+    pub(crate) fn hover_spot(&self) -> Option<crate::ui::hover::Spot> {
+        let buffer = self.active_buffer()?;
+        let (line, character, screen) = buffer.hover?;
+        Some(crate::ui::hover::Spot {
+            path: buffer.path.clone(),
+            line: line as u32,
+            character: character as u32,
+            screen,
+        })
+    }
+
+    /// Puts the pointer on a symbol, as the view would.
+    #[cfg(test)]
+    pub(crate) fn set_hover_for_test(&mut self, line: u32, character: u32, screen: egui::Pos2) {
+        if let Some(buffer) = self.active_buffer_mut() {
+            buffer.hover = Some((line as usize, character as usize, screen));
+        }
+    }
+
+    /// Whether something is on top of the editor that the pointer is really over.
+    fn modal_open(&self) -> bool {
+        self.results.open
+            || self.symbols.open
+            || self.quick_open.open
+            || self.prompt.is_some()
+            || self.preview_open
     }
 
     /// Remembers whether the window is maximized.
@@ -1006,6 +1067,12 @@ impl AppState {
     pub(crate) fn apply_outcome(&mut self, outcome: crate::lsp::Outcome) {
         match outcome {
             crate::lsp::Outcome::Failed(message) => self.status = message,
+            crate::lsp::Outcome::Hover {
+                path,
+                line,
+                character,
+                text,
+            } => self.hover.answer(&path, line, character, text),
             crate::lsp::Outcome::NoDefinition { from } => {
                 self.status = format!("no definition for the symbol in {}", display_name(&from));
             }

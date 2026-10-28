@@ -1,6 +1,7 @@
 //! Panels and the dock contents.
 
 pub mod editor;
+pub mod hover;
 pub mod preview;
 pub mod problems;
 pub mod prompt;

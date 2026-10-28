@@ -158,6 +158,13 @@ impl App {
         self.state.poll_navigation();
         self.state.apply_pending();
 
+        // The hint is asked for after the editor drew this frame, so the spot the
+        // pointer is over is the one on screen, and painted above everything.
+        if let Some(wait) = self.state.track_hover(now) {
+            ui.ctx().request_repaint_after(wait);
+        }
+        self.state.hover.show(ui.ctx());
+
         self.frames += 1;
         self.state.poll_index();
         let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
@@ -2953,5 +2960,83 @@ mod real_symbol_tests {
             "a project symbol came from another file"
         );
         println!("search make: {} rows", app.state.symbols.hits.len());
+    }
+}
+
+/// The hint through the real server: pointer on a call, signature on screen.
+#[cfg(test)]
+mod real_hover_tests {
+    use super::*;
+
+    const SOURCE: &str = "pub struct Point {\n    pub x: i32,\n    pub y: i32,\n}\n\nimpl Point {\n    /// Makes the origin.\n    pub fn new(x: i32, y: i32) -> Self {\n        Self { x, y }\n    }\n}\n\npub fn make() -> Point {\n    Point::new(1, 2)\n}\n";
+
+    #[test]
+    fn resting_on_a_call_shows_its_signature() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/lib.rs")) else {
+            println!("no server for rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), SOURCE).unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/lib.rs"));
+
+        // The pointer rests on `new` in the call on the last line.
+        let line = SOURCE
+            .lines()
+            .position(|line| line.contains("Point::new(1, 2)"))
+            .unwrap();
+        let column = SOURCE.lines().nth(line).unwrap().find("new").unwrap();
+        let spot_line = line as u32;
+        let spot_character = column as u32;
+        app.state
+            .set_hover_for_test(spot_line, spot_character, egui::pos2(300.0, 200.0));
+
+        let start = std::time::Instant::now();
+        let mut now = 0.0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            now += 0.1;
+            app.state.poll_lsp();
+            app.state.track_hover(now);
+            if let Some(text) = app.state.hover.text() {
+                println!(
+                    "hover after {:.1} s: {}",
+                    start.elapsed().as_secs_f64(),
+                    text.replace('\n', " / ")
+                );
+                assert!(
+                    text.contains("fn new(x: i32, y: i32) -> Self"),
+                    "the signature is not in the answer: {text}"
+                );
+                assert!(
+                    text.contains("Makes the origin."),
+                    "the documentation is not in the answer: {text}"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("no hint came back in 120 s");
     }
 }
