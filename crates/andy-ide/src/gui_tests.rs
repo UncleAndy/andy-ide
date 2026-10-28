@@ -1961,3 +1961,101 @@ mod the_terminal_click {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// A program that asks for the application cursor keys and gets them.
+///
+/// This is the `mc` case end to end: egui's key events, the panel, the mapping and
+/// the pseudo-terminal. The terminal driver echoes what reaches it, so the screen
+/// says exactly which bytes were sent.
+mod the_terminal_keys {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn focused_terminal(gui: &mut Gui) {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        assert!(gui.app().state.terminal.focused, "the panel took no focus");
+    }
+
+    fn type_text(gui: &mut Gui, text: &str) {
+        gui.harness.event(egui::Event::Text(text.to_owned()));
+        gui.settle();
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    /// Asks the terminal for the application cursor keys and hands the keyboard to
+    /// `cat -v`, which makes the driver's echo the only thing on screen.
+    fn ask_for_the_application_mode(gui: &mut Gui) {
+        focused_terminal(gui);
+        type_text(gui, "printf '\\033[?1h'; cat -v\n");
+        wait_until(gui, "the program to ask for the mode", |gui| {
+            gui.app().state.terminal.application_cursor()
+        });
+    }
+
+    #[test]
+    fn an_arrow_arrives_in_the_form_the_program_asked_for() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        ask_for_the_application_mode(&mut gui);
+
+        gui.harness.key_press(egui::Key::ArrowDown);
+        wait_until(&mut gui, "the arrow to be echoed", |gui| {
+            gui.app().state.terminal.contents().contains("^[OB")
+        });
+        let screen = gui.app().state.terminal.contents();
+        assert!(
+            !screen.contains("^[[B"),
+            "the plain form was sent as well: {screen:?}"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_function_key_arrives_as_its_sequence() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        ask_for_the_application_mode(&mut gui);
+
+        gui.harness.key_press(egui::Key::F5);
+        wait_until(&mut gui, "F5 to be echoed", |gui| {
+            gui.app().state.terminal.contents().contains("^[[15~")
+        });
+        let screen = gui.app().state.terminal.contents();
+        assert!(
+            gui.app().state.active_buffer().unwrap().text() == "fn a() {}\n",
+            "the function key was also typed into the file: {screen:?}"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}

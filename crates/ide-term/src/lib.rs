@@ -168,6 +168,15 @@ impl Session {
         read(parser.screen())
     }
 
+    /// Whether the program in the terminal asked for the application cursor keys.
+    ///
+    /// A full-screen program turns this on with `smkx` and then expects `ESC O B`
+    /// where a shell at its prompt expects `ESC [ B`. Sending the wrong one makes
+    /// every arrow silently do nothing in `mc`, `vim` and friends.
+    pub fn application_cursor(&self) -> bool {
+        self.with_screen(|screen| screen.application_cursor())
+    }
+
     /// Everything the screen holds, lines joined by `\n` and trailing blanks cut.
     pub fn contents(&self) -> String {
         let raw = self.with_screen(|screen| screen.contents());
@@ -223,12 +232,23 @@ pub mod keys {
         BackTab,
         /// `Escape`.
         Escape,
-        /// An arrow, with `app` meaning the cursor-moving variant (`Ctrl`).
-        Arrow { direction: Direction, app: bool },
+        /// An arrow.
+        ///
+        /// `app` is the terminal's *application cursor* mode, which a program turns
+        /// on with `CSI ? 1 h` (`smkx`). In that mode the arrows and `Home`/`End`
+        /// are `ESC O` sequences, not `ESC [`: a full-screen program such as `mc`
+        /// matches what its terminfo entry says, and `ESC [` is not in it.
+        Arrow {
+            direction: Direction,
+            app: bool,
+            mods: Mods,
+        },
         /// `Home`.
-        Home,
+        Home { app: bool, mods: Mods },
         /// `End`.
-        End,
+        End { app: bool, mods: Mods },
+        /// A numbered function key, `F1`..`F12`.
+        Function { number: u8, mods: Mods },
         /// `PageUp`.
         PageUp,
         /// `PageDown`.
@@ -250,6 +270,30 @@ pub mod keys {
         Left,
     }
 
+    /// The modifier keys a terminal can tell apart, and the number they come to.
+    ///
+    /// xterm writes them as one parameter: `1` plus `1` for `Shift`, `2` for `Alt`
+    /// and `4` for `Ctrl` — `ESC [ 1 ; 5 A` is `Ctrl+Up`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Mods {
+        pub shift: bool,
+        pub alt: bool,
+        pub ctrl: bool,
+    }
+
+    impl Mods {
+        /// Whether any of them is held: a plain key must not gain a parameter, or
+        /// its form would stop matching what terminfo says.
+        pub fn any(&self) -> bool {
+            self.shift || self.alt || self.ctrl
+        }
+
+        /// The single parameter xterm uses for these modifiers.
+        pub fn code(&self) -> u8 {
+            1 + u8::from(self.shift) + 2 * u8::from(self.alt) + 4 * u8::from(self.ctrl)
+        }
+    }
+
     impl Input {
         /// The bytes this input sends to the child.
         pub fn bytes(&self) -> Vec<u8> {
@@ -261,18 +305,22 @@ pub mod keys {
                 // `CSI Z` is what xterm sends for Shift+Tab.
                 Self::BackTab => b"\x1b[Z".to_vec(),
                 Self::Escape => vec![0x1b],
-                Self::Arrow { direction, app } => {
+                Self::Arrow {
+                    direction,
+                    app,
+                    mods,
+                } => {
                     let final_byte = match direction {
                         Direction::Up => 'A',
                         Direction::Down => 'B',
                         Direction::Right => 'C',
                         Direction::Left => 'D',
                     };
-                    let introducer = if *app { "\x1bO" } else { "\x1b[" };
-                    format!("{introducer}{final_byte}").into_bytes()
+                    cursor_key(final_byte, *app, *mods)
                 }
-                Self::Home => b"\x1b[H".to_vec(),
-                Self::End => b"\x1b[F".to_vec(),
+                Self::Home { app, mods } => cursor_key('H', *app, *mods),
+                Self::End { app, mods } => cursor_key('F', *app, *mods),
+                Self::Function { number, mods } => function_key(*number, *mods),
                 Self::PageUp => b"\x1b[5~".to_vec(),
                 Self::PageDown => b"\x1b[6~".to_vec(),
                 Self::Delete => b"\x1b[3~".to_vec(),
@@ -282,27 +330,178 @@ pub mod keys {
         }
     }
 
+    /// An arrow, `Home` or `End`, in whichever of the two forms the terminal is in.
+    ///
+    /// `ESC O X` is the application-cursor form that terminfo's `kcud1` and friends
+    /// name, and it is what full-screen programs expect once they have asked for it
+    /// with `smkx`. With modifiers xterm switches to the `CSI 1 ; n X` form in both
+    /// modes, because the application form has nowhere to put the parameter.
+    fn cursor_key(final_byte: char, app: bool, mods: Mods) -> Vec<u8> {
+        if mods.any() {
+            format!("\x1b[1;{}{final_byte}", mods.code()).into_bytes()
+        } else if app {
+            format!("\x1bO{final_byte}").into_bytes()
+        } else {
+            format!("\x1b[{final_byte}").into_bytes()
+        }
+    }
+
+    /// A function key, numbered as xterm numbers them.
+    ///
+    /// `F1`..`F4` are the letters `P`..`S` after `ESC O`; `F5` and up are numbered
+    /// `CSI 15 ~`, `17 ~`, `18 ~`, `19 ~`, `20 ~`, `21 ~`, `23 ~`, `24 ~` — the
+    /// numbers skip 16 and 22 for reasons lost with the terminals that had them.
+    fn function_key(number: u8, mods: Mods) -> Vec<u8> {
+        let code = mods.code();
+        let has_mods = mods.any();
+        match number {
+            1..=4 => {
+                let letter = ['P', 'Q', 'R', 'S'][(number - 1) as usize];
+                if has_mods {
+                    format!("\x1b[1;{code}{letter}").into_bytes()
+                } else {
+                    format!("\x1bO{letter}").into_bytes()
+                }
+            }
+            5..=12 => {
+                let base = match number {
+                    5 => 15,
+                    6 => 17,
+                    7 => 18,
+                    8 => 19,
+                    9 => 20,
+                    10 => 21,
+                    11 => 23,
+                    _ => 24,
+                };
+                if has_mods {
+                    format!("\x1b[{base};{code}~").into_bytes()
+                } else {
+                    format!("\x1b[{base}~").into_bytes()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{Direction, Input};
+        use super::{Direction, Input, Mods};
 
         #[test]
         fn control_c_is_one_byte_not_a_letter() {
             assert_eq!(Input::Control(3).bytes(), vec![3]);
         }
 
+        fn arrow(direction: Direction, app: bool) -> Input {
+            Input::Arrow {
+                direction,
+                app,
+                mods: Mods::default(),
+            }
+        }
+
         #[test]
         fn the_arrows_are_escape_sequences() {
-            let up = Input::Arrow {
+            assert_eq!(arrow(Direction::Up, false).bytes(), b"\x1b[A".to_vec());
+            assert_eq!(arrow(Direction::Left, false).bytes(), b"\x1b[D".to_vec());
+        }
+
+        #[test]
+        fn in_the_application_mode_the_arrows_lose_the_bracket() {
+            // `mc`, `vim` and every other ncurses program asks for this mode with
+            // `smkx` and then matches `kcud1` from terminfo, which is `ESC O B`.
+            assert_eq!(arrow(Direction::Down, true).bytes(), b"\x1bOB".to_vec());
+            assert_eq!(arrow(Direction::Right, true).bytes(), b"\x1bOC".to_vec());
+            assert_eq!(
+                Input::Home {
+                    app: true,
+                    mods: Mods::default()
+                }
+                .bytes(),
+                b"\x1bOH".to_vec()
+            );
+            assert_eq!(
+                Input::End {
+                    app: false,
+                    mods: Mods::default()
+                }
+                .bytes(),
+                b"\x1b[F".to_vec()
+            );
+        }
+
+        #[test]
+        fn a_modified_arrow_carries_its_modifiers() {
+            let ctrl_up = Input::Arrow {
                 direction: Direction::Up,
-                app: false,
-            };
-            assert_eq!(up.bytes(), b"\x1b[A".to_vec());
-            let left = Input::Arrow {
-                direction: Direction::Left,
                 app: true,
+                mods: Mods {
+                    ctrl: true,
+                    ..Mods::default()
+                },
             };
-            assert_eq!(left.bytes(), b"\x1bOD".to_vec());
+            assert_eq!(ctrl_up.bytes(), b"\x1b[1;5A".to_vec());
+            let shift_left = Input::Arrow {
+                direction: Direction::Left,
+                app: false,
+                mods: Mods {
+                    shift: true,
+                    ..Mods::default()
+                },
+            };
+            assert_eq!(shift_left.bytes(), b"\x1b[1;2D".to_vec());
+        }
+
+        #[test]
+        fn the_function_keys_are_what_xterm_sends() {
+            let plain = Mods::default();
+            for (number, expected) in [
+                (1u8, b"\x1bOP".as_slice()),
+                (2, b"\x1bOQ"),
+                (3, b"\x1bOR"),
+                (4, b"\x1bOS"),
+                (5, b"\x1b[15~"),
+                (6, b"\x1b[17~"),
+                (7, b"\x1b[18~"),
+                (8, b"\x1b[19~"),
+                (9, b"\x1b[20~"),
+                (10, b"\x1b[21~"),
+                (11, b"\x1b[23~"),
+                (12, b"\x1b[24~"),
+            ] {
+                assert_eq!(
+                    Input::Function {
+                        number,
+                        mods: plain
+                    }
+                    .bytes(),
+                    expected.to_vec(),
+                    "F{number}"
+                );
+            }
+            assert_eq!(
+                Input::Function {
+                    number: 1,
+                    mods: Mods {
+                        shift: true,
+                        ..Mods::default()
+                    }
+                }
+                .bytes(),
+                b"\x1b[1;2P".to_vec()
+            );
+            assert_eq!(
+                Input::Function {
+                    number: 5,
+                    mods: Mods {
+                        ctrl: true,
+                        ..Mods::default()
+                    }
+                }
+                .bytes(),
+                b"\x1b[15;5~".to_vec()
+            );
         }
 
         #[test]

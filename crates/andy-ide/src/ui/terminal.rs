@@ -8,7 +8,7 @@
 use egui::{Key, Modifiers, Ui};
 
 use ide_term::Session;
-use ide_term::keys::{Direction, Input};
+use ide_term::keys::{Direction, Input, Mods};
 
 /// A terminal tab: one session, or the reason it could not start.
 pub struct Terminal {
@@ -67,7 +67,10 @@ impl Terminal {
     /// The events are **removed**, not read: with the terminal focused the keys belong
     /// to the shell, and an editor that also saw them would type the same text into the
     /// open file — which is exactly what happened before this was a `take`.
-    pub fn take_keys(ui: &mut Ui) -> Vec<u8> {
+    pub fn take_keys(&self, ui: &mut Ui) -> Vec<u8> {
+        // Read once per frame, before anything is written: a program that has just
+        // turned the mode on expects the very next arrow in the new form.
+        let app = self.application_cursor();
         let events = ui.input_mut(|input| Self::split_terminal_events(&mut input.events));
         let mut bytes = Vec::new();
         {
@@ -88,7 +91,7 @@ impl Terminal {
                     } => {
                         if let Some(byte) = control_letter(*key, *modifiers) {
                             bytes.push(byte);
-                        } else if let Some(input) = input_for_key(*key, *modifiers) {
+                        } else if let Some(input) = input_for_key(*key, *modifiers, app) {
                             bytes.extend_from_slice(&input.bytes());
                         }
                     }
@@ -247,6 +250,13 @@ impl Terminal {
         self.focused = false;
     }
 
+    /// Whether the program in the terminal asked for the application cursor keys.
+    pub fn application_cursor(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(ide_term::Session::application_cursor)
+    }
+
     /// What the screen holds, for tests and for the clipboard.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn contents(&self) -> String {
@@ -305,10 +315,15 @@ fn colour(value: vt100::Color) -> egui::Color32 {
 
 /// The terminal input a key press stands for.
 ///
-/// `Ctrl` with a letter is a control byte; the arrows move the cursor in an
-/// application (as `vim` asks for) when `Ctrl` is held, which is what xterm does.
-pub fn input_for_key(key: Key, modifiers: Modifiers) -> Option<Input> {
-    let app = modifiers.ctrl;
+/// `app` is the terminal's application-cursor mode, read from the screen once per
+/// frame: a full-screen program (`mc`, `vim`) turns it on and then matches `ESC O B`
+/// for the arrows, where a shell at its prompt matches `ESC [ B`.
+pub fn input_for_key(key: Key, modifiers: Modifiers, app: bool) -> Option<Input> {
+    let mods = Mods {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        ctrl: modifiers.ctrl,
+    };
     let input = match key {
         Key::Enter => Input::Enter,
         Key::Backspace => Input::Backspace,
@@ -318,28 +333,51 @@ pub fn input_for_key(key: Key, modifiers: Modifiers) -> Option<Input> {
         Key::ArrowUp => Input::Arrow {
             direction: Direction::Up,
             app,
+            mods,
         },
         Key::ArrowDown => Input::Arrow {
             direction: Direction::Down,
             app,
+            mods,
         },
         Key::ArrowLeft => Input::Arrow {
             direction: Direction::Left,
             app,
+            mods,
         },
         Key::ArrowRight => Input::Arrow {
             direction: Direction::Right,
             app,
+            mods,
         },
-        Key::Home => Input::Home,
-        Key::End => Input::End,
+        Key::Home => Input::Home { app, mods },
+        Key::End => Input::End { app, mods },
         Key::PageUp => Input::PageUp,
         Key::PageDown => Input::PageDown,
         Key::Delete => Input::Delete,
         Key::Insert => Input::Insert,
+        // Above F12 a key is not a function key any more but a macro the window
+        // manager has already claimed; the terminal has nothing to say about it.
+        Key::F1 => function(1, mods),
+        Key::F2 => function(2, mods),
+        Key::F3 => function(3, mods),
+        Key::F4 => function(4, mods),
+        Key::F5 => function(5, mods),
+        Key::F6 => function(6, mods),
+        Key::F7 => function(7, mods),
+        Key::F8 => function(8, mods),
+        Key::F9 => function(9, mods),
+        Key::F10 => function(10, mods),
+        Key::F11 => function(11, mods),
+        Key::F12 => function(12, mods),
         _ => return None,
     };
     Some(input)
+}
+
+/// One numbered function key with its modifiers.
+fn function(number: u8, mods: Mods) -> Input {
+    Input::Function { number, mods }
 }
 
 /// The control byte a `Ctrl` key press stands for, if it has one.
@@ -385,21 +423,42 @@ mod tests {
 
     #[test]
     fn the_arrows_are_escape_sequences() {
-        let up = input_for_key(Key::ArrowUp, Modifiers::NONE).unwrap();
+        let up = input_for_key(Key::ArrowUp, Modifiers::NONE, false).unwrap();
         assert_eq!(up.bytes(), b"\x1b[A".to_vec());
     }
 
     #[test]
-    fn control_turns_an_arrow_into_the_application_variant() {
-        let up = input_for_key(Key::ArrowUp, Modifiers::CTRL).unwrap();
-        assert_eq!(up.bytes(), b"\x1bOA".to_vec());
+    fn a_program_that_asked_for_the_application_mode_gets_the_other_form() {
+        // `mc` and `vim` say `smkx`; after that the arrows are `ESC O X`, and an
+        // `ESC [ X` is silently ignored by them - the bug this test holds.
+        let down = input_for_key(Key::ArrowDown, Modifiers::NONE, true).unwrap();
+        assert_eq!(down.bytes(), b"\x1bOB".to_vec());
+        let home = input_for_key(Key::Home, Modifiers::NONE, true).unwrap();
+        assert_eq!(home.bytes(), b"\x1bOH".to_vec());
+    }
+
+    #[test]
+    fn control_no_longer_means_the_application_mode() {
+        // It never did: the mode belongs to the program, not to a modifier.
+        let up = input_for_key(Key::ArrowUp, Modifiers::CTRL, false).unwrap();
+        assert_eq!(up.bytes(), b"\x1b[1;5A".to_vec());
+    }
+
+    #[test]
+    fn the_function_keys_reach_the_shell() {
+        let f3 = input_for_key(Key::F3, Modifiers::NONE, true).unwrap();
+        assert_eq!(f3.bytes(), b"\x1bOR".to_vec());
+        let f10 = input_for_key(Key::F10, Modifiers::NONE, true).unwrap();
+        assert_eq!(f10.bytes(), b"\x1b[21~".to_vec());
+        let shift_f1 = input_for_key(Key::F1, Modifiers::SHIFT, true).unwrap();
+        assert_eq!(shift_f1.bytes(), b"\x1b[1;2P".to_vec());
     }
 
     #[test]
     fn shift_tab_goes_backwards() {
-        let back = input_for_key(Key::Tab, Modifiers::SHIFT).unwrap();
+        let back = input_for_key(Key::Tab, Modifiers::SHIFT, false).unwrap();
         assert_eq!(back.bytes(), b"\x1b[Z".to_vec());
-        let forward = input_for_key(Key::Tab, Modifiers::NONE).unwrap();
+        let forward = input_for_key(Key::Tab, Modifiers::NONE, false).unwrap();
         assert_eq!(forward, Input::Tab);
     }
 
@@ -417,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_plain_letter_is_not_a_key_press_the_terminal_maps() {
-        assert!(input_for_key(Key::A, Modifiers::NONE).is_none());
+        assert!(input_for_key(Key::A, Modifiers::NONE, false).is_none());
     }
 }
 

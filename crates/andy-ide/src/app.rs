@@ -139,7 +139,7 @@ impl App {
         // The terminal takes its keys out of the event queue **before** the editor is
         // drawn: otherwise the same keystroke is typed into the open file as well.
         if self.state.terminal.focused {
-            let bytes = crate::ui::terminal::Terminal::take_keys(ui);
+            let bytes = self.state.terminal.take_keys(ui);
             if !bytes.is_empty() {
                 let _ = self.state.terminal.write(&bytes);
             }
