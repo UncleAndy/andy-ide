@@ -61,6 +61,23 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             if response.clicked() || response.dragged() {
                 response.request_focus();
             }
+
+            // egui turns arrow keys and Tab into focus navigation unless the
+            // focused widget claims them, so the editor claims every key it
+            // handles. Without this, Up/Down jump between panels.
+            if response.has_focus() {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        response.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        },
+                    );
+                });
+            }
             // Typing should work as soon as the editor is on screen.
             if !response.has_focus() && ui.memory(|memory| memory.focused().is_none()) {
                 response.request_focus();

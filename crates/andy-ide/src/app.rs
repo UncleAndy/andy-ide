@@ -620,3 +620,142 @@ mod autosave_tests {
         assert!(!text.contains("null"), "the layout has no NaN rectangles");
     }
 }
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new(lines: usize) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            let text: String = (0..lines).map(|n| format!("line number {n}\n")).collect();
+            std::fs::write(project.path().join("a.rs"), text).unwrap();
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            app.state.open_file(std::path::Path::new("a.rs"));
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+        }
+
+        fn click_in_text(&mut self) {
+            let at = egui::pos2(320.0, 150.0);
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn key(&mut self, key: egui::Key) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn caret_line(&self) -> usize {
+            self.app.state.active_buffer().unwrap().line_col().0
+        }
+
+        fn focused(&self) -> Option<egui::Id> {
+            self.ctx.memory(|memory| memory.focused())
+        }
+    }
+
+    /// The arrow keys must move the caret, not the keyboard focus between panels.
+    #[test]
+    fn arrow_up_moves_the_caret_and_keeps_the_focus() {
+        let mut harness = Harness::new(30);
+        harness.click_in_text();
+        let focus_before = harness.focused();
+        assert!(focus_before.is_some(), "the editor never took focus");
+
+        harness.key(egui::Key::ArrowDown);
+        let after_down = harness.caret_line();
+        assert!(after_down > 0, "arrow down did not move the caret");
+
+        harness.key(egui::Key::ArrowUp);
+        assert_eq!(
+            harness.caret_line(),
+            after_down - 1,
+            "arrow up moved to line {} instead of {}",
+            harness.caret_line(),
+            after_down - 1
+        );
+        assert_eq!(
+            harness.focused(),
+            focus_before,
+            "arrow keys moved the focus"
+        );
+    }
+
+    #[test]
+    fn arrow_left_and_right_stay_inside_the_editor() {
+        let mut harness = Harness::new(10);
+        harness.click_in_text();
+        let focus_before = harness.focused();
+
+        let (line, col) = harness.app.state.active_buffer().unwrap().line_col();
+
+        harness.key(egui::Key::ArrowRight);
+        harness.key(egui::Key::ArrowRight);
+        harness.key(egui::Key::ArrowLeft);
+
+        assert_eq!(
+            harness.focused(),
+            focus_before,
+            "arrow keys moved the focus"
+        );
+        let (after_line, after_col) = harness.app.state.active_buffer().unwrap().line_col();
+        assert_eq!(after_line, line);
+        assert_eq!(after_col, col + 1);
+    }
+}
