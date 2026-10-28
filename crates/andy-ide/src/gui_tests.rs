@@ -2386,7 +2386,7 @@ mod the_terminal_selection {
         let (from, to) = (at(&gui, rect, 2, row), at(&gui, rect, 6, row));
         drag(&mut gui, from, to, true);
         assert!(
-            gui.app().state.terminal.selection.is_some(),
+            gui.app().state.terminal.selection().is_some(),
             "shift+drag selected nothing"
         );
         assert_eq!(
@@ -2669,6 +2669,138 @@ mod the_terminal_paste_chord {
         wait_until(&mut gui, "the pasted command to run", |gui| {
             gui.app().state.terminal.contents().contains("42")
         });
+        gui.app_mut().state.terminal.restart();
+    }
+}
+
+/// More than one shell in the panel: a strip of sessions above the screen.
+mod the_terminal_sessions {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn open_terminal(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        click_grid(gui, rect);
+        rect
+    }
+
+    /// A click in the middle of the screen, which also takes the keyboard.
+    fn click_grid(gui: &mut Gui, rect: egui::Rect) {
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+    }
+
+    fn run(gui: &mut Gui, command: &str) {
+        gui.harness.event(egui::Event::Text(format!("{command}\n")));
+        gui.settle();
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    fn press(gui: &mut Gui, label: &str) {
+        gui.harness.get_by_label(label).click();
+        gui.settle();
+    }
+
+    #[test]
+    fn the_plus_opens_a_second_shell_of_its_own() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        assert_eq!(gui.app().state.terminal.pane_count(), 1);
+        run(&mut gui, "echo FIRST-MARK");
+        wait_until(&mut gui, "the first shell to answer", |gui| {
+            gui.app().state.terminal.contents().contains("FIRST-MARK")
+        });
+
+        press(&mut gui, "+");
+        assert_eq!(
+            gui.app().state.terminal.pane_count(),
+            2,
+            "the plus did not open a session"
+        );
+        assert!(
+            gui.harness.query_by_label("Terminal 2").is_some(),
+            "the second session has no tab"
+        );
+        assert!(
+            !gui.app().state.terminal.contents().contains("FIRST-MARK"),
+            "the new session shows the old one's screen"
+        );
+
+        // Its own shell, in its own state.
+        click_grid(&mut gui, rect);
+        run(&mut gui, "echo SECOND-MARK");
+        wait_until(&mut gui, "the second shell to answer", |gui| {
+            gui.app().state.terminal.contents().contains("SECOND-MARK")
+        });
+
+        press(&mut gui, "Terminal 1");
+        assert_eq!(gui.app().state.terminal.active_pane(), 0);
+        assert!(
+            gui.app().state.terminal.contents().contains("FIRST-MARK"),
+            "the first session lost its screen"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_cross_closes_a_session_and_its_shell() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        open_terminal(&mut gui);
+        press(&mut gui, "+");
+        assert_eq!(gui.app().state.terminal.pane_count(), 2);
+
+        // The cross of the first session is the first one on the strip.
+        let crosses = gui.harness.query_all_by_label("×").count();
+        assert_eq!(crosses, 2, "every session needs its cross");
+        gui.harness
+            .query_all_by_label("×")
+            .next()
+            .expect("a cross")
+            .click();
+        gui.settle();
+        assert_eq!(gui.app().state.terminal.pane_count(), 1);
+        assert_eq!(gui.app().state.terminal.active_pane(), 0);
+        assert!(
+            gui.harness.query_by_label("Terminal 2").is_none(),
+            "the closed session still has a tab"
+        );
+        assert!(
+            gui.harness.query_by_label("Terminal 1").is_some(),
+            "the remaining session lost its tab"
+        );
         gui.app_mut().state.terminal.restart();
     }
 }

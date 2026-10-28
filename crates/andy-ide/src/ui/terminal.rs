@@ -11,9 +11,45 @@ use ide_term::Session;
 use ide_term::keys::{Direction, Input, Mods};
 use ide_term::mouse;
 
+/// One session with everything that belongs to it alone.
+///
+/// Two shells on screen must not share a selection, a pointer position or a scroll
+/// remainder, or clicking in one would extend the highlight in the other.
+struct Pane {
+    session: Session,
+    /// What the tab says.
+    title: String,
+    /// The text the user has picked out with the mouse, if any.
+    selection: Option<Selection>,
+    /// Whether a drag is in progress, so a moving pointer keeps extending it.
+    dragging: bool,
+    /// The cell the pointer was over last frame, so a movement is reported once
+    /// rather than sixty times a second.
+    mouse_cell: Option<(u16, u16)>,
+    /// Scrolling arrives in pixels and is reported in notches; the remainder is
+    /// kept here so a slow wheel is not lost.
+    scroll_left: f32,
+}
+
+impl Pane {
+    fn new(session: Session, title: String) -> Self {
+        Self {
+            session,
+            title,
+            selection: None,
+            dragging: false,
+            mouse_cell: None,
+            scroll_left: 0.0,
+        }
+    }
+}
+
 /// A terminal tab: one session, or the reason it could not start.
 pub struct Terminal {
-    session: Option<Session>,
+    /// The sessions, in the order of their tabs.
+    panes: Vec<Pane>,
+    /// Which of them is in front.
+    active: usize,
     pub error: Option<String>,
     cols: u16,
     rows: u16,
@@ -27,16 +63,6 @@ pub struct Terminal {
     pub shown: bool,
     /// Where the panel was last drawn, for the tests that click it.
     pub shown_rect: Option<egui::Rect>,
-    /// The text the user has picked out with the mouse, if any.
-    pub selection: Option<Selection>,
-    /// Whether a drag is in progress, so a moving pointer keeps extending it.
-    dragging: bool,
-    /// The cell the pointer was over last frame, so a movement is reported once
-    /// rather than sixty times a second.
-    mouse_cell: Option<(u16, u16)>,
-    /// Scrolling arrives in pixels and is reported in notches; the remainder is
-    /// kept here so a slow wheel is not lost.
-    scroll_left: f32,
 }
 
 /// The colour under selected cells.
@@ -82,33 +108,89 @@ impl Default for Terminal {
 impl Terminal {
     pub fn new() -> Self {
         Self {
-            session: None,
+            panes: Vec::new(),
+            active: 0,
             error: None,
             cols: 80,
             rows: 24,
             focused: false,
             shown: false,
             shown_rect: None,
-            selection: None,
-            dragging: false,
-            mouse_cell: None,
-            scroll_left: 0.0,
         }
+    }
+
+    /// The session in front.
+    fn pane(&self) -> Option<&Pane> {
+        self.panes.get(self.active)
+    }
+
+    fn pane_mut(&mut self) -> Option<&mut Pane> {
+        self.panes.get_mut(self.active)
     }
 
     /// Starts the shell once, at the size the panel had room for.
     pub fn ensure_started(&mut self, cols: u16, rows: u16) {
-        if self.session.is_some() || self.error.is_some() {
+        if !self.panes.is_empty() || self.error.is_some() {
             return;
         }
-        match Session::shell(cols, rows) {
+        self.cols = cols.max(1);
+        self.rows = rows.max(1);
+        self.new_pane();
+    }
+
+    /// Opens another session and puts it in front.
+    ///
+    /// A second shell is a second `Session`, not a second view of the first: it has
+    /// its own process, its own screen and its own selection.
+    pub fn new_pane(&mut self) {
+        match Session::shell(self.cols, self.rows) {
             Ok(session) => {
-                self.session = Some(session);
-                self.cols = cols.max(1);
-                self.rows = rows.max(1);
+                // Numbered from the start: the dock tab is called `Terminal`, and two
+                // things with one name cannot be told apart by the tests or the eye.
+                let title = String::new();
+                self.panes.push(Pane::new(session, title));
+                self.active = self.panes.len() - 1;
+                self.renumber();
+                self.error = None;
             }
             Err(error) => self.error = Some(format!("{error:#}")),
         }
+    }
+
+    /// Closes one session. Closing the last leaves the panel empty, and the next
+    /// frame starts a fresh shell.
+    pub fn close_pane(&mut self, index: usize) {
+        if index >= self.panes.len() {
+            return;
+        }
+        let mut pane = self.panes.remove(index);
+        pane.session.kill();
+        self.renumber();
+        if self.active > index {
+            self.active -= 1;
+        }
+        if self.active >= self.panes.len() {
+            self.active = self.panes.len().saturating_sub(1);
+        }
+    }
+
+    /// Numbers the tabs by where they stand, so closing the first leaves `Terminal 1`
+    /// rather than a lone `Terminal 2`.
+    fn renumber(&mut self) {
+        for (index, pane) in self.panes.iter_mut().enumerate() {
+            pane.title = format!("Terminal {}", index + 1);
+        }
+    }
+
+    /// How many sessions the panel holds, and which one is in front.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pane_count(&self) -> usize {
+        self.panes.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn active_pane(&self) -> usize {
+        self.active
     }
 
     /// The bytes typed this frame, taken out of egui's events.
@@ -196,9 +278,57 @@ impl Terminal {
         taken
     }
 
+    /// The row of sessions: one button each, and the one that opens another.
+    ///
+    /// It sits above the screen rather than beside it, so the screen keeps the full
+    /// width — the same reason the bottom of the window is one strip of tabs.
+    fn session_strip(&mut self, ui: &mut Ui) {
+        let mut choose = None;
+        let mut close = None;
+        let mut open = false;
+        ui.horizontal(|ui| {
+            for (index, pane) in self.panes.iter().enumerate() {
+                let title = egui::RichText::new(&pane.title).monospace();
+                let title = if index == self.active {
+                    title.strong()
+                } else {
+                    title
+                };
+                if ui.selectable_label(index == self.active, title).clicked() {
+                    choose = Some(index);
+                }
+                if ui
+                    .add(egui::Button::new("×").small().frame(false))
+                    .on_hover_text("close this session")
+                    .clicked()
+                {
+                    close = Some(index);
+                }
+                ui.separator();
+            }
+            if ui
+                .add(egui::Button::new("+").small())
+                .on_hover_text("open another session")
+                .clicked()
+            {
+                open = true;
+            }
+        });
+        if let Some(index) = choose {
+            self.active = index;
+        }
+        if let Some(index) = close {
+            self.close_pane(index);
+        }
+        if open {
+            self.new_pane();
+        }
+    }
+
     /// Draws the screen and lets the user type into it.
     pub fn show(&mut self, ui: &mut Ui) {
         self.shown = true;
+        self.session_strip(ui);
         let width = ui.available_width();
         let height = ui.available_height();
         let font = egui::FontId::monospace(13.0);
@@ -212,8 +342,8 @@ impl Terminal {
         let rows = (height / cell_height).floor().max(1.0) as u16;
         self.ensure_started(cols, rows);
         if (cols, rows) != (self.cols, self.rows) {
-            if let Some(session) = self.session.as_mut() {
-                let _ = session.resize(cols, rows);
+            for pane in &mut self.panes {
+                let _ = pane.session.resize(cols, rows);
             }
             self.cols = cols;
             self.rows = rows;
@@ -238,7 +368,7 @@ impl Terminal {
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(16, 18, 20));
         // A shell that has finished is worth saying out loud; otherwise the tab looks
         // frozen rather than done.
-        if self.session.is_some() && !self.is_alive() {
+        if !self.panes.is_empty() && !self.is_alive() {
             painter.text(
                 rect.left_bottom() + egui::vec2(6.0, -18.0),
                 egui::Align2::LEFT_BOTTOM,
@@ -257,10 +387,11 @@ impl Terminal {
             );
             return;
         }
-        let Some(session) = self.session.as_ref() else {
+        let Some(pane) = self.pane() else {
             return;
         };
-        let selection = self.selection;
+        let session = &pane.session;
+        let selection = pane.selection;
         session.with_screen(|screen| {
             for row in 0..rows {
                 for col in 0..cols {
@@ -358,13 +489,15 @@ impl Terminal {
             )
         });
         let wants_mouse = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.mouse_protocol().enabled);
+            .pane()
+            .is_some_and(|pane| pane.session.mouse_protocol().enabled);
         let selecting = shift || !wants_mouse;
+        let Some(pane) = self.pane_mut() else {
+            return;
+        };
 
         if released {
-            self.dragging = false;
+            pane.dragging = false;
         }
         let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
             return;
@@ -373,30 +506,37 @@ impl Terminal {
 
         if pressed {
             if selecting {
-                self.selection = Some(Selection {
+                pane.selection = Some(Selection {
                     anchor: target,
                     head: target,
                 });
-                self.dragging = true;
+                pane.dragging = true;
             } else {
                 // A plain click belongs to the program; the old selection goes.
-                self.selection = None;
-                self.dragging = false;
+                pane.selection = None;
+                pane.dragging = false;
             }
             return;
         }
-        if self.dragging
+        if pane.dragging
             && down
-            && let Some(selection) = self.selection.as_mut()
+            && let Some(selection) = pane.selection.as_mut()
         {
             selection.head = target;
         }
     }
 
+    /// The text the user has picked out, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn selection(&self) -> Option<Selection> {
+        self.pane().and_then(|pane| pane.selection)
+    }
+
     /// The selected text, one line per row, trailing blanks cut.
     pub fn selected_text(&self) -> Option<String> {
-        let selection = self.selection?;
-        let session = self.session.as_ref()?;
+        let pane = self.pane()?;
+        let selection = pane.selection?;
+        let session = &pane.session;
         let (start, end) = selection.ordered();
         let text = session.with_screen(|screen| {
             let (rows, cols) = screen.size();
@@ -437,11 +577,14 @@ impl Terminal {
     /// pointer. Nothing is sent when the program asked for nothing, or a click would
     /// leave junk at a shell prompt.
     fn forward_mouse(&mut self, ui: &Ui, rect: egui::Rect, cell: egui::Vec2, cols: u16, rows: u16) {
-        let Some(protocol) = self.session.as_ref().map(Session::mouse_protocol) else {
+        let Some(protocol) = self.pane().map(|pane| pane.session.mouse_protocol()) else {
+            return;
+        };
+        let Some(pane) = self.pane_mut() else {
             return;
         };
         if !protocol.enabled || cell.x <= 0.0 || cell.y <= 0.0 || cols == 0 || rows == 0 {
-            self.mouse_cell = None;
+            pane.mouse_cell = None;
             return;
         }
 
@@ -461,13 +604,13 @@ impl Terminal {
         // text. Programs know this as the shift override, and it is the only way to
         // copy a line out of `mc` or `vim`, which would otherwise eat every click.
         if modifiers.shift {
-            self.mouse_cell = None;
+            pane.mouse_cell = None;
             return;
         }
         let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
             // Out there the pointer is not our business, and a report about a cell
             // it is not over would be a lie.
-            self.mouse_cell = None;
+            pane.mouse_cell = None;
             return;
         };
         let (column, row) = Self::cell_at(rect, cell, pos, cols, rows);
@@ -509,7 +652,7 @@ impl Terminal {
 
         // Movement is reported where the program asked for it: on every cell change,
         // or while a button is held. Once per cell, not once per frame.
-        let moved = self.mouse_cell != Some((column, row));
+        let moved = pane.mouse_cell != Some((column, row));
         if moved {
             match held {
                 Some(button) if protocol.drag => events.push(mouse::Event::new(
@@ -525,20 +668,20 @@ impl Terminal {
                 None => {}
             }
         }
-        self.mouse_cell = Some((column, row));
+        pane.mouse_cell = Some((column, row));
 
         if scroll != 0.0 {
             // Scrolling comes in pixels; the program wants notches, and the remainder
             // is kept so a slow wheel is not lost.
             const NOTCH: f32 = 40.0;
-            self.scroll_left += scroll;
-            while self.scroll_left.abs() >= NOTCH {
-                let wheel = if self.scroll_left > 0.0 {
+            pane.scroll_left += scroll;
+            while pane.scroll_left.abs() >= NOTCH {
+                let wheel = if pane.scroll_left > 0.0 {
                     mouse::Wheel::Up
                 } else {
                     mouse::Wheel::Down
                 };
-                self.scroll_left -= NOTCH * self.scroll_left.signum();
+                pane.scroll_left -= NOTCH * pane.scroll_left.signum();
                 events.push(mouse::Event::new(
                     mouse::Action::Wheel(wheel),
                     column,
@@ -555,32 +698,32 @@ impl Terminal {
         for event in events {
             bytes.extend(mouse::bytes(event, protocol.encoding));
         }
-        let _ = self.write(&bytes);
+        let _ = pane.session.write(&bytes);
     }
 
-    /// Sends bytes to the shell, as typing does.
+    /// Sends bytes to the shell in front, as typing does.
     pub fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        match self.session.as_mut() {
-            Some(session) => session.write(bytes),
+        match self.pane_mut() {
+            Some(pane) => pane.session.write(bytes),
             None => Ok(()),
         }
     }
 
-    /// Ends the session; the next frame starts a new one.
+    /// Ends every session; the next frame starts a fresh one.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn restart(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            session.kill();
+        for mut pane in self.panes.drain(..) {
+            pane.session.kill();
         }
+        self.active = 0;
         self.error = None;
         self.focused = false;
     }
 
     /// Whether the program in the terminal asked for the application cursor keys.
     pub fn application_cursor(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(ide_term::Session::application_cursor)
+        self.pane()
+            .is_some_and(|pane| pane.session.application_cursor())
     }
 
     /// The grid the panel is drawing: columns and rows of cells.
@@ -592,22 +735,20 @@ impl Terminal {
     /// Whether the program in the terminal asked for mouse reports.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn mouse_enabled(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| session.mouse_protocol().enabled)
+        self.pane()
+            .is_some_and(|pane| pane.session.mouse_protocol().enabled)
     }
 
     /// What the screen holds, for tests and for the clipboard.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn contents(&self) -> String {
-        self.session
-            .as_ref()
-            .map(Session::contents)
+        self.pane()
+            .map(|pane| pane.session.contents())
             .unwrap_or_default()
     }
 
     pub fn is_alive(&self) -> bool {
-        self.session.as_ref().is_some_and(Session::is_alive)
+        self.pane().is_some_and(|pane| pane.session.is_alive())
     }
 }
 
@@ -956,5 +1097,66 @@ mod selection {
         assert!(picked.contains(2, 3), "the head itself");
         assert!(!picked.contains(3, 3), "the cell past the head");
         assert!(!picked.contains(0, 4), "the row after the head");
+    }
+}
+
+#[cfg(test)]
+mod panes {
+    use super::Terminal;
+    use std::time::{Duration, Instant};
+
+    fn wait_for(terminal: &Terminal, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if terminal.contents().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        false
+    }
+
+    #[test]
+    fn a_second_session_is_a_second_shell() {
+        let mut terminal = Terminal::new();
+        terminal.ensure_started(80, 24);
+        terminal.write(b"echo FIRST-MARK\n").unwrap();
+        assert!(
+            wait_for(&terminal, "FIRST-MARK"),
+            "the first shell said nothing"
+        );
+
+        terminal.new_pane();
+        assert_eq!(terminal.pane_count(), 2);
+        assert_eq!(terminal.active_pane(), 1);
+        assert!(
+            !terminal.contents().contains("FIRST-MARK"),
+            "the second session shows the first one's screen"
+        );
+        terminal.write(b"echo SECOND-MARK\n").unwrap();
+        assert!(
+            wait_for(&terminal, "SECOND-MARK"),
+            "the second shell said nothing"
+        );
+
+        // Going back finds the first session as it was left.
+        terminal.close_pane(1);
+        assert_eq!(terminal.pane_count(), 1);
+        assert!(
+            wait_for(&terminal, "FIRST-MARK"),
+            "the first session lost its screen"
+        );
+        terminal.restart();
+    }
+
+    #[test]
+    fn closing_the_last_session_leaves_the_panel_empty() {
+        let mut terminal = Terminal::new();
+        terminal.ensure_started(80, 24);
+        assert_eq!(terminal.pane_count(), 1);
+        terminal.close_pane(0);
+        assert_eq!(terminal.pane_count(), 0);
+        assert_eq!(terminal.contents(), "");
+        terminal.restart();
     }
 }
