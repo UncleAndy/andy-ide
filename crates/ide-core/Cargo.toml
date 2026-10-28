@@ -10,6 +10,7 @@ description = "Project model, configuration and sessions for andy-ide"
 [dependencies]
 anyhow.workspace = true
 ignore = "0.4.34"
+nucleo = "0.5"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

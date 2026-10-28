@@ -5,11 +5,13 @@
 pub mod config;
 pub mod fs;
 pub mod project;
+pub mod quickopen;
 pub mod session;
 pub mod tabs;
 
 pub use config::{Config, Theme};
 pub use project::{Entry, EntryKind, Project, TreeOptions};
+pub use quickopen::{FileIndex, SearchHit};
 pub use session::{RECENT_LIMIT, Recent, Session, TabState};
 pub use tabs::{TabItem, Tabs};
 
