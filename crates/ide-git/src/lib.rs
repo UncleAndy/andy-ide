@@ -15,7 +15,7 @@ use gix::status::index_worktree::Item as WorktreeItem;
 pub mod diff;
 pub mod log;
 pub mod ops;
-pub use diff::{FileDiff, Side};
+pub use diff::{FileDiff, LineMark, MarkKind, Side};
 use gix_status::index_as_worktree::{Change as WorktreeChange, EntryStatus};
 pub use log::Commit;
 

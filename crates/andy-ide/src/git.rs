@@ -4,10 +4,11 @@
 //! a status walk is not free, and a panel that runs it on every frame would eat the
 //! idle of an application whose whole point is to stay responsive.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
-use ide_git::{Area, Branch, Change, Commit, Repo};
+use ide_git::{Area, Branch, Change, Commit, LineMark, Repo};
 
 /// How often the panels re-read the repository while they are on screen.
 pub const REFRESH: Duration = Duration::from_millis(1200);
@@ -15,6 +16,17 @@ pub const REFRESH: Duration = Duration::from_millis(1200);
 /// How much history the panel keeps: enough to find yesterday's commit, not the
 /// whole of a decade-old repository.
 pub const HISTORY: usize = 200;
+
+/// The marks of one file, and the timestamps they were computed against.
+///
+/// Two stamps, because a file's margin changes when the file is saved and again when
+/// it is staged: the index has a timestamp of its own, and either one moving makes the
+/// marks stale.
+struct MarksEntry {
+    file: Option<SystemTime>,
+    index: Option<SystemTime>,
+    marks: Vec<LineMark>,
+}
 
 /// One diff, ready to be drawn — a working change or a commit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -60,6 +72,8 @@ pub struct GitState {
     pub outcome: Option<String>,
     /// The root this state belongs to, so a second project re-opens it.
     root: Option<std::path::PathBuf>,
+    /// Margin marks per file, with the timestamps they were computed at.
+    marks: std::collections::HashMap<PathBuf, MarksEntry>,
     last_read: Option<Instant>,
 }
 
@@ -201,6 +215,60 @@ impl GitState {
                 self.diff_error = Some(format!("{error}"));
             }
         }
+    }
+
+    /// The margin marks of a file the editor has open, computed once per save.
+    ///
+    /// The path is the one a tab carries — relative to the project — and the repository
+    /// may sit above the project, so the two are joined before asking.
+    pub fn marks(&mut self, path: &Path) -> &[LineMark] {
+        let (file, index) = self.stamps(path);
+        let fresh = self
+            .marks
+            .get(path)
+            .is_some_and(|entry| entry.file == file && entry.index == index);
+        if !fresh {
+            let marks = match (&self.repo, self.repo_relative(path)) {
+                (Some(repo), Some(relative)) => repo.changed_lines(&relative).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            self.marks
+                .insert(path.to_path_buf(), MarksEntry { file, index, marks });
+        }
+        self.marks
+            .get(path)
+            .map(|entry| entry.marks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The stamps the marks are computed against: the file's and the index's.
+    fn stamps(&self, path: &Path) -> (Option<SystemTime>, Option<SystemTime>) {
+        let Some(root) = &self.root else {
+            return (None, None);
+        };
+        let modified = |path: &Path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        };
+        let file = modified(&root.join(path));
+        let index = self
+            .repo
+            .as_ref()
+            .and_then(Repo::root)
+            .map(|repo_root| modified(&repo_root.join(".git/index")))
+            .unwrap_or(None);
+        (file, index)
+    }
+
+    /// A tab's path, as the repository spells it.
+    fn repo_relative(&self, path: &Path) -> Option<PathBuf> {
+        let root = self.root.as_ref()?;
+        let repo_root = self.repo.as_ref()?.root()?;
+        let full = root.join(path);
+        let full = full.canonicalize().unwrap_or(full);
+        let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+        full.strip_prefix(&repo_root).ok().map(Path::to_path_buf)
     }
 
     /// The branch name to put in the title, when there is one.

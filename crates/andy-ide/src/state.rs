@@ -1557,7 +1557,7 @@ impl AppState {
     }
 
     /// Puts the caret at a byte offset of a tab, opening it first if needed.
-    fn place_caret(&mut self, rel: &Path, byte: usize) {
+    pub(crate) fn place_caret(&mut self, rel: &Path, byte: usize) {
         let Some(buffer_id) = self
             .tabs
             .items()

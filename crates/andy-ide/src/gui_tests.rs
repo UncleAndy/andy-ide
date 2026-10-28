@@ -3240,6 +3240,56 @@ mod the_git_panel {
         assert_eq!(worktree, vec!["b.txt"], "the other file was staged too");
     }
 
+    #[test]
+    fn a_changed_line_is_marked_in_the_margin() {
+        let mut gui = managed(&[("a.txt", "one\ntwo\nthree\n")], Some("a.txt"));
+        assert!(
+            gui.app_mut().state.git.marks(Path::new("a.txt")).is_empty(),
+            "a clean file has marks"
+        );
+
+        // The margin compares the index with the file on disk, so writing the file is
+        // enough: no save, no editor, exactly what happens when another program
+        // touches the file.
+        std::fs::write(gui._project.path().join("a.txt"), "one\nTWO\nthree\n").unwrap();
+
+        let marks = gui.app_mut().state.git.marks(Path::new("a.txt")).to_vec();
+        assert_eq!(
+            marks,
+            vec![ide_git::LineMark {
+                line: 1,
+                kind: ide_git::MarkKind::Modified
+            }],
+            "the changed line is not marked"
+        );
+    }
+
+    #[test]
+    fn staging_takes_the_marks_away_only_when_the_index_catches_up() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let file = gui._project.path().join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        assert_eq!(
+            gui.app_mut().state.git.marks(Path::new("a.txt")).to_vec(),
+            vec![ide_git::LineMark {
+                line: 1,
+                kind: ide_git::MarkKind::Added
+            }],
+            "the added line is not marked"
+        );
+
+        // Staging makes the file and the index agree, so the margin goes quiet even
+        // though nothing is committed yet.
+        show_panel(&mut gui);
+        gui.harness.get_by_label("Stage all").click();
+        gui.settle();
+
+        assert!(
+            gui.app_mut().state.git.marks(Path::new("a.txt")).is_empty(),
+            "the marks outlived the staging"
+        );
+    }
+
     /// The branch names the panel knows, in the order the menu shows them.
     fn branch_names(gui: &Gui) -> Vec<String> {
         gui.app()

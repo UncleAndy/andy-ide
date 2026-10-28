@@ -35,10 +35,19 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     });
 
     let palette = Palette::for_theme(state.config.theme);
+    // The margin marks are read before the buffer is borrowed: both live in the state,
+    // and a file being edited has both.
+    let marks = match state.active_buffer() {
+        Some(buffer) => {
+            let path = buffer.path.clone();
+            state.git.marks(&path).to_vec()
+        }
+        None => Vec::new(),
+    };
     let split = state.preview_open && markdown;
     if !split {
         let changed = match state.active_buffer_mut() {
-            Some(buffer) => view::ui(ui, buffer, palette),
+            Some(buffer) => view::ui(ui, buffer, palette, &marks),
             None => false,
         };
         if changed {
@@ -65,7 +74,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 if let Some(buffer) = state.active_buffer_mut() {
-                    changed = view::ui(ui, buffer, palette);
+                    changed = view::ui(ui, buffer, palette, &marks);
                 }
             },
         );

@@ -76,7 +76,10 @@ exactly as they do on the command line, and a hook's refusal is shown in its own
 words. `Show history` lists the last two hundred commits newest first; `Enter` on one
 of them shows what it changed, in the same `Diff` tab. The `Branches` menu switches
 `HEAD` and starts new ones — through the real `git switch`, so a dirty tree that would
-lose work is refused by `git` itself instead of by a guess.
+lose work is refused by `git` itself instead of by a guess. In the editor, the margin of
+every open file carries a three-pixel stripe beside each line that the index does not
+have yet — green for a line the file added, blue for one it changed, red where a line
+went away — and staging a file takes the stripes away.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).

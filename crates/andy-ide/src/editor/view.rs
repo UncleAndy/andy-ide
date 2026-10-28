@@ -12,6 +12,7 @@ use egui::{
     TextStyle, Ui, Vec2,
 };
 use ide_core::Theme;
+use ide_git::{LineMark, MarkKind};
 use ide_syntax::{HighlightSpan, TokenKind};
 
 use super::EditorBuffer;
@@ -40,6 +41,11 @@ pub struct Palette {
     pub gutter_bg: Color32,
     pub gutter_fg: Color32,
     pub gutter_fg_active: Color32,
+    /// The margin stripes: a line the index does not have, one it has differently,
+    /// and one it has and the file no longer does.
+    pub mark_added: Color32,
+    pub mark_modified: Color32,
+    pub mark_deleted: Color32,
     pub foreground: Color32,
 }
 
@@ -51,6 +57,9 @@ impl Palette {
         gutter_bg: Color32::from_rgb(30, 30, 30),
         gutter_fg: Color32::from_rgb(110, 110, 110),
         gutter_fg_active: Color32::from_rgb(200, 200, 200),
+        mark_added: Color32::from_rgb(78, 154, 92),
+        mark_modified: Color32::from_rgb(86, 132, 196),
+        mark_deleted: Color32::from_rgb(196, 84, 84),
         foreground: Color32::from_rgb(212, 212, 212),
     };
 
@@ -61,6 +70,9 @@ impl Palette {
         gutter_bg: Color32::from_rgb(240, 240, 240),
         gutter_fg: Color32::from_rgb(140, 140, 140),
         gutter_fg_active: Color32::from_rgb(40, 40, 40),
+        mark_added: Color32::from_rgb(40, 130, 60),
+        mark_modified: Color32::from_rgb(40, 90, 170),
+        mark_deleted: Color32::from_rgb(180, 50, 50),
         foreground: Color32::from_rgb(30, 30, 30),
     };
 
@@ -109,7 +121,7 @@ impl Palette {
 }
 
 /// Draws the buffer and handles its input. Returns true when the text changed.
-pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
+pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[LineMark]) -> bool {
     let font = TextStyle::Monospace.resolve(ui.style());
     let (char_w, row_h) = ui
         .ctx()
@@ -259,6 +271,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 row_h,
                 first_line,
                 last_line,
+                marks,
             );
             let paint_ctx = || PaintCtx {
                 painter: &painter,
@@ -438,9 +451,29 @@ fn paint_gutter(
     row_h: f32,
     first_line: usize,
     last_line: usize,
+    marks: &[LineMark],
 ) {
     let gutter = Rect::from_min_max(origin, Pos2::new(origin.x + gutter_width, rect.max.y));
     painter.rect_filled(gutter, CornerRadius::ZERO, palette.gutter_bg);
+
+    // The margin marks are drawn first, against the gutter background: a stripe of
+    // three pixels at the very edge, in the colours a diff would use.
+    for mark in marks {
+        if mark.line < first_line || mark.line >= last_line {
+            continue;
+        }
+        let y = origin.y + (mark.line as f32) * row_h;
+        let colour = match mark.kind {
+            MarkKind::Added => palette.mark_added,
+            MarkKind::Modified => palette.mark_modified,
+            MarkKind::Deleted => palette.mark_deleted,
+        };
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(origin.x, y), egui::vec2(3.0, row_h)),
+            CornerRadius::ZERO,
+            colour,
+        );
+    }
 
     let (caret_line, _) = buffer.line_col();
     let font = FontId::monospace(row_h * 0.72);

@@ -38,7 +38,42 @@ impl FileDiff {
     }
 }
 
+/// What the margin of the editor shows beside a line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MarkKind {
+    /// A line the file has and the index does not.
+    Added,
+    /// A line both have, with different text.
+    Modified,
+    /// A line the index has and the file no longer does. The mark sits on the line
+    /// that follows the place it used to be, as `git diff` prints it.
+    Deleted,
+}
+
+/// One mark in the margin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LineMark {
+    /// Zero-based, as the editor counts lines.
+    pub line: usize,
+    pub kind: MarkKind,
+}
+
 impl Repo {
+    /// The marks for the margin of the editor: what the file has and the index does
+    /// not, line by line.
+    ///
+    /// Compared against the index and not against `HEAD`: the margin answers "what of
+    /// this file is not committed yet", and a staged change is not yet committed
+    /// either.
+    pub fn changed_lines(&self, path: &Path) -> Result<Vec<LineMark>> {
+        let old = self.blob_in_index(path)?.unwrap_or_default();
+        let new = self.blob_on_disk(path)?.unwrap_or_default();
+        if is_binary(&old) || is_binary(&new) {
+            return Ok(Vec::new());
+        }
+        Ok(marks(&old, &new))
+    }
+
     /// The diff of one file, against the index or against `HEAD`.
     pub fn diff(&self, path: &Path, side: Side) -> Result<FileDiff> {
         let old = match side {
@@ -265,5 +300,144 @@ mod tests {
             .expect("a diff");
         assert!(!diff.text, "a binary file was taken for text");
         assert_eq!(diff.unified, "Binary file blob.bin");
+    }
+}
+
+/// Where the marks go, from a line diff of the two texts.
+///
+/// `similar` hands back one change per run of lines, and each run is turned into marks
+/// on the new numbering: a line that only the new text has is `Added`, a run that
+/// replaced an old one is `Modified` line by line, and a deletion is marked on the line
+/// that took its place — or on the last line, when the file ended there.
+fn marks(old: &[u8], new: &[u8]) -> Vec<LineMark> {
+    let old = String::from_utf8_lossy(old);
+    let new = String::from_utf8_lossy(new);
+    let diff = TextDiff::from_lines(&*old, &*new);
+    let new_len = new.lines().count();
+    let mut marks = Vec::new();
+
+    for op in diff.ops() {
+        let old_range = op.old_range();
+        let new_range = op.new_range();
+        match op.tag() {
+            similar::DiffTag::Equal => {}
+            similar::DiffTag::Insert => {
+                for line in new_range {
+                    marks.push(LineMark {
+                        line,
+                        kind: MarkKind::Added,
+                    });
+                }
+            }
+            similar::DiffTag::Delete => marks.push(LineMark {
+                line: new_range.start.min(new_len.saturating_sub(1)),
+                kind: MarkKind::Deleted,
+            }),
+            similar::DiffTag::Replace => {
+                for line in new_range.clone() {
+                    marks.push(LineMark {
+                        line,
+                        kind: MarkKind::Modified,
+                    });
+                }
+                // A replacement that removes more lines than it adds leaves the extra
+                // removals with nowhere to show; the last replaced line carries them.
+                if old_range.len() > new_range.len() {
+                    marks.push(LineMark {
+                        line: new_range.start.min(new_len.saturating_sub(1)),
+                        kind: MarkKind::Deleted,
+                    });
+                }
+            }
+        }
+    }
+
+    marks.sort_by_key(|mark| mark.line);
+    marks.dedup_by_key(|mark| mark.line);
+    marks
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+
+    fn kinds(source: &str) -> Vec<(usize, MarkKind)> {
+        marks(source.as_bytes(), source.as_bytes())
+            .into_iter()
+            .map(|mark| (mark.line, mark.kind))
+            .collect()
+    }
+
+    fn change(old: &str, new: &str) -> Vec<(usize, MarkKind)> {
+        marks(old.as_bytes(), new.as_bytes())
+            .into_iter()
+            .map(|mark| (mark.line, mark.kind))
+            .collect()
+    }
+
+    #[test]
+    fn an_unchanged_file_has_no_marks() {
+        assert_eq!(kinds("one\ntwo\n"), vec![]);
+    }
+
+    #[test]
+    fn a_changed_line_is_marked_where_it_is() {
+        assert_eq!(
+            change("one\ntwo\nthree\n", "one\nTWO\nthree\n"),
+            vec![(1, MarkKind::Modified)]
+        );
+    }
+
+    #[test]
+    fn an_added_line_is_marked() {
+        assert_eq!(
+            change("one\nthree\n", "one\ntwo\nthree\n"),
+            vec![(1, MarkKind::Added)]
+        );
+    }
+
+    #[test]
+    fn a_removed_line_is_marked_on_the_line_that_took_its_place() {
+        assert_eq!(
+            change("one\ntwo\nthree\n", "one\nthree\n"),
+            vec![(1, MarkKind::Deleted)]
+        );
+    }
+
+    #[test]
+    fn a_removed_last_line_is_marked_on_the_new_last_line() {
+        assert_eq!(change("one\ntwo\n", "one\n"), vec![(0, MarkKind::Deleted)]);
+    }
+
+    #[test]
+    fn marks_hold_the_work_tree_against_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git ran");
+            assert!(output.status.success(), "{args:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "a.txt"]);
+
+        let repo = Repo::discover(root).expect("the repository");
+        assert_eq!(
+            repo.changed_lines(Path::new("a.txt")).expect("marks"),
+            vec![]
+        );
+
+        std::fs::write(root.join("a.txt"), "one\nTWO\n").unwrap();
+        assert_eq!(
+            repo.changed_lines(Path::new("a.txt")).expect("marks"),
+            vec![LineMark {
+                line: 1,
+                kind: MarkKind::Modified
+            }]
+        );
     }
 }
