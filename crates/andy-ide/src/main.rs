@@ -57,7 +57,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "andy-ide",
+        "Andy IDE",
         options,
         Box::new(move |_cc| {
             Ok(Box::new(app::App::new(
