@@ -176,6 +176,9 @@ pub fn prompt_params(session: &str, text: &str) -> Value {
 pub enum Update {
     /// A piece of the agent's answer, to be appended as it arrives.
     Text(String),
+    /// A piece of the agent's reasoning: shown folded away, because it is the working
+    /// out and not the answer.
+    Thinking(String),
     /// A tool call the agent has started, changed or finished.
     ToolCall {
         /// The id the agent uses for it in later updates.
@@ -204,7 +207,15 @@ impl Update {
             .and_then(Value::as_str)
             .unwrap_or_default();
         match kind {
-            "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
+            "agent_thought_chunk" => {
+                let text = update
+                    .get("content")
+                    .and_then(|content| content.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                Update::Thinking(text.to_owned())
+            }
+            "agent_message_chunk" | "user_message_chunk" => {
                 let text = update
                     .get("content")
                     .and_then(|content| content.get("text"))

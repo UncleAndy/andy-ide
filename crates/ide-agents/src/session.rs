@@ -67,6 +67,10 @@ pub enum PermissionPolicy {
 pub enum Event {
     /// A piece of the answer, to append.
     Text(String),
+    /// A piece of the agent's reasoning, to be kept apart from the answer and folded
+    /// away: a person reading an answer wants the answer, and wants the reasoning to
+    /// be there when they ask for it.
+    Thinking(String),
     /// A tool call, started or finished.
     ToolCall {
         /// The agent's id for it.
@@ -506,6 +510,7 @@ impl Session {
                 let update = params.get("update")?;
                 match Update::from_value(update) {
                     Update::Text(text) => Some(Event::Text(text)),
+                    Update::Thinking(thought) => Some(Event::Thinking(thought)),
                     Update::ToolCall { id, title, status } => {
                         Some(Event::ToolCall { id, title, status })
                     }

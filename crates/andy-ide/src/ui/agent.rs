@@ -83,13 +83,23 @@ fn header(ui: &mut Ui, state: &mut AppState) {
 }
 
 /// Everything said so far, the newest at the bottom.
-fn transcript(ui: &mut Ui, state: &AppState) {
+///
+/// The answer is read as Markdown while it is still arriving: an answer that talks about
+/// code without a code block is an answer nobody wants to read twice, and waiting for the
+/// turn to end to render it would mean watching plain text turn into prose.
+///
+/// The reasoning is folded away behind one marker per stretch: it is how the answer was
+/// worked out, not the answer, and a panel that pours it into the same column makes the
+/// answer harder to find.
+fn transcript(ui: &mut Ui, state: &mut AppState) {
+    let lines = state.agent.transcript.clone();
+    let height = (ui.available_height() - 64.0).max(60.0);
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height(ui.available_height() - 64.0)
+        .max_height(height)
         .show(ui, |ui| {
-            for line in &state.agent.transcript {
+            for line in &lines {
                 match line {
                     Line::You(text) => {
                         ui.horizontal_wrapped(|ui| {
@@ -98,10 +108,22 @@ fn transcript(ui: &mut Ui, state: &AppState) {
                         });
                     }
                     Line::Agent(text) => {
-                        ui.horizontal_wrapped(|ui| {
+                        ui.horizontal(|ui| {
                             ui.strong("Agent");
-                            ui.label(text);
                         });
+                        egui_commonmark::CommonMarkViewer::new().show(
+                            ui,
+                            &mut state.commonmark,
+                            text,
+                        );
+                    }
+                    Line::Thinking(thought) => {
+                        egui::CollapsingHeader::new("Thinking…")
+                            .id_salt(("thinking", thought.len()))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.weak(thought);
+                            });
                     }
                     Line::Tool(text) => {
                         ui.weak(format!("  ↳ {text}"));

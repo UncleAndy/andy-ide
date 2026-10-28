@@ -64,8 +64,13 @@ fn main() {
                     .to_owned();
                 match text.trim() {
                     "hello" => {
+                        thought(&session, "pondering the greeting");
                         chunk(&session, "Hel");
                         chunk(&session, "lo");
+                        answer(id, json!({"stopReason": "end_turn"}));
+                    }
+                    "markdown" => {
+                        chunk(&session, "**bold** and `code`");
                         answer(id, json!({"stopReason": "end_turn"}));
                     }
                     "ask" => {
@@ -161,6 +166,21 @@ fn chunk(session: &str, text: &str) {
             "sessionId": session,
             "update": {
                 "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}
+            }
+        }
+    }));
+}
+
+/// One `session/update` notification carrying a piece of reasoning.
+fn thought(session: &str, text: &str) {
+    send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session,
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
                 "content": {"type": "text", "text": text}
             }
         }

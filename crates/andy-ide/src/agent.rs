@@ -20,6 +20,8 @@ pub enum Line {
     You(String),
     /// What the agent said, or is saying.
     Agent(String),
+    /// What the agent was working out on the way: folded away in the panel.
+    Thinking(String),
     /// A tool the agent ran, as it described it.
     Tool(String),
     /// Something the panel says on its own account.
@@ -264,6 +266,14 @@ impl AgentState {
                 self.busy = false;
             }
             Reply::Event(event) => match event {
+                AgentEvent::Thinking(thought) => {
+                    // One growing line per stretch of reasoning, like the answer below it.
+                    if let Some(Line::Thinking(said)) = self.transcript.last_mut() {
+                        said.push_str(&thought);
+                    } else {
+                        self.transcript.push(Line::Thinking(thought));
+                    }
+                }
                 AgentEvent::Text(text) => {
                     // Pieces of one answer join the last line the agent wrote, which is
                     // what makes a stream read as a sentence and not as a column.

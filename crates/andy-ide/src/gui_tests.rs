@@ -3981,6 +3981,51 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn enter_in_the_agent_field_stays_out_of_the_editor() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        let before = gui.app().state.active_buffer().unwrap().text().to_owned();
+        // The last text field in the panel is the one that talks to the agent: the
+        // command field is drawn above it.
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::TextInput);
+        let last = fields.last().expect("the message field");
+        last.click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("hi".to_owned()));
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().text(),
+            before,
+            "the Enter meant for the agent put a newline in the editor"
+        );
+        assert!(
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .any(|line| matches!(line, crate::agent::Line::You(text) if text == "hi")),
+            "the message was not sent: {:?}",
+            gui.app().state.agent.transcript
+        );
+    }
+
+    #[test]
     fn a_question_gets_an_answer_that_streams_in() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
@@ -4007,6 +4052,38 @@ mod the_agent_panel {
         wait(&mut gui, "the turn ending", |gui| {
             !gui.app().state.agent.busy
         });
+    }
+
+    #[test]
+    fn an_answer_is_read_as_markdown_while_it_arrives() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "markdown".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer", |gui| !answer(gui).is_empty());
+
+        // The text keeps its Markdown, the screen does not show the markers: what is
+        // drawn is the rendered form, not the source.
+        assert_eq!(answer(&gui), "**bold** and `code`");
+        assert!(
+            gui.harness.query_by_label_contains("**bold**").is_none(),
+            "the answer is on screen as Markdown source, not as Markdown"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("bold").is_some(),
+            "the bold word is not on screen at all"
+        );
     }
 
     #[test]

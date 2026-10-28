@@ -111,6 +111,9 @@ escapes, and run without a shell in between, so `;` and `` stay characters of a 
 name rather than becoming a second command. `Remember` writes it into `agents.toml`. The
 session lives on a worker thread — the panel posts what was typed, the
 worker pumps what the agent says — so an answer is drawn while it is still being written.
+The answer is read as Markdown as it arrives, and the agent's reasoning is folded away
+behind a `Thinking…` marker: the working out is not the answer, and pouring it into the same
+column makes the answer harder to find.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m5.md`](.hermes/plans/2026-10-28_andy-ide-m5.md).
