@@ -83,7 +83,8 @@ fn default_layout() -> DockState<Tab> {
 /// may have no terminal tab at all, or it may have one in a pane of its own from a
 /// version that split the strip.
 fn with_terminal(dock: DockState<Tab>) -> DockState<Tab> {
-    place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Git)
+    let dock = place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Git);
+    place_beside_problems(dock, Tab::Diff)
 }
 
 /// Puts `tab` in the bottom leaf, beside the problems, where it belongs.
@@ -204,6 +205,9 @@ impl App {
         // of project does any work here, and only the panel re-reads the status.
         let root = self.state.project.as_ref().map(|project| project.root());
         self.state.git.follow(root);
+        if std::mem::take(&mut self.state.git.show_diff) {
+            bring_to_front(&mut self.dock, Tab::Diff);
+        }
         self.handle_keys(ui);
         self.state.poll_fs_events();
         self.state.poll_lsp();
@@ -508,12 +512,13 @@ mod tests {
     fn default_layout_holds_every_panel() {
         let dock = default_layout();
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(tabs.len(), 5, "every panel is part of the layout: {tabs:?}");
+        assert_eq!(tabs.len(), 6, "every panel is part of the layout: {tabs:?}");
         assert!(tabs.contains(&Tab::Projects));
         assert!(tabs.contains(&Tab::Editor));
         assert!(tabs.contains(&Tab::Problems));
         assert!(tabs.contains(&Tab::Terminal));
         assert!(tabs.contains(&Tab::Git));
+        assert!(tabs.contains(&Tab::Diff));
     }
 
     #[test]
@@ -845,7 +850,7 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 5);
+        assert_eq!(back.iter_all_tabs().count(), 6);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
@@ -868,7 +873,7 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 5);
+        assert_eq!(restored.dock.iter_all_tabs().count(), 6);
         assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
     }
 
@@ -887,7 +892,7 @@ mod layout_persistence_tests {
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 5);
+        assert_eq!(app.dock.iter_all_tabs().count(), 6);
     }
 }
 
@@ -3752,7 +3757,7 @@ mod the_bottom_strip {
             terminal.node_path(),
             "the terminal still has a pane of its own"
         );
-        assert_eq!(tab_count_in_the_problems_leaf(&dock), 3);
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 4);
         let git = dock.find_tab(&Tab::Git).expect("a git tab");
         assert_eq!(
             problems.node_path(),
@@ -3793,7 +3798,7 @@ mod the_bottom_strip {
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(problems.node_path(), terminal.node_path());
-        assert_eq!(tidied.iter_all_tabs().count(), 4, "a tab was duplicated");
+        assert_eq!(tidied.iter_all_tabs().count(), 5, "a tab was duplicated");
     }
 
     /// A layout written before the Git panel existed must gain one, not lose it.
@@ -3834,6 +3839,6 @@ mod the_bottom_strip {
             active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
             Some(Tab::Problems)
         );
-        assert_eq!(tidied.iter_all_tabs().count(), 4);
+        assert_eq!(tidied.iter_all_tabs().count(), 5);
     }
 }

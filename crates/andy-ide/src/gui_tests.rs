@@ -3068,18 +3068,65 @@ mod the_git_panel {
     }
 
     #[test]
-    fn a_click_on_a_change_opens_the_file() {
+    fn a_click_selects_and_a_double_click_opens() {
         let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "two\n")], Some("a.txt"));
         std::fs::write(gui._project.path().join("b.txt"), "two\nedited\n").unwrap();
 
         show_panel(&mut gui);
         gui.harness.get_by_label("M  b.txt").click();
         gui.settle();
+        assert_eq!(
+            gui.app().state.git.selected,
+            Some(0),
+            "a click did not select the change"
+        );
+        assert_eq!(
+            gui.active_tab(),
+            Some(PathBuf::from("a.txt")),
+            "a single click moved the keyboard to the editor"
+        );
 
+        // A second click inside the double-click window opens the file.
+        gui.harness.get_by_label("M  b.txt").click();
+        gui.settle();
         assert_eq!(
             gui.active_tab(),
             Some(PathBuf::from("b.txt")),
-            "a click on a change did not open the file"
+            "a double click did not open the file"
+        );
+    }
+
+    #[test]
+    fn enter_shows_the_diff_of_the_selected_change() {
+        let mut gui = managed(&[("a.txt", "one\ntwo\nthree\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\nTWO\nthree\n").unwrap();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("M  a.txt").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+
+        let diff = gui
+            .app()
+            .state
+            .git
+            .diff
+            .clone()
+            .expect("Enter did not read a diff");
+        assert!(
+            diff.unified.contains("-two") && diff.unified.contains("+TWO"),
+            "the diff is wrong: {}",
+            diff.unified
+        );
+        assert!(
+            gui.harness.query_by_label("+TWO").is_some(),
+            "the diff panel is not on screen"
+        );
+        assert!(
+            gui.harness.query_by_label("-two").is_some(),
+            "the removed line is not on screen"
         );
     }
 

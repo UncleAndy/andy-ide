@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ide_git::{Area, Change, Repo};
+use ide_git::{Area, Change, FileDiff, Repo};
 
 /// How often the panel re-reads the repository while it is on screen.
 pub const REFRESH: Duration = Duration::from_millis(1200);
@@ -19,6 +19,14 @@ pub struct GitState {
     pub repo: Option<Repo>,
     /// The last read of the work tree, in the order the panel shows it.
     pub changes: Vec<Change>,
+    /// The change the panel has selected, by index into `changes`.
+    pub selected: Option<usize>,
+    /// The diff of the selected change, once asked for.
+    pub diff: Option<FileDiff>,
+    /// Why the diff could not be made, if it could not.
+    pub diff_error: Option<String>,
+    /// Set when a fresh diff should be brought to the front.
+    pub show_diff: bool,
     /// What went wrong on the last read, if anything.
     pub error: Option<String>,
     /// The root this state belongs to, so a second project re-opens it.
@@ -62,6 +70,15 @@ impl GitState {
             Ok(changes) => {
                 self.changes = changes;
                 self.error = None;
+                // A row that is gone takes the selection with it: an index that points
+                // past the end would open whatever slid into its place.
+                if self
+                    .selected
+                    .is_some_and(|index| index >= self.changes.len())
+                {
+                    self.selected = None;
+                    self.diff = None;
+                }
             }
             Err(error) => self.error = Some(format!("{error}")),
         }
@@ -75,6 +92,36 @@ impl GitState {
     /// The half that is only on disk.
     pub fn worktree(&self) -> impl Iterator<Item = &Change> {
         self.changes.iter().filter(|c| c.area == Area::Worktree)
+    }
+
+    /// The change under the selection, if it is still there.
+    pub fn selected_change(&self) -> Option<&Change> {
+        self.selected.and_then(|index| self.changes.get(index))
+    }
+
+    /// Reads the diff of the selected change into `diff`.
+    ///
+    /// Kept apart from the panel so the window can ask for it from a key press and
+    /// the panel only draws what arrived.
+    pub fn open_selected_diff(&mut self) {
+        let Some(change) = self.selected_change().cloned() else {
+            return;
+        };
+        let Some(repo) = &self.repo else {
+            return;
+        };
+        let side = change.side();
+        match repo.diff(&change.path, side) {
+            Ok(diff) => {
+                self.diff = Some(diff);
+                self.diff_error = None;
+                self.show_diff = true;
+            }
+            Err(error) => {
+                self.diff = None;
+                self.diff_error = Some(format!("{error}"));
+            }
+        }
     }
 
     /// The branch name to put in the title, when there is one.

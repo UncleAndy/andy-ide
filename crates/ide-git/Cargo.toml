@@ -11,6 +11,7 @@ description = "Repository state, diffs and history for andy-ide"
 anyhow.workspace = true
 gix = { version = "0.90.0", default-features = false, features = ["status", "sha1"] }
 gix-status = "0.37"
+similar = "3.2.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

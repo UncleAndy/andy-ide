@@ -11,6 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use gix::status::index_worktree::Item as WorktreeItem;
+
+pub mod diff;
+pub use diff::{FileDiff, Side};
 use gix_status::index_as_worktree::{Change as WorktreeChange, EntryStatus};
 
 /// Version of the crate, taken from its manifest.
@@ -68,6 +71,16 @@ pub struct Change {
     pub area: Area,
 }
 
+impl Change {
+    /// Which comparison shows this change.
+    pub fn side(&self) -> Side {
+        match self.area {
+            Area::Staged => Side::Staged,
+            Area::Worktree => Side::Worktree,
+        }
+    }
+}
+
 impl Repo {
     /// Finds the repository a path belongs to, walking up as `git` does.
     ///
@@ -76,6 +89,11 @@ impl Repo {
     pub fn discover(path: impl AsRef<Path>) -> Option<Self> {
         let inner = gix::discover(path.as_ref()).ok()?;
         Some(Self { inner })
+    }
+
+    /// The repository underneath, for the rest of the crate.
+    pub(crate) fn inner(&self) -> &gix::Repository {
+        &self.inner
     }
 
     /// The top of the work tree: the directory the project tree shows.

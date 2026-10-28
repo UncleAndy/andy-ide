@@ -66,7 +66,10 @@ against `HEAD`, on disk against the index), so a file staged and then edited sho
 twice. The `Git` panel sits beside `Problems` and `Terminal` in the bottom strip
 (`Alt+9`), names the branch, groups the changes under the two headings and opens a
 file when its line is clicked; a project that is not a repository says so instead of
-showing an empty list.
+showing an empty list. A single click selects a change, a double click opens the file,
+and `Enter` shows its diff in the `Diff` tab beside it — both sides read where they
+live, `HEAD`'s tree and the index as objects, the work tree as a file, so looking at a
+diff cannot disturb the work in progress.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).
