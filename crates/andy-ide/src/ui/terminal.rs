@@ -18,6 +18,14 @@ pub struct Terminal {
     rows: u16,
     /// Whether keys typed in this frame belong to the terminal.
     pub focused: bool,
+    /// Whether the panel was drawn at all in the last frame.
+    ///
+    /// The panel is only drawn while its tab is visible, so this flag is the only way
+    /// for the application to notice that the keyboard must be handed back: a hidden
+    /// terminal that keeps focus would swallow every keystroke of the editor.
+    pub shown: bool,
+    /// Where the panel was last drawn, for the tests that click it.
+    pub shown_rect: Option<egui::Rect>,
 }
 
 impl Default for Terminal {
@@ -34,6 +42,8 @@ impl Terminal {
             cols: 80,
             rows: 24,
             focused: false,
+            shown: false,
+            shown_rect: None,
         }
     }
 
@@ -52,11 +62,16 @@ impl Terminal {
         }
     }
 
-    /// The bytes typed this frame, read from egui's events.
-    pub fn read_keys(ui: &Ui) -> Vec<u8> {
+    /// The bytes typed this frame, taken out of egui's events.
+    ///
+    /// The events are **removed**, not read: with the terminal focused the keys belong
+    /// to the shell, and an editor that also saw them would type the same text into the
+    /// open file — which is exactly what happened before this was a `take`.
+    pub fn take_keys(ui: &mut Ui) -> Vec<u8> {
+        let events = ui.input_mut(|input| Self::split_terminal_events(&mut input.events));
         let mut bytes = Vec::new();
-        ui.input(|input| {
-            for event in &input.events {
+        {
+            for event in &events {
                 match event {
                     egui::Event::Text(text)
                         // Control characters arrive as text too; they are already in
@@ -81,12 +96,33 @@ impl Terminal {
                     _ => {}
                 }
             }
-        });
+        }
         bytes
+    }
+
+    /// Adds the terminal's own events to `bytes` and takes them out of `events`.
+    ///
+    /// Pointer, scroll and focus events stay where they are: they are not typing.
+    pub fn split_terminal_events(events: &mut Vec<egui::Event>) -> Vec<egui::Event> {
+        let mut taken = Vec::new();
+        events.retain(|event| {
+            let mine = matches!(
+                event,
+                egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Key { pressed: true, .. }
+            );
+            if mine {
+                taken.push(event.clone());
+            }
+            !mine
+        });
+        taken
     }
 
     /// Draws the screen and lets the user type into it.
     pub fn show(&mut self, ui: &mut Ui) {
+        self.shown = true;
         let width = ui.available_width();
         let height = ui.available_height();
         let font = egui::FontId::monospace(13.0);
@@ -109,8 +145,16 @@ impl Terminal {
 
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-        if response.clicked() {
-            self.focused = true;
+        self.shown_rect = Some(rect);
+        let pressed_at = ui.input(|input| {
+            if input.pointer.any_pressed() {
+                input.pointer.interact_pos()
+            } else {
+                None
+            }
+        });
+        if let Some(focused) = focus_after(rect, pressed_at, response.clicked()) {
+            self.focused = focused;
         }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(16, 18, 20));
@@ -183,13 +227,6 @@ impl Terminal {
                 );
             }
         });
-
-        if self.focused {
-            let bytes = Self::read_keys(ui);
-            if !bytes.is_empty() {
-                let _ = self.write(&bytes);
-            }
-        }
     }
 
     /// Sends bytes to the shell, as typing does.
@@ -381,5 +418,116 @@ mod tests {
     #[test]
     fn a_plain_letter_is_not_a_key_press_the_terminal_maps() {
         assert!(input_for_key(Key::A, Modifiers::NONE).is_none());
+    }
+}
+
+#[cfg(test)]
+mod stealing {
+    use super::Terminal;
+
+    fn text_of(event: &egui::Event) -> Option<String> {
+        match event {
+            egui::Event::Text(text) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn typing_and_keys_are_taken_from_the_queue() {
+        let mut events = vec![
+            egui::Event::Text("x".to_owned()),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Paste("pasted".to_owned()),
+            // A key release and anything that is not typing stay put.
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(egui::pos2(3.0, 4.0)),
+        ];
+
+        let taken = Terminal::split_terminal_events(&mut events);
+
+        assert_eq!(
+            taken.len(),
+            3,
+            "the terminal did not take its events: {taken:?}"
+        );
+        assert!(
+            taken.iter().filter_map(text_of).any(|text| text == "x"),
+            "the typed letter was not taken"
+        );
+        assert!(
+            events.iter().filter_map(text_of).next().is_none(),
+            "a typed letter was left for the editor"
+        );
+        assert_eq!(
+            events.len(),
+            2,
+            "the editor lost its pointer events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_typed_means_nothing_taken() {
+        let mut events = vec![egui::Event::PointerMoved(egui::pos2(1.0, 1.0))];
+        let taken = Terminal::split_terminal_events(&mut events);
+        assert!(taken.is_empty());
+        assert_eq!(events.len(), 1);
+    }
+}
+
+/// Who gets the keyboard after a press, if anyone changed hands this frame.
+///
+/// `None` means "leave it as it is": a press inside the terminal takes the keyboard,
+/// a press anywhere else gives it back to whoever was clicked. Without the second half
+/// the shell kept every keystroke after the pointer had left it, which is how typed
+/// text ended up in the file being edited.
+pub fn focus_after(rect: egui::Rect, pressed_at: Option<egui::Pos2>, inside: bool) -> Option<bool> {
+    match pressed_at {
+        Some(at) if rect.contains(at) => Some(true),
+        Some(_) => Some(false),
+        None if inside => Some(true),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod focus {
+    use super::focus_after;
+
+    fn rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(100.0, 50.0))
+    }
+
+    #[test]
+    fn a_press_inside_takes_the_keyboard() {
+        assert_eq!(
+            focus_after(rect(), Some(egui::pos2(20.0, 20.0)), false),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_press_outside_gives_it_back() {
+        assert_eq!(
+            focus_after(rect(), Some(egui::pos2(500.0, 500.0)), false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_press_leaves_the_focus_alone() {
+        assert_eq!(focus_after(rect(), None, false), None);
+        assert_eq!(focus_after(rect(), None, true), Some(true));
     }
 }

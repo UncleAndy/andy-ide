@@ -1766,3 +1766,198 @@ mod the_terminal_tab {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// Typing with the terminal focused belongs to the shell and to nobody else.
+mod the_terminal_owns_its_keys {
+    use super::*;
+
+    fn terminal_tab_active(gui: &mut Gui) {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab is in the layout");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+        assert_eq!(gui.app().state.terminal.error, None);
+    }
+
+    #[test]
+    fn a_letter_typed_there_does_not_appear_in_the_editor() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_tab_active(&mut gui);
+        gui.app_mut().state.terminal.focused = true;
+
+        gui.harness.event(egui::Event::Text("zzz".to_owned()));
+        gui.settle();
+
+        let editor = gui
+            .app()
+            .state
+            .active_buffer()
+            .expect("the editor still holds a.rs")
+            .text()
+            .to_owned();
+        assert_eq!(
+            editor, "fn a() {}\n",
+            "the terminal's typing went into the editor as well"
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_editor_gives_the_keyboard_back() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_tab_active(&mut gui);
+        gui.app_mut().state.terminal.focused = true;
+        gui.settle();
+        assert!(gui.app().state.terminal.focused);
+
+        // A press outside the terminal is a person going back to the code.
+        let at = egui::pos2(400.0, 200.0);
+        gui.harness.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        assert!(
+            !gui.app().state.terminal.focused,
+            "the terminal kept the keyboard after a click outside it"
+        );
+
+        gui.harness.event(egui::Event::Text("y".to_owned()));
+        gui.settle();
+        assert!(
+            gui.app()
+                .state
+                .active_buffer()
+                .unwrap()
+                .text()
+                .contains('y'),
+            "the letter did not reach the editor: {:?}",
+            gui.app().state.active_buffer().unwrap().text()
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_hidden_terminal_does_not_keep_the_keyboard() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_tab_active(&mut gui);
+        gui.app_mut().state.terminal.focused = true;
+        gui.settle();
+        assert!(gui.app().state.terminal.focused);
+
+        // The tab is taken out of the dock, so the panel is never drawn again.
+        let terminal = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.remove_tab(terminal);
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            !gui.app().state.terminal.focused,
+            "a terminal that is not on screen kept the keyboard"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_command_typed_there_runs_in_the_shell() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_tab_active(&mut gui);
+        gui.app_mut().state.terminal.focused = true;
+
+        gui.harness
+            .event(egui::Event::Text("echo tty-ok".to_owned()));
+        gui.harness.key_press(egui::Key::Enter);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = false;
+        while std::time::Instant::now() < deadline {
+            gui.settle();
+            if gui.app().state.terminal.contents().contains("tty-ok") {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(
+            seen,
+            "the shell never ran what was typed: {:?}",
+            gui.app().state.terminal.contents()
+        );
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().text(),
+            "fn a() {}\n",
+            "the command was typed into the editor too"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}
+
+/// The keyboard really changes hands when the pointer does.
+mod the_terminal_click {
+    use super::*;
+
+    #[test]
+    fn a_click_into_the_panel_puts_the_shell_in_charge() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        assert!(
+            !gui.app().state.terminal.focused,
+            "the terminal took the keyboard without being clicked"
+        );
+
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        assert!(
+            gui.app().state.terminal.focused,
+            "a click inside the terminal did not give it the keyboard"
+        );
+
+        gui.harness
+            .event(egui::Event::Text("echo clicked-ok".to_owned()));
+        gui.harness.key_press(egui::Key::Enter);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = false;
+        while std::time::Instant::now() < deadline {
+            gui.settle();
+            if gui.app().state.terminal.contents().contains("clicked-ok") {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(seen, "the shell did not run the typed command");
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().text(),
+            "fn a() {}\n",
+            "the command was also typed into the editor"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}
