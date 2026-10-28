@@ -4,17 +4,19 @@
 //! the widget allocates the full content size for the scrollbars, and then
 //! paints the slice of lines that intersects the viewport.
 
-use egui::text::{ByteIndex, LayoutJob, LayoutSection};
+use std::sync::Arc;
+
+use egui::text::{ByteIndex, CCursor, LayoutJob, LayoutSection};
 use egui::{
-    Color32, CornerRadius, Event, FontId, Key, Pos2, Rect, Sense, TextFormat, TextStyle, Ui, Vec2,
+    Color32, CornerRadius, Event, FontId, Galley, Key, Pos2, Rect, Sense, TextFormat, TextStyle,
+    Ui, Vec2,
 };
-use ide_syntax::TokenKind;
+use ide_syntax::{HighlightSpan, TokenKind};
 
 use super::EditorBuffer;
+use super::INDENT_WIDTH as TAB_WIDTH;
 use super::edit::Motion;
 
-/// How many spaces a tab takes on screen.
-const TAB_WIDTH: usize = 4;
 /// Caret width in points.
 const CARET_WIDTH: f32 = 1.5;
 
@@ -106,27 +108,33 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                 first_line,
                 last_line,
             );
+            let layouts = LineLayouts::build(ui, buffer, &spans, &font, first_line, last_line);
             paint_selection(
+                PaintCtx {
+                    painter: &painter,
+                    origin: text_origin,
+                    char_w,
+                    row_h,
+                },
+                buffer,
+                &layouts,
+                first_line,
+                last_line,
+            );
+            paint_galleys(&painter, &layouts, text_origin, row_h);
+            let (caret_line, _) = buffer.line_col();
+            let caret_galley = layouts
+                .galley(caret_line)
+                .cloned()
+                .or_else(|| line_galley(ui, buffer, &spans, &font, caret_line));
+            let caret_pos = paint_caret(
                 &painter,
                 buffer,
+                caret_galley.as_ref(),
                 text_origin,
                 char_w,
                 row_h,
-                first_line,
-                last_line,
             );
-            paint_lines(
-                ui,
-                &painter,
-                buffer,
-                &spans,
-                &font,
-                text_origin,
-                row_h,
-                first_line,
-                last_line,
-            );
-            let caret_pos = paint_caret(&painter, buffer, text_origin, char_w, row_h);
 
             // Keep the caret on screen while it moves, and only then: scrolling
             // must never fight the user's wheel. The viewport is reported in
@@ -141,22 +149,50 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
             if remember {
                 ui.data_mut(|data| data.insert_temp(tracked, caret));
             }
-            if scroll {
-                ui.scroll_to_rect(row.expand(3.0), None);
-            }
 
             // Pointer first: clicking must place the caret even though the very
             // same click gives the widget focus.
+            let mut drag_scrolled = false;
             if (response.clicked() || response.dragged())
                 && let Some(pos) = response.interact_pointer_pos()
             {
-                let (line, col) = position_to_line_col(buffer, text_origin, pos, char_w, row_h);
+                let mut y = pos.y - rect.min.y;
+                // Dragging past the edge scrolls one row at a time, so the
+                // selection keeps growing while the button is held even though
+                // the pointer has nowhere left to go. The scroll area takes its
+                // delta negated: a negative y scrolls down.
+                if response.dragged() {
+                    let step = auto_scroll_step(y, viewport, row_h);
+                    if step != 0.0 {
+                        ui.scroll_with_delta_animation(
+                            Vec2::new(0.0, step),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        ui.ctx().request_repaint();
+                        drag_scrolled = true;
+                        // Aim one row past the edge that is being revealed.
+                        y = if step < 0.0 {
+                            viewport.max.y + row_h
+                        } else {
+                            viewport.min.y - row_h
+                        };
+                    }
+                }
+                let target = Pos2::new(pos.x, rect.min.y + y);
+                let (line, col) =
+                    position_to_line_col(buffer, &layouts, text_origin, target, row_h);
                 let index = buffer.char_index(line, col);
                 if response.dragged() {
                     buffer.set_drag_caret(index);
                 } else {
                     buffer.set_caret(index);
                 }
+            }
+
+            // While a drag scrolls by itself, following the caret as well would
+            // move the view twice per frame and make the text jump.
+            if scroll && !drag_scrolled {
+                ui.scroll_to_rect(row.expand(3.0), None);
             }
 
             if response.has_focus() {
@@ -216,15 +252,63 @@ fn paint_gutter(
     }
 }
 
-fn paint_selection(
-    painter: &egui::Painter,
-    buffer: &EditorBuffer,
+/// Galleys of the visible lines, laid out once per frame and then used for the
+/// text, the selection, the caret and hit testing alike.
+///
+/// The geometry comes from the galley rather than from `column * char_width`:
+/// a monospace font falls back to other fonts for some scripts, and those
+/// glyphs are not the same width, which used to leave the caret a few points
+/// off the end of the line.
+struct LineLayouts {
+    first_line: usize,
+    galleys: Vec<Option<Arc<Galley>>>,
+}
+
+impl LineLayouts {
+    fn build(
+        ui: &Ui,
+        buffer: &EditorBuffer,
+        spans: &[HighlightSpan],
+        font: &FontId,
+        first_line: usize,
+        last_line: usize,
+    ) -> Self {
+        let galleys = (first_line..last_line)
+            .map(|line| line_galley(ui, buffer, spans, font, line))
+            .collect();
+        Self {
+            first_line,
+            galleys,
+        }
+    }
+
+    fn galley(&self, line: usize) -> Option<&Arc<Galley>> {
+        let index = line.checked_sub(self.first_line)?;
+        self.galleys.get(index).and_then(|galley| galley.as_ref())
+    }
+}
+
+/// Everything the selection and the caret need to draw on the same grid.
+struct PaintCtx<'a> {
+    painter: &'a egui::Painter,
     origin: Pos2,
     char_w: f32,
     row_h: f32,
+}
+
+fn paint_selection(
+    ctx: PaintCtx<'_>,
+    buffer: &EditorBuffer,
+    layouts: &LineLayouts,
     first_line: usize,
     last_line: usize,
 ) {
+    let PaintCtx {
+        painter,
+        origin,
+        char_w,
+        row_h,
+    } = ctx;
     if !buffer.has_selection() {
         return;
     }
@@ -249,8 +333,8 @@ fn paint_selection(
             line_chars
         };
 
-        let x0 = col_to_x(text, from, char_w);
-        let mut x1 = col_to_x(text, to, char_w);
+        let x0 = x_for_col(layouts, text, line, from, char_w);
+        let mut x1 = x_for_col(layouts, text, line, to, char_w);
         if line != end_line && to == line_chars {
             // Show the line break as a small tail, otherwise the selection
             // seems to stop in mid-air.
@@ -271,64 +355,77 @@ fn paint_selection(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_lines(
+/// Lays out one line with its highlight colours; `None` for an empty line.
+fn line_galley(
     ui: &Ui,
-    painter: &egui::Painter,
     buffer: &EditorBuffer,
-    spans: &[ide_syntax::HighlightSpan],
+    spans: &[HighlightSpan],
     font: &FontId,
-    origin: Pos2,
-    row_h: f32,
-    first_line: usize,
-    last_line: usize,
-) {
-    for line in first_line..last_line {
-        let text = buffer.line_text(line);
-        let line_start = buffer.line_starts()[line];
-        let line_end = line_start + text.len();
-        let y = origin.y + (line as f32) * row_h;
+    line: usize,
+) -> Option<Arc<Galley>> {
+    if line >= buffer.line_count() {
+        return None;
+    }
+    let text = buffer.line_text(line);
+    let line_start = buffer.line_starts()[line];
+    let line_end = line_start + text.len();
 
-        let mut job = LayoutJob::default();
-        let mut cursor = line_start;
-        for span in spans {
-            let start = span.start_byte.max(line_start).min(line_end);
-            let end = span.end_byte.min(line_end);
-            if end <= start {
-                continue;
-            }
-            if start > cursor {
-                push_section(&mut job, &buffer.text()[cursor..start], DEFAULT_FG, font);
-            }
-            push_section(
-                &mut job,
-                &buffer.text()[start..end],
-                token_color(span.kind),
-                font,
-            );
-            cursor = end;
-        }
-        if cursor < line_end {
-            push_section(&mut job, &buffer.text()[cursor..line_end], DEFAULT_FG, font);
-        }
-        if job.text.is_empty() {
+    let mut job = LayoutJob::default();
+    let mut cursor = line_start;
+    for span in spans {
+        let start = span.start_byte.max(line_start).min(line_end);
+        let end = span.end_byte.min(line_end);
+        if end <= start {
             continue;
         }
-        let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-        painter.galley(Pos2::new(origin.x, y), galley, DEFAULT_FG);
+        if start > cursor {
+            push_section(&mut job, &buffer.text()[cursor..start], DEFAULT_FG, font);
+        }
+        push_section(
+            &mut job,
+            &buffer.text()[start..end],
+            token_color(span.kind),
+            font,
+        );
+        cursor = end;
+    }
+    if cursor < line_end {
+        push_section(&mut job, &buffer.text()[cursor..line_end], DEFAULT_FG, font);
+    }
+    if job.text.is_empty() {
+        return None;
+    }
+    Some(ui.ctx().fonts_mut(|fonts| fonts.layout_job(job)))
+}
+
+fn paint_galleys(painter: &egui::Painter, layouts: &LineLayouts, origin: Pos2, row_h: f32) {
+    for (index, galley) in layouts.galleys.iter().enumerate() {
+        let Some(galley) = galley else { continue };
+        let line = layouts.first_line + index;
+        let y = origin.y + (line as f32) * row_h;
+        painter.galley(Pos2::new(origin.x, y), galley.clone(), DEFAULT_FG);
     }
 }
 
 fn paint_caret(
     painter: &egui::Painter,
     buffer: &EditorBuffer,
+    galley: Option<&Arc<Galley>>,
     origin: Pos2,
     char_w: f32,
     row_h: f32,
 ) -> Pos2 {
     let (line, col) = buffer.line_col();
     let text = buffer.line_text(line);
-    let x = col_to_x(text, col, char_w);
+    let x = match galley {
+        Some(galley) => {
+            galley
+                .pos_from_cursor(CCursor::new(expanded_column(text, col)))
+                .min
+                .x
+        }
+        None => char_w * (col.min(text.chars().count()) as f32),
+    };
     let y = origin.y + (line as f32) * row_h;
     let position = Pos2::new(origin.x + x, y);
     painter.rect_filled(
@@ -339,48 +436,87 @@ fn paint_caret(
     position
 }
 
+/// How far to scroll while a selection drag leaves the viewport.
+///
+/// The pointer is in content coordinates, like the viewport. A negative step
+/// scrolls down (the scroll area takes its delta negated), so a pointer below
+/// the viewport returns `-row_h`.
+fn auto_scroll_step(pointer_y: f32, viewport: Rect, row_h: f32) -> f32 {
+    if pointer_y > viewport.max.y {
+        -row_h
+    } else if pointer_y < viewport.min.y {
+        row_h
+    } else {
+        0.0
+    }
+}
+
 /// Absolute caret position from a pointer position.
 fn position_to_line_col(
     buffer: &EditorBuffer,
+    layouts: &LineLayouts,
     origin: Pos2,
     pos: Pos2,
-    char_w: f32,
     row_h: f32,
 ) -> (usize, usize) {
     let line = (((pos.y - origin.y) / row_h).floor().max(0.0) as usize)
         .min(buffer.line_count().saturating_sub(1));
-    let cl = (pos.x - origin.x) / char_w;
     let text = buffer.line_text(line);
-    let mut col = 0;
-    let mut width = 0.0;
-    for ch in text.chars() {
-        let advance = if ch == '\t' {
-            char_w * TAB_WIDTH as f32
-        } else {
-            char_w
-        };
-        if cl * char_w < width + advance / 2.0 {
-            break;
+    let x = (pos.x - origin.x).max(0.0);
+    match layouts.galley(line) {
+        Some(galley) => {
+            let shown = galley.cursor_from_pos(Vec2::new(x, 0.0)).index.0;
+            (line, original_column(text, shown))
         }
-        width += advance;
-        col += 1;
+        // An empty line has no galley, and there is nothing to hit.
+        None => (line, 0),
     }
-    (line, col)
 }
 
-fn col_to_x(text: &str, col: usize, char_w: f32) -> f32 {
-    let mut width = 0.0;
+/// Where the caret of `col` is drawn, taken from the galley so that glyphs of a
+/// fallback font, which are not exactly one cell wide, still land correctly.
+fn x_for_col(layouts: &LineLayouts, text: &str, line: usize, col: usize, char_w: f32) -> f32 {
+    match layouts.galley(line) {
+        Some(galley) => {
+            galley
+                .pos_from_cursor(CCursor::new(expanded_column(text, col)))
+                .min
+                .x
+        }
+        None => char_w * (col.min(text.chars().count()) as f32),
+    }
+}
+
+/// Column in the laid-out text, where a tab occupies `TAB_WIDTH` cells.
+fn expanded_column(text: &str, col: usize) -> usize {
+    let mut shown = 0;
     for (index, ch) in text.chars().enumerate() {
         if index >= col {
             break;
         }
-        width += if ch == '\t' {
-            char_w * TAB_WIDTH as f32
-        } else {
-            char_w
-        };
+        shown += if ch == '\t' { TAB_WIDTH } else { 1 };
     }
-    width
+    shown
+}
+
+/// Column of the source text nearest to a column of the laid-out text.
+fn original_column(text: &str, shown: usize) -> usize {
+    let mut cells = 0;
+    let mut col = 0;
+    for ch in text.chars() {
+        let width = if ch == '\t' { TAB_WIDTH } else { 1 };
+        if cells + width > shown {
+            // Inside this character: pick whichever edge is closer.
+            return if shown - cells <= width / 2 {
+                col
+            } else {
+                col + 1
+            };
+        }
+        cells += width;
+        col += 1;
+    }
+    col
 }
 
 fn push_section(job: &mut LayoutJob, text: &str, color: Color32, font: &FontId) {
@@ -482,8 +618,12 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
                         buffer.insert_text("\n");
                         changed = true;
                     }
+                    Key::Tab if modifiers.shift => {
+                        buffer.outdent();
+                        changed = true;
+                    }
                     Key::Tab => {
-                        buffer.insert_text(&" ".repeat(TAB_WIDTH));
+                        buffer.indent();
                         changed = true;
                     }
                     Key::A if modifiers.ctrl => buffer.select_all(),
@@ -508,7 +648,7 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::caret_follow;
+    use super::{auto_scroll_step, caret_follow};
     use egui::{Rect, pos2};
 
     fn viewport() -> Rect {
@@ -545,8 +685,47 @@ mod tests {
         );
     }
 
+    /// Dragging below the viewport scrolls down (the scroll area negates the
+    /// delta), and dragging above it scrolls up.
+    #[test]
+    fn a_drag_past_the_edge_scrolls_towards_the_pointer() {
+        assert_eq!(auto_scroll_step(450.0, viewport(), 18.0), -18.0);
+        assert_eq!(auto_scroll_step(150.0, viewport(), 18.0), 18.0);
+        assert_eq!(auto_scroll_step(300.0, viewport(), 18.0), 0.0);
+    }
+
     #[test]
     fn the_first_frame_does_not_scroll_when_the_caret_is_visible() {
         assert_eq!(caret_follow(None, 0, viewport(), row(200.0)), (true, false));
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::{expanded_column, original_column};
+
+    #[test]
+    fn a_tab_takes_four_cells() {
+        let text = "\tab";
+        assert_eq!(expanded_column(text, 0), 0);
+        assert_eq!(expanded_column(text, 1), 4);
+        assert_eq!(expanded_column(text, 3), 6);
+    }
+
+    #[test]
+    fn a_click_inside_a_tab_picks_the_nearer_edge() {
+        let text = "\tab";
+        assert_eq!(original_column(text, 1), 0);
+        assert_eq!(original_column(text, 2), 0);
+        assert_eq!(original_column(text, 3), 1);
+        assert_eq!(original_column(text, 4), 1);
+    }
+
+    #[test]
+    fn columns_round_trip_for_plain_text() {
+        let text = "fn main() {";
+        for col in 0..=text.chars().count() {
+            assert_eq!(original_column(text, expanded_column(text, col)), col);
+        }
     }
 }

@@ -759,3 +759,318 @@ mod keyboard_tests {
         assert_eq!(after_col, col + 1);
     }
 }
+
+#[cfg(test)]
+mod caret_and_clipboard_tests {
+    use super::*;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn with_text(name: &str, text: &str) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join(name), text).unwrap();
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            app.state.open_file(std::path::Path::new(name));
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+            output
+        }
+
+        fn focus_editor(&mut self) {
+            let at = egui::pos2(320.0, 150.0);
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]);
+        }
+
+        fn key(&mut self, key: egui::Key) {
+            self.key_with(key, egui::Modifiers::NONE);
+        }
+
+        fn buffer(&self) -> &crate::editor::EditorBuffer {
+            self.app.state.active_buffer().unwrap()
+        }
+
+        fn text(&self) -> String {
+            self.buffer().text().to_owned()
+        }
+
+        fn copied(&self, output: &egui::FullOutput) -> Option<String> {
+            output.platform_output.commands.iter().find_map(|command| {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    /// End must land exactly on the last character of the line, whatever the
+    /// line holds: tabs, Cyrillic, a carriage return or trailing spaces.
+    #[test]
+    fn end_lands_on_the_true_end_of_every_line() {
+        let text = "let x = 1;\n\tindented\nпривет мир\nwindows\r  \nlast";
+        let mut harness = Harness::with_text("a.rs", text);
+        harness.focus_editor();
+
+        let lines: Vec<String> = {
+            let buffer = harness.buffer();
+            (0..buffer.line_count())
+                .map(|line| buffer.line_text(line).to_owned())
+                .collect()
+        };
+
+        for (line, text) in lines.iter().enumerate() {
+            harness.key_with(egui::Key::Home, egui::Modifiers::CTRL);
+            for _ in 0..line {
+                harness.key(egui::Key::ArrowDown);
+            }
+            harness.key_with(egui::Key::Home, egui::Modifiers::NONE);
+            harness.key(egui::Key::End);
+
+            let (caret_line, caret_col) = harness.buffer().line_col();
+            assert_eq!(caret_line, line, "caret left line {line}");
+            assert_eq!(
+                caret_col,
+                text.chars().count(),
+                "End on line {line} ({text:?}) went to column {caret_col}"
+            );
+
+            // A second End must not move anywhere.
+            harness.key(egui::Key::End);
+            assert_eq!(harness.buffer().line_col(), (line, caret_col));
+        }
+    }
+
+    #[test]
+    fn copy_puts_the_selection_on_the_clipboard() {
+        let mut harness = Harness::with_text("a.rs", "let x = 1;\n");
+        harness.focus_editor();
+        harness.key_with(egui::Key::A, egui::Modifiers::CTRL);
+
+        let output = harness.frame(vec![egui::Event::Copy]);
+        assert_eq!(harness.copied(&output).as_deref(), Some("let x = 1;\n"));
+        // Copying must not change the text.
+        assert_eq!(harness.text(), "let x = 1;\n");
+    }
+
+    #[test]
+    fn cut_removes_the_selection_and_copies_it() {
+        let mut harness = Harness::with_text("a.rs", "keep cut\n");
+        harness.focus_editor();
+        harness.key_with(egui::Key::Home, egui::Modifiers::CTRL);
+        for _ in 0..4 {
+            harness.key_with(egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        }
+        assert_eq!(harness.buffer().selected_text(), "keep");
+
+        let output = harness.frame(vec![egui::Event::Cut]);
+        assert_eq!(harness.copied(&output).as_deref(), Some("keep"));
+        assert_eq!(harness.text(), " cut\n");
+    }
+
+    #[test]
+    fn paste_inserts_at_the_caret() {
+        let mut harness = Harness::with_text("a.rs", "ab\n");
+        harness.focus_editor();
+        harness.key_with(egui::Key::Home, egui::Modifiers::CTRL);
+        harness.key(egui::Key::ArrowRight);
+
+        harness.frame(vec![egui::Event::Paste("XY".to_owned())]);
+        assert_eq!(harness.text(), "aXYb\n");
+        assert_eq!(harness.buffer().line_col(), (0, 3));
+    }
+
+    #[test]
+    fn tab_indents_the_selected_lines_from_the_keyboard() {
+        let mut harness = Harness::with_text("a.rs", "one\ntwo\n");
+        harness.focus_editor();
+        harness.key_with(egui::Key::Home, egui::Modifiers::CTRL);
+        harness.key(egui::Key::End);
+        harness.key_with(egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+        // From the end of the first line to the end of the second: the whole
+        // lines are indented even though the selection starts mid-line.
+        assert_eq!(harness.buffer().selected_text(), "\ntwo");
+
+        harness.key(egui::Key::Tab);
+        assert_eq!(harness.text(), "    one\n    two\n");
+        assert_eq!(harness.buffer().selected_text(), "    one\n    two");
+
+        harness.key_with(egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(harness.text(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn paste_replaces_the_selection() {
+        let mut harness = Harness::with_text("a.rs", "ab\n");
+        harness.focus_editor();
+        harness.key_with(egui::Key::A, egui::Modifiers::CTRL);
+
+        harness.frame(vec![egui::Event::Paste("Z".to_owned())]);
+        assert_eq!(harness.text(), "Z");
+    }
+}
+
+#[cfg(test)]
+mod drag_scroll_tests {
+    use super::*;
+
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+        _project: tempfile::TempDir,
+        _config: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn with_lines(lines: usize) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let config = tempfile::tempdir().unwrap();
+            let text: String = (0..lines).map(|n| format!("line number {n}\n")).collect();
+            std::fs::write(project.path().join("a.rs"), text).unwrap();
+            let mut app = App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            );
+            app.state.open_file(std::path::Path::new("a.rs"));
+            let mut harness = Harness {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+                _project: project,
+                _config: config,
+            };
+            harness.frame(Vec::new());
+            harness.frame(Vec::new());
+            harness
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 700.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| self.app.draw(ui));
+            output.textures_delta.clear();
+        }
+
+        fn press(&mut self, at: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+
+        fn drag_to(&mut self, at: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+        }
+
+        fn selection_end_line(&self) -> usize {
+            let buffer = self.app.state.active_buffer().unwrap();
+            buffer.doc.char_to_line_col(buffer.selection().end).0
+        }
+    }
+
+    /// A selection that runs past the bottom edge has to scroll, and has to keep
+    /// scrolling while the button is held, so the far edge stays visible.
+    #[test]
+    fn dragging_past_the_bottom_keeps_scrolling() {
+        let mut harness = Harness::with_lines(200);
+        harness.press(egui::pos2(320.0, 150.0));
+        harness.drag_to(egui::pos2(320.0, 300.0));
+        harness.drag_to(egui::pos2(320.0, 690.0));
+
+        let mut ends = Vec::new();
+        for _ in 0..6 {
+            harness.drag_to(egui::pos2(320.0, 690.0));
+            ends.push(harness.selection_end_line());
+        }
+
+        assert!(
+            ends[0] > 10,
+            "the selection stopped at line {} while the pointer was at the bottom edge",
+            ends[0]
+        );
+        // One row per frame: a jump would mean the view is being dragged along
+        // by the caret instead of following the pointer.
+        let steps: Vec<i64> = ends
+            .windows(2)
+            .map(|pair| pair[1] as i64 - pair[0] as i64)
+            .collect();
+        assert!(
+            steps.iter().all(|step| (1..=2).contains(step)),
+            "the view scrolled unevenly: {steps:?} from {ends:?}"
+        );
+    }
+}

@@ -103,3 +103,17 @@ fn line_has_no_terminator() {
     assert_eq!(d.line(1).unwrap().to_string(), "two");
     assert_eq!(d.line(2).unwrap().to_string(), "three");
 }
+
+#[test]
+fn a_lone_carriage_return_is_a_line_break() {
+    // Ropey breaks on `\r`, `\n` and `\r\n` alike; the editor's view of a line
+    // must agree with it, otherwise "end of line" lands on another line.
+    let doc = Document::new("one\rtwo\r\nthree\nfour");
+    assert_eq!(doc.line_count(), 4);
+    assert_eq!(doc.line(0).unwrap().to_string(), "one");
+    assert_eq!(doc.line(1).unwrap().to_string(), "two");
+    assert_eq!(doc.line(2).unwrap().to_string(), "three");
+    assert_eq!(doc.line(3).unwrap().to_string(), "four");
+    assert_eq!(doc.line_col_to_char(1, 0), 4);
+    assert_eq!(doc.char_to_line_col(6), (1, 2));
+}

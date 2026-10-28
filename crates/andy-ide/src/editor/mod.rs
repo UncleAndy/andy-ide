@@ -10,6 +10,9 @@ use anyhow::{Context, Result};
 use ide_buffer::{Cursor, Document};
 use ide_syntax::{Highlighter, Language};
 
+/// Spaces per indent level; also how wide a tab is drawn.
+pub const INDENT_WIDTH: usize = 4;
+
 use self::edit::Motion;
 
 /// An open document: the rope, the caret, and the highlighter.
@@ -26,6 +29,8 @@ pub struct EditorBuffer {
     goal_col: Option<usize>,
     text: String,
     line_starts: Vec<usize>,
+    /// Byte offset just past the last character of each line, terminators excluded.
+    line_ends: Vec<usize>,
 }
 
 impl EditorBuffer {
@@ -55,6 +60,7 @@ impl EditorBuffer {
             goal_col: None,
             text: String::new(),
             line_starts: Vec::new(),
+            line_ends: Vec::new(),
         };
         buffer.refresh();
         buffer
@@ -86,19 +92,14 @@ impl EditorBuffer {
         &self.line_starts
     }
 
-    /// One line without its terminator; a trailing carriage return is dropped.
+    /// One line without its terminator (`\n`, `\r\n` or a lone `\r`).
     pub fn line_text(&self, line: usize) -> &str {
-        let Some(&start) = self.line_starts.get(line) else {
+        let (Some(&start), Some(&end)) = (self.line_starts.get(line), self.line_ends.get(line))
+        else {
             return "";
         };
-        let end = self
-            .line_starts
-            .get(line + 1)
-            .map(|next| next - 1)
-            .unwrap_or(self.text.len())
-            .min(self.text.len());
-        let slice = &self.text[start.min(end)..end];
-        slice.strip_suffix('\r').unwrap_or(slice)
+        let end = end.clamp(start, self.text.len());
+        &self.text[start..end]
     }
 
     /// Width of the longest line in characters, for the horizontal extent.
@@ -198,6 +199,113 @@ impl EditorBuffer {
         self.refresh();
     }
 
+    /// Indents the selected lines, or inserts one indent at the caret.
+    ///
+    /// The selection is widened to whole lines first, the way other editors do
+    /// it, so a selection that stops in the middle of a line still indents that
+    /// line completely.
+    pub fn indent(&mut self) {
+        self.change_indent(false);
+    }
+
+    /// Removes one indent level from the selected lines.
+    pub fn outdent(&mut self) {
+        self.change_indent(true);
+    }
+
+    fn change_indent(&mut self, outdent: bool) {
+        let (first, last) = self.selected_lines();
+
+        if first == last && !self.has_selection() {
+            if outdent {
+                self.outdent_current_line(first);
+            } else {
+                self.insert_text(&" ".repeat(INDENT_WIDTH));
+            }
+            return;
+        }
+
+        let reversed = self.cursor.head < self.cursor.anchor;
+
+        // From the last line upwards, so earlier edits do not shift later lines.
+        for line in (first..=last).rev() {
+            let start = self.doc.line_col_to_char(line, 0);
+            if outdent {
+                self.remove_indent_at(start);
+            } else {
+                self.doc.insert(start, &" ".repeat(INDENT_WIDTH));
+            }
+        }
+
+        // The whole lines were re-indented, so the whole lines stay selected.
+        // `line_text` reads the cached copy, which is still stale here.
+        self.refresh();
+        let start = self.doc.line_col_to_char(first, 0);
+        let end_column = self.line_text(last).chars().count();
+        let end = self.doc.line_col_to_char(last, end_column);
+        self.cursor = if reversed {
+            Cursor {
+                anchor: end,
+                head: start,
+            }
+        } else {
+            Cursor {
+                anchor: start,
+                head: end,
+            }
+        };
+        self.goal_col = None;
+        self.refresh();
+    }
+
+    /// Removes up to one indent worth of leading whitespace at `start`.
+    fn remove_indent_at(&mut self, start: usize) -> usize {
+        let mut removed = 0;
+        let end = (start + INDENT_WIDTH).min(self.doc.len_chars());
+        let mut index = start;
+        while index < end {
+            let ch = self.char_at_view(index);
+            if ch == ' ' || ch == '\t' {
+                index += 1;
+                removed += 1;
+            } else {
+                break;
+            }
+        }
+        if removed > 0 {
+            self.doc.remove(start..start + removed);
+        }
+        removed
+    }
+
+    fn outdent_current_line(&mut self, line: usize) {
+        let start = self.doc.line_col_to_char(line, 0);
+        let caret = self.caret();
+        let removed = self.remove_indent_at(start);
+        let caret = caret.saturating_sub(removed.min(caret.saturating_sub(start)));
+        self.cursor = Cursor::caret(caret);
+        self.goal_col = None;
+        self.refresh();
+    }
+
+    /// Line numbers of the selection, widened to whole lines.
+    fn selected_lines(&self) -> (usize, usize) {
+        let range = self.selection();
+        let (first, _) = self.doc.char_to_line_col(range.start);
+        let (last, last_col) = self.doc.char_to_line_col(range.end);
+        // A selection that ends at column 0 does not touch the last line.
+        let last = if last_col == 0 && last > first {
+            last - 1
+        } else {
+            last
+        };
+        (first, last)
+    }
+
+    fn char_at_view(&self, index: usize) -> char {
+        self.text.chars().nth(index).unwrap_or('\0')
+    }
+
     pub fn select_all(&mut self) {
         self.cursor = Cursor {
             anchor: 0,
@@ -240,12 +348,22 @@ impl EditorBuffer {
     /// Rebuilds the flat mirror, the line table and the highlight spans.
     fn refresh(&mut self) {
         self.text = self.doc.text();
+        // Line boundaries come from the document: ropey also breaks on a lone
+        // `\r`, and a buffer that counted only `\n` would then disagree with it
+        // about where a line ends.
         self.line_starts.clear();
-        self.line_starts.push(0);
-        for (index, byte) in self.text.bytes().enumerate() {
-            if byte == b'\n' {
-                self.line_starts.push(index + 1);
+        self.line_ends.clear();
+        let count = self.doc.line_count().max(1);
+        let length = self.text.len();
+        for index in 0..count {
+            let start = self.doc.line_start_byte(index).min(length);
+            let next = self.doc.line_start_byte(index + 1).min(length);
+            let mut end = next.max(start);
+            while end > start && matches!(self.text.as_bytes()[end - 1], b'\n' | b'\r') {
+                end -= 1;
             }
+            self.line_starts.push(start);
+            self.line_ends.push(end);
         }
         if let Some(highlighter) = self.highlighter.as_mut() {
             highlighter.set_text(&self.text);
@@ -367,5 +485,72 @@ mod tests {
         assert!(buf.highlighter.is_some());
         let plain = EditorBuffer::from_text(PathBuf::from("a.unknown"), "text".to_owned());
         assert!(plain.highlighter.is_none());
+    }
+}
+
+#[cfg(test)]
+mod indent_tests {
+    use super::*;
+
+    fn buffer(text: &str) -> EditorBuffer {
+        EditorBuffer::from_text(PathBuf::from("a.rs"), text.to_owned())
+    }
+
+    #[test]
+    fn tab_at_the_caret_inserts_one_indent() {
+        let mut buf = buffer("abc");
+        buf.set_caret(1);
+        buf.indent();
+        assert_eq!(buf.text(), "a    bc");
+        assert_eq!(buf.caret(), 5);
+    }
+
+    #[test]
+    fn tab_indents_every_selected_line() {
+        let mut buf = buffer("one\ntwo\nthree");
+        // From the middle of the first line to the middle of the second.
+        buf.cursor = Cursor { anchor: 1, head: 6 };
+        buf.indent();
+        assert_eq!(buf.text(), "    one\n    two\nthree");
+        assert_eq!(buf.selected_text(), "    one\n    two");
+    }
+
+    #[test]
+    fn shift_tab_removes_one_level_from_each_line() {
+        let mut buf = buffer("    one\n        two\nthree");
+        buf.cursor = Cursor {
+            anchor: 0,
+            head: buf.doc.len_chars(),
+        };
+        buf.outdent();
+        assert_eq!(buf.text(), "one\n    two\nthree");
+    }
+
+    #[test]
+    fn shift_tab_stops_at_the_text_and_survives_a_fresh_line() {
+        let mut buf = buffer("  x\n\n");
+        buf.cursor = Cursor {
+            anchor: 0,
+            head: buf.doc.len_chars(),
+        };
+        buf.outdent();
+        assert_eq!(buf.text(), "x\n\n");
+    }
+
+    #[test]
+    fn shift_tab_at_the_caret_only_touches_its_own_line() {
+        let mut buf = buffer("    keep\n    change\n");
+        buf.set_caret(0);
+        buf.outdent();
+        assert_eq!(buf.text(), "keep\n    change\n");
+        assert_eq!(buf.caret(), 0);
+    }
+
+    #[test]
+    fn a_tab_character_counts_as_one_indent() {
+        let mut buf = buffer("\tx\n");
+        buf.set_caret(1);
+        buf.outdent();
+        assert_eq!(buf.text(), "x\n");
     }
 }

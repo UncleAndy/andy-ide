@@ -146,13 +146,26 @@ impl Document {
         }
         let slice = self.rope.line(idx);
         let mut end = slice.len_chars();
-        if end > 0 && slice.char(end - 1) == '\n' {
-            end -= 1;
-            if end > 0 && slice.char(end - 1) == '\r' {
+        // Ropey ends a line with `\n`, `\r\n` or a lone `\r`; only the last two
+        // characters can be a terminator, so at most two are dropped.
+        for _ in 0..2 {
+            if end > 0 && matches!(slice.char(end - 1), '\n' | '\r') {
                 end -= 1;
             }
         }
         Some(slice.slice(..end))
+    }
+
+    /// Byte offset of the first character of a line.
+    ///
+    /// Ropey breaks lines on `\n`, `\r\n` and a lone `\r`, so callers must ask
+    /// the document rather than scan for `\n` themselves: a stray `\r` in the
+    /// text would make the two views of the line disagree.
+    pub fn line_start_byte(&self, line: usize) -> usize {
+        if line >= self.rope.len_lines() {
+            return self.rope.len_bytes();
+        }
+        self.rope.line_to_byte(line)
     }
 
     /// Line and column (both zero based, in chars) of a char index.
