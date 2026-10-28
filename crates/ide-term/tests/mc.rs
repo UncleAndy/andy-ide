@@ -158,3 +158,53 @@ fn f10_leaves_mc() {
     }
     assert!(!session.is_alive(), "F10 did not leave mc");
 }
+
+/// A click is what `mc` needs to pick the file under the pointer.
+#[test]
+fn a_click_selects_the_row_it_lands_on() {
+    use ide_term::mouse::{self, Action, Button, Encoding, Event};
+
+    if !mc_is_installed() {
+        println!("mc is not installed: the check was skipped");
+        return;
+    }
+    let mut session = start_mc();
+    println!("protocol: {:?}", session.mouse_protocol());
+    assert!(
+        session.mouse_protocol().enabled,
+        "mc did not ask for the mouse"
+    );
+    let encoding = session.mouse_protocol().encoding;
+    assert_eq!(encoding, Encoding::Sgr, "mc asked for another form");
+
+    // The third line of the panel holds `beta.rs`; clicking it must select it.
+    let target = session.with_screen(|screen| {
+        let (rows, cols) = screen.size();
+        (0..rows.get()).find(|row| {
+            (0..cols.get())
+                .filter_map(|col| screen.cell(*row, col))
+                .map(|cell| cell.contents())
+                .collect::<String>()
+                .contains("beta.rs")
+        })
+    });
+    let row = target.expect("beta.rs is on the screen");
+    println!("beta.rs is on row {row}");
+    let before = selected_row(&session).expect("mc marked one row");
+    assert_ne!(before, row, "the row was already selected");
+
+    let mods = ide_term::keys::Mods::default();
+    for action in [Action::Press(Button::Left), Action::Release(Button::Left)] {
+        session
+            .write(&mouse::bytes(Event::new(action, 3, row, mods), encoding))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        selected_row(&session),
+        Some(row),
+        "the click did not select the row it landed on"
+    );
+    session.kill();
+}

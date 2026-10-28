@@ -47,7 +47,9 @@ Milestone M3 (terminal) is under way: `ide-term` runs a shell on a real pseudo-t
 strip of the window is one row of tabs, so `Terminal` and `Problems` share it and whichever
 tab is in front uses the whole width. Keys go to the panel that was clicked last, arrows
 and `Home`/`End` follow the cursor-key mode the program asked for, and `F1`..`F12` are
-sent as xterm sends them. `Alt+F12` brings the terminal forward, `View` names both panels.
+sent as xterm sends them, and clicks reach a program that asked for the mouse
+(`mc` selects the file under the pointer). `Alt+F12` brings the terminal forward,
+`View` names both panels.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 

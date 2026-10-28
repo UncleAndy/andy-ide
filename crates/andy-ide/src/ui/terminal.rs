@@ -9,6 +9,7 @@ use egui::{Key, Modifiers, Ui};
 
 use ide_term::Session;
 use ide_term::keys::{Direction, Input, Mods};
+use ide_term::mouse;
 
 /// A terminal tab: one session, or the reason it could not start.
 pub struct Terminal {
@@ -26,6 +27,12 @@ pub struct Terminal {
     pub shown: bool,
     /// Where the panel was last drawn, for the tests that click it.
     pub shown_rect: Option<egui::Rect>,
+    /// The cell the pointer was over last frame, so a movement is reported once
+    /// rather than sixty times a second.
+    mouse_cell: Option<(u16, u16)>,
+    /// Scrolling arrives in pixels and is reported in notches; the remainder is
+    /// kept here so a slow wheel is not lost.
+    scroll_left: f32,
 }
 
 impl Default for Terminal {
@@ -44,6 +51,8 @@ impl Terminal {
             focused: false,
             shown: false,
             shown_rect: None,
+            mouse_cell: None,
+            scroll_left: 0.0,
         }
     }
 
@@ -230,6 +239,129 @@ impl Terminal {
                 );
             }
         });
+        self.forward_mouse(ui, rect, egui::vec2(cell_width, cell_height), cols, rows);
+    }
+
+    /// Sends the pointer to the program, if the program asked for it.
+    ///
+    /// A terminal has no mouse of its own: the program says `CSI ? 1000 h` and the
+    /// terminal answers with reports, which is how `mc` picks the file under the
+    /// pointer. Nothing is sent when the program asked for nothing, or a click would
+    /// leave junk at a shell prompt.
+    fn forward_mouse(&mut self, ui: &Ui, rect: egui::Rect, cell: egui::Vec2, cols: u16, rows: u16) {
+        let Some(protocol) = self.session.as_ref().map(Session::mouse_protocol) else {
+            return;
+        };
+        if !protocol.enabled || cell.x <= 0.0 || cell.y <= 0.0 || cols == 0 || rows == 0 {
+            self.mouse_cell = None;
+            return;
+        }
+
+        let (pos, modifiers, scroll) = ui.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.modifiers,
+                input.smooth_scroll_delta.y,
+            )
+        });
+        let mods = Mods {
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            ctrl: modifiers.ctrl,
+        };
+        let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
+            // Out there the pointer is not our business, and a report about a cell
+            // it is not over would be a lie.
+            self.mouse_cell = None;
+            return;
+        };
+        let column = (((pos.x - rect.left()) / cell.x).floor().max(0.0) as u16).min(cols - 1);
+        let row = (((pos.y - rect.top()) / cell.y).floor().max(0.0) as u16).min(rows - 1);
+
+        let mut events: Vec<mouse::Event> = Vec::new();
+        let mut held: Option<mouse::Button> = None;
+        for (button, pointer) in [
+            (mouse::Button::Left, egui::PointerButton::Primary),
+            (mouse::Button::Middle, egui::PointerButton::Middle),
+            (mouse::Button::Right, egui::PointerButton::Secondary),
+        ] {
+            let (pressed, released, down) = ui.input(|input| {
+                (
+                    input.pointer.button_pressed(pointer),
+                    input.pointer.button_released(pointer),
+                    input.pointer.button_down(pointer),
+                )
+            });
+            if down {
+                held = Some(button);
+            }
+            if pressed {
+                events.push(mouse::Event::new(
+                    mouse::Action::Press(button),
+                    column,
+                    row,
+                    mods,
+                ));
+            }
+            if released && protocol.press_and_release {
+                events.push(mouse::Event::new(
+                    mouse::Action::Release(button),
+                    column,
+                    row,
+                    mods,
+                ));
+            }
+        }
+
+        // Movement is reported where the program asked for it: on every cell change,
+        // or while a button is held. Once per cell, not once per frame.
+        let moved = self.mouse_cell != Some((column, row));
+        if moved {
+            match held {
+                Some(button) if protocol.drag => events.push(mouse::Event::new(
+                    mouse::Action::Drag(button),
+                    column,
+                    row,
+                    mods,
+                )),
+                Some(_) => {}
+                None if protocol.motion => {
+                    events.push(mouse::Event::new(mouse::Action::Motion, column, row, mods));
+                }
+                None => {}
+            }
+        }
+        self.mouse_cell = Some((column, row));
+
+        if scroll != 0.0 {
+            // Scrolling comes in pixels; the program wants notches, and the remainder
+            // is kept so a slow wheel is not lost.
+            const NOTCH: f32 = 40.0;
+            self.scroll_left += scroll;
+            while self.scroll_left.abs() >= NOTCH {
+                let wheel = if self.scroll_left > 0.0 {
+                    mouse::Wheel::Up
+                } else {
+                    mouse::Wheel::Down
+                };
+                self.scroll_left -= NOTCH * self.scroll_left.signum();
+                events.push(mouse::Event::new(
+                    mouse::Action::Wheel(wheel),
+                    column,
+                    row,
+                    mods,
+                ));
+            }
+        }
+
+        if events.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::new();
+        for event in events {
+            bytes.extend(mouse::bytes(event, protocol.encoding));
+        }
+        let _ = self.write(&bytes);
     }
 
     /// Sends bytes to the shell, as typing does.
@@ -255,6 +387,14 @@ impl Terminal {
         self.session
             .as_ref()
             .is_some_and(ide_term::Session::application_cursor)
+    }
+
+    /// Whether the program in the terminal asked for mouse reports.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn mouse_enabled(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.mouse_protocol().enabled)
     }
 
     /// What the screen holds, for tests and for the clipboard.

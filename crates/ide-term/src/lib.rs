@@ -177,6 +177,39 @@ impl Session {
         self.with_screen(|screen| screen.application_cursor())
     }
 
+    /// What the program asked for from the mouse.
+    ///
+    /// Clicking a terminal does nothing unless the program in it has turned mouse
+    /// reporting on with `CSI ? 1000 h` (press), `1002` (press and drag) or `1003`
+    /// (every movement); `1006` asks for the SGR form of the reports. A shell at its
+    /// prompt asks for nothing, and then a click belongs to the window, not the
+    /// shell — which is also how the panel takes the keyboard.
+    pub fn mouse_protocol(&self) -> mouse::Protocol {
+        self.with_screen(|screen| {
+            use vt100::MouseProtocolMode;
+            let mode = screen.mouse_protocol_mode();
+            mouse::Protocol {
+                enabled: mode != MouseProtocolMode::None,
+                press_and_release: matches!(
+                    mode,
+                    MouseProtocolMode::PressRelease
+                        | MouseProtocolMode::ButtonMotion
+                        | MouseProtocolMode::AnyMotion
+                ),
+                drag: matches!(
+                    mode,
+                    MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion
+                ),
+                motion: mode == MouseProtocolMode::AnyMotion,
+                encoding: match screen.mouse_protocol_encoding() {
+                    vt100::MouseProtocolEncoding::Sgr => mouse::Encoding::Sgr,
+                    vt100::MouseProtocolEncoding::Utf8 => mouse::Encoding::Utf8,
+                    vt100::MouseProtocolEncoding::Default => mouse::Encoding::Default,
+                },
+            }
+        })
+    }
+
     /// Everything the screen holds, lines joined by `\n` and trailing blanks cut.
     pub fn contents(&self) -> String {
         let raw = self.with_screen(|screen| screen.contents());
@@ -509,6 +542,259 @@ pub mod keys {
             assert_eq!(Input::Enter.bytes(), b"\r".to_vec());
             assert_eq!(Input::Backspace.bytes(), vec![0x7f]);
             assert_eq!(Input::BackTab.bytes(), b"\x1b[Z".to_vec());
+        }
+    }
+}
+
+/// Mouse reports: what a click in the panel means to the program in it.
+///
+/// A terminal does not have a mouse. The program asks for reports with
+/// `CSI ? 1000 h` and friends, and the terminal answers with escape sequences that
+/// carry the button, the modifiers and the cell. `mc` selects the file under the
+/// pointer that way, and `vim` moves its cursor.
+pub mod mouse {
+    use super::keys::Mods;
+
+    /// What the program asked for when it turned reporting on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Protocol {
+        /// Whether clicks are reported at all (`1000`, `1002`, `1003`).
+        pub enabled: bool,
+        /// Whether letting a button go is reported (`1002`, `1003`); the X10 mode
+        /// only reports presses.
+        pub press_and_release: bool,
+        /// Whether moving while a button is held is reported (`1002`, `1003`).
+        pub drag: bool,
+        /// Whether every movement is reported, held button or not (`1003`).
+        pub motion: bool,
+        /// Which shape the reports take (`1006` asks for SGR).
+        pub encoding: Encoding,
+    }
+
+    /// The shape of a report.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum Encoding {
+        /// `ESC [ M` and three bytes, the original xterm form.
+        #[default]
+        Default,
+        /// The same, with the three values written as UTF-8 (xterm's `1005`).
+        Utf8,
+        /// `ESC [ < b ; x ; y M`, which has no ceiling on the numbers (xterm's `1006`).
+        Sgr,
+    }
+
+    /// Which button.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Button {
+        Left,
+        Middle,
+        Right,
+    }
+
+    /// Which way the wheel turned.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Wheel {
+        Up,
+        Down,
+    }
+
+    /// What happened to the pointer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Action {
+        Press(Button),
+        Release(Button),
+        Drag(Button),
+        Motion,
+        Wheel(Wheel),
+    }
+
+    /// One report, already in cells of the screen rather than pixels.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Event {
+        pub action: Action,
+        /// Zero-based column and row of the cell under the pointer.
+        pub column: u16,
+        pub row: u16,
+        pub mods: Mods,
+    }
+
+    impl Event {
+        pub fn new(action: Action, column: u16, row: u16, mods: Mods) -> Self {
+            Self {
+                action,
+                column,
+                row,
+                mods,
+            }
+        }
+    }
+
+    impl Action {
+        /// The number xterm gives this action, modifiers aside.
+        fn code(self) -> u8 {
+            let base = match self {
+                Action::Press(Button::Left)
+                | Action::Release(Button::Left)
+                | Action::Drag(Button::Left) => 0,
+                Action::Press(Button::Middle)
+                | Action::Release(Button::Middle)
+                | Action::Drag(Button::Middle) => 1,
+                Action::Press(Button::Right)
+                | Action::Release(Button::Right)
+                | Action::Drag(Button::Right) => 2,
+                // 35 is "moved with nothing held": there is no such button, so the
+                // number has no other use.
+                Action::Motion => 35,
+                Action::Wheel(Wheel::Up) => 64,
+                Action::Wheel(Wheel::Down) => 65,
+            };
+            // A drag is a press of the same button with this bit set.
+            base + if matches!(self, Action::Drag(_)) {
+                32
+            } else {
+                0
+            }
+        }
+
+        fn is_release(self) -> bool {
+            matches!(self, Action::Release(_))
+        }
+    }
+
+    /// The number for a button in the original encoding, where a release says
+    /// nothing about which button it was.
+    const RELEASE_CODE: u8 = 3;
+
+    /// The bytes one report turns into.
+    pub fn bytes(event: Event, encoding: Encoding) -> Vec<u8> {
+        let mods = u8::from(event.mods.shift) * 4
+            + u8::from(event.mods.alt) * 8
+            + u8::from(event.mods.ctrl) * 16;
+        let code = if event.action.is_release() && encoding != Encoding::Sgr {
+            RELEASE_CODE
+        } else {
+            event.action.code()
+        } + mods;
+        let column = event.column as u32 + 1;
+        let row = event.row as u32 + 1;
+
+        match encoding {
+            Encoding::Sgr => {
+                let final_byte = if event.action.is_release() { 'm' } else { 'M' };
+                format!("\x1b[<{code};{column};{row}{final_byte}").into_bytes()
+            }
+            Encoding::Default | Encoding::Utf8 => {
+                let mut bytes = b"\x1b[M".to_vec();
+                for value in [code as u32 + 32, column + 32, row + 32] {
+                    if encoding == Encoding::Utf8 {
+                        // UTF-8 carries anything above 127 in more than one byte,
+                        // which is the whole reason this encoding exists.
+                        let character = char::from_u32(value).unwrap_or('\u{fffd}');
+                        let mut buffer = [0u8; 4];
+                        bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+                    } else {
+                        bytes.push(value as u8);
+                    }
+                }
+                bytes
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Action, Button, Encoding, Event, Wheel, bytes};
+        use crate::keys::Mods;
+
+        fn event(action: Action) -> Event {
+            Event::new(action, 4, 2, Mods::default())
+        }
+
+        #[test]
+        fn a_click_in_the_sgr_form_names_the_button_and_the_cell() {
+            assert_eq!(
+                bytes(event(Action::Press(Button::Left)), Encoding::Sgr),
+                b"\x1b[<0;5;3M".to_vec()
+            );
+            assert_eq!(
+                bytes(event(Action::Release(Button::Left)), Encoding::Sgr),
+                b"\x1b[<0;5;3m".to_vec(),
+                "a release is the same number with a small final letter"
+            );
+            assert_eq!(
+                bytes(event(Action::Press(Button::Right)), Encoding::Sgr),
+                b"\x1b[<2;5;3M".to_vec()
+            );
+        }
+
+        #[test]
+        fn the_wheel_and_the_drag_have_their_own_numbers() {
+            assert_eq!(
+                bytes(event(Action::Wheel(Wheel::Up)), Encoding::Sgr),
+                b"\x1b[<64;5;3M".to_vec()
+            );
+            assert_eq!(
+                bytes(event(Action::Wheel(Wheel::Down)), Encoding::Sgr),
+                b"\x1b[<65;5;3M".to_vec()
+            );
+            assert_eq!(
+                bytes(event(Action::Drag(Button::Left)), Encoding::Sgr),
+                b"\x1b[<32;5;3M".to_vec()
+            );
+            assert_eq!(
+                bytes(event(Action::Motion), Encoding::Sgr),
+                b"\x1b[<35;5;3M".to_vec()
+            );
+        }
+
+        #[test]
+        fn a_modifier_is_one_byte_of_the_number() {
+            let ctrl = Event::new(
+                Action::Press(Button::Left),
+                0,
+                0,
+                Mods {
+                    ctrl: true,
+                    ..Mods::default()
+                },
+            );
+            assert_eq!(bytes(ctrl, Encoding::Sgr), b"\x1b[<16;1;1M".to_vec());
+            let shift_alt = Event::new(
+                Action::Press(Button::Left),
+                0,
+                0,
+                Mods {
+                    shift: true,
+                    alt: true,
+                    ctrl: false,
+                },
+            );
+            assert_eq!(bytes(shift_alt, Encoding::Sgr), b"\x1b[<12;1;1M".to_vec());
+        }
+
+        #[test]
+        fn the_old_form_carries_the_numbers_as_single_bytes() {
+            // `ESC [ M` and three bytes, each 32 above the number; a release has no
+            // button in this form and says 3.
+            assert_eq!(
+                bytes(event(Action::Press(Button::Left)), Encoding::Default),
+                vec![0x1b, b'[', b'M', 32, 37, 35]
+            );
+            assert_eq!(
+                bytes(event(Action::Release(Button::Right)), Encoding::Default),
+                vec![0x1b, b'[', b'M', 32 + 3, 37, 35]
+            );
+        }
+
+        #[test]
+        fn the_utf8_form_writes_the_same_numbers_as_characters() {
+            let far = Event::new(Action::Press(Button::Left), 300, 0, Mods::default());
+            let bytes = bytes(far, Encoding::Utf8);
+            assert_eq!(&bytes[..3], b"\x1b[M");
+            // The button comes first, then 0x20 + 301 = 333, which UTF-8 writes as
+            // two bytes: 0xC5 0x8D.
+            assert_eq!(bytes[3], 32);
+            assert_eq!(&bytes[4..6], "\u{14d}".as_bytes());
         }
     }
 }

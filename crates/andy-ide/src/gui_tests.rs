@@ -2161,3 +2161,109 @@ mod opening_a_panel {
         assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
     }
 }
+
+/// Clicks belong to the program when the program asked for them.
+mod the_terminal_mouse {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn focus(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.event(egui::Event::PointerButton {
+            pos: rect.center(),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        rect
+    }
+
+    fn click(gui: &mut Gui, pos: egui::Pos2) {
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    #[test]
+    fn a_click_reaches_a_program_that_asked_for_the_mouse() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = focus(&mut gui);
+        gui.harness.event(egui::Event::Text(
+            "printf '\\033[?1000h\\033[?1006h'; cat -v\n".to_owned(),
+        ));
+        gui.settle();
+        wait_until(&mut gui, "the program to ask for the mouse", |gui| {
+            gui.app().state.terminal.mouse_enabled()
+        });
+
+        click(&mut gui, rect.center());
+        wait_until(&mut gui, "the click to be reported", |gui| {
+            gui.app().state.terminal.contents().contains("^[[<0;")
+        });
+        let screen = gui.app().state.terminal.contents();
+        assert!(
+            screen.contains("M"),
+            "the report has no final letter: {screen:?}"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn a_click_at_a_plain_prompt_sends_nothing() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = focus(&mut gui);
+        assert!(
+            !gui.app().state.terminal.mouse_enabled(),
+            "a bare shell asked for the mouse"
+        );
+        let before = gui.app().state.terminal.contents();
+        click(&mut gui, rect.center());
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.contents(),
+            before,
+            "a click changed the screen of a program that asked for nothing"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}
