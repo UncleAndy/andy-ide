@@ -49,6 +49,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
             asked = Some(Asked::History);
         }
         branches_menu(ui, state, &mut asked);
+        remote_buttons(ui, state);
     });
     ui.separator();
 
@@ -253,4 +254,33 @@ fn branches_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
     });
 
     state.git.branch_name = name;
+}
+
+/// Fetch, pull and push — the commands that talk to a remote.
+///
+/// They run on their own thread, so the whole row is disabled while one is in flight
+/// and the panel says which: a second `fetch` on top of the first would ask the same
+/// question twice and race for the answer.
+fn remote_buttons(ui: &mut Ui, state: &mut AppState) {
+    if !state.git.has_remote {
+        return;
+    }
+    let busy = state.git.network_busy;
+    ui.horizontal(|ui| {
+        let fetch = ui.add_enabled(busy.is_none(), egui::Button::new("Fetch"));
+        if fetch.clicked() {
+            state.git.fetch();
+        }
+        let pull = ui.add_enabled(busy.is_none(), egui::Button::new("Pull"));
+        if pull.clicked() {
+            state.git.pull();
+        }
+        let push = ui.add_enabled(busy.is_none(), egui::Button::new("Push"));
+        if push.clicked() {
+            state.git.push();
+        }
+        if let Some(doing) = busy {
+            ui.weak(format!("{doing}…"));
+        }
+    });
 }

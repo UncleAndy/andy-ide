@@ -25,6 +25,10 @@ pub fn version() -> &'static str {
 }
 
 /// An open repository.
+/// How long a command that talks to a remote may stay silent before it is
+/// given up on and killed.
+pub const NETWORK_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub struct Repo {
     inner: gix::Repository,
 }

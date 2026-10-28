@@ -14,6 +14,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::NETWORK_LIMIT;
+
 use crate::Branch;
 
 use crate::Repo;
@@ -85,6 +87,135 @@ impl Repo {
             bail!("A commit needs a message.");
         }
         self.git(&["commit", "-m", message])
+    }
+
+    /// Brings the remote branches up to date, without touching the work tree.
+    pub fn fetch(&self) -> Result<String> {
+        self.network(&["fetch", "--prune"])
+    }
+
+    /// Moves the current branch forward to its remote, and refuses to merge.
+    ///
+    /// `--ff-only` because a panel with no conflict editor has no business starting a
+    /// merge it cannot finish: a branch that has diverged is reported, not resolved.
+    pub fn pull(&self) -> Result<String> {
+        self.network(&["pull", "--ff-only"])
+    }
+
+    /// Sends the current branch to its remote.
+    ///
+    /// A branch that has just been created has nothing to push *to*: `git push` then
+    /// answers that it has no upstream branch and prints the very command that would fix
+    /// it. Rather than show the user that instruction and stop, the branch is published
+    /// on the first remote — which is what `push.autoSetupRemote` does and what every
+    /// other editor offers — and `git`'s answer about the upstream is kept, so nothing
+    /// happens behind the panel's back.
+    pub fn push(&self) -> Result<String> {
+        let first = self.network(&["push"]);
+        let Err(error) = &first else {
+            return first;
+        };
+        if !format!("{error}").contains("no upstream branch") {
+            return first;
+        }
+
+        let branch = self.head_label();
+        if branch.is_empty() || branch.chars().all(|c| c.is_ascii_hexdigit()) {
+            // A detached `HEAD` has no branch to publish; git's own words are the
+            // answer.
+            return first;
+        }
+        let remote = self
+            .remotes()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "origin".to_owned());
+        self.network(&["push", "--set-upstream", &remote, &branch])
+    }
+
+    /// The names of the remotes this repository knows, `origin` usually among them.
+    pub fn remotes(&self) -> Vec<String> {
+        self.git(&["remote"])
+            .map(|said| {
+                said.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A command that talks to a remote, and can therefore wait forever.
+    ///
+    /// Three things keep it from doing that: `GIT_TERMINAL_PROMPT=0` so a missing
+    /// credential is an error instead of a prompt nobody can answer, `BatchMode` for
+    /// ssh so a missing key fails rather than asking for a passphrase, and a deadline
+    /// after which the child is killed — a network that has silently stopped answering
+    /// is the one case `git` will hang on, and the window must not hang with it.
+    fn network(&self, args: &[&str]) -> Result<String> {
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        let root = self.root().context("the repository has no work tree")?;
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("running git {}", args.join(" ")))?;
+
+        // The pipes are drained by threads of their own: a child that fills a pipe it
+        // has nobody reading would block, and then wait forever for itself.
+        let mut out_pipe = child.stdout.take().expect("stdout was piped");
+        let mut err_pipe = child.stderr.take().expect("stderr was piped");
+        let out_thread = std::thread::spawn(move || {
+            let mut said = String::new();
+            let _ = out_pipe.read_to_string(&mut said);
+            said
+        });
+        let err_thread = std::thread::spawn(move || {
+            let mut said = String::new();
+            let _ = err_pipe.read_to_string(&mut said);
+            said
+        });
+        let deadline = Instant::now() + NETWORK_LIMIT;
+        let status = loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(
+                        "git {} gave no answer in {} seconds",
+                        args.join(" "),
+                        NETWORK_LIMIT.as_secs()
+                    );
+                }
+                None => std::thread::sleep(Duration::from_millis(40)),
+            }
+        };
+
+        let stdout = out_thread.join().unwrap_or_default();
+        let stderr = err_thread.join().unwrap_or_default();
+        if !status.success() {
+            let said = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
+            bail!("{}", said.trim().to_owned());
+        }
+        Ok(if stdout.trim().is_empty() {
+            stderr
+        } else {
+            stdout
+        })
     }
 
     /// Runs `git` in the work tree and hands back its output.
@@ -266,5 +397,159 @@ mod tests {
         );
         // Nothing was committed: the change is still there.
         assert!(!repo.changes().expect("status").is_empty());
+    }
+}
+
+/// Remotes that live on this disk. No network, no credentials: a bare repository in a
+/// temporary directory is a remote as far as `git` is concerned, which is what makes
+/// these tests honest and still fast.
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("git ran");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A work repository with one commit, a bare remote, and `origin` pointed at it.
+    fn pair() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        git_in(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "remote.git"],
+        );
+        git_in(&work, &["init", "-q", "-b", "main"]);
+        git_in(&work, &["config", "user.name", "Test"]);
+        git_in(&work, &["config", "user.email", "test@example.com"]);
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        git_in(&work, &["add", "a.txt"]);
+        git_in(&work, &["commit", "-q", "-m", "first"]);
+        git_in(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        (dir, work, remote)
+    }
+
+    #[test]
+    fn a_repository_with_a_remote_says_so() {
+        let (_dir, work, _remote) = pair();
+        let repo = Repo::discover(&work).expect("the repository");
+        assert_eq!(repo.remotes(), vec!["origin".to_owned()]);
+    }
+
+    #[test]
+    fn a_repository_without_one_says_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = Repo::discover(dir.path()).expect("the repository");
+        assert!(repo.remotes().is_empty());
+    }
+
+    #[test]
+    fn pushing_puts_the_commit_on_the_remote() {
+        let (_dir, work, remote) = pair();
+        let repo = Repo::discover(&work).expect("the repository");
+        let said = repo.push().expect("the push went through");
+        assert!(
+            said.contains("main"),
+            "git said nothing about the branch: {said:?}"
+        );
+
+        let there = git_in(&remote, &["rev-parse", "main"]);
+        let here = git_in(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(there, here, "the remote does not hold the same commit");
+    }
+
+    #[test]
+    fn pulling_brings_a_commit_from_the_remote() {
+        let (dir, work, _remote) = pair();
+        let repo = Repo::discover(&work).expect("the repository");
+        repo.push().expect("the push went through");
+
+        // A second clone of the same remote, and a commit made in the first one.
+        let other = dir.path().join("other");
+        git_in(dir.path(), &["clone", "-q", "remote.git", "other"]);
+        git_in(&other, &["config", "user.name", "Test"]);
+        git_in(&other, &["config", "user.email", "test@example.com"]);
+
+        std::fs::write(work.join("b.txt"), "from the first clone\n").unwrap();
+        git_in(&work, &["add", "b.txt"]);
+        git_in(&work, &["commit", "-q", "-m", "second"]);
+        repo.push().expect("the second push went through");
+
+        let other_repo = Repo::discover(&other).expect("the second repository");
+        other_repo.pull().expect("the pull went through");
+        assert_eq!(
+            std::fs::read_to_string(other.join("b.txt")).unwrap(),
+            "from the first clone\n",
+            "the file did not arrive with the pull"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_has_diverged_is_refused_not_merged() {
+        let (dir, work, _remote) = pair();
+        let repo = Repo::discover(&work).expect("the repository");
+        repo.push().expect("the push went through");
+        let other = dir.path().join("other");
+        git_in(dir.path(), &["clone", "-q", "remote.git", "other"]);
+        git_in(&other, &["config", "user.name", "Test"]);
+        git_in(&other, &["config", "user.email", "test@example.com"]);
+
+        // Both sides commit, so neither can be reached by moving forward.
+        std::fs::write(work.join("a.txt"), "theirs\n").unwrap();
+        git_in(&work, &["commit", "-q", "-am", "theirs"]);
+        repo.push().expect("the push went through");
+
+        std::fs::write(other.join("a.txt"), "ours\n").unwrap();
+        git_in(&other, &["commit", "-q", "-am", "ours"]);
+        let other_repo = Repo::discover(&other).expect("the second repository");
+
+        let refused = other_repo.pull().expect_err("the pull was not refused");
+        assert!(
+            !format!("{refused}").trim().is_empty(),
+            "the refusal has no words in it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(other.join("a.txt")).unwrap(),
+            "ours\n",
+            "the refused pull changed the work tree anyway"
+        );
+    }
+
+    #[test]
+    fn a_remote_that_is_not_there_is_reported_in_gits_words() {
+        let (_dir, work, _remote) = pair();
+        git_in(
+            &work,
+            &["remote", "set-url", "origin", "/nowhere/at/all.git"],
+        );
+        let repo = Repo::discover(&work).expect("the repository");
+        let refused = repo.push().expect_err("the push was not refused");
+        let said = format!("{refused}");
+        assert!(
+            said.contains("nowhere") || said.contains("does not appear"),
+            "git's own complaint is not in the message: {said:?}"
+        );
     }
 }

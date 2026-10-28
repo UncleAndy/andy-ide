@@ -79,7 +79,10 @@ of them shows what it changed, in the same `Diff` tab. The `Branches` menu switc
 lose work is refused by `git` itself instead of by a guess. In the editor, the margin of
 every open file carries a three-pixel stripe beside each line that the index does not
 have yet — green for a line the file added, blue for one it changed, red where a line
-went away — and staging a file takes the stripes away.
+went away — and staging a file takes the stripes away. A repository with a remote gains
+`Fetch`, `Pull` and `Push`: they run on a thread of their own, so the window stays usable
+while the network thinks, and `Pull` refuses to do anything but move the branch forward —
+a panel with no conflict editor does not start a merge it cannot finish.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).

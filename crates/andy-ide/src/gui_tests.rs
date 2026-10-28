@@ -3015,7 +3015,7 @@ mod the_git_panel {
     ///
     /// The repository has to exist before the window is built: the panel looks for
     /// one when it meets a project, not on every frame.
-    fn managed(files: &[(&str, &str)], open: Option<&str>) -> Gui {
+    pub(super) fn managed(files: &[(&str, &str)], open: Option<&str>) -> Gui {
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         git(project.path(), &["init", "-q", "-b", "main"]);
@@ -3029,7 +3029,7 @@ mod the_git_panel {
         gui
     }
 
-    fn git(root: &Path, args: &[&str]) {
+    pub(super) fn git(root: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(root)
@@ -3053,7 +3053,7 @@ mod the_git_panel {
     }
 
     /// `Alt+9`, the way a user opens the panel.
-    fn show_panel(gui: &mut Gui) {
+    pub(super) fn show_panel(gui: &mut Gui) {
         gui.harness
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num9);
         gui.settle();
@@ -3546,6 +3546,127 @@ mod the_git_panel {
         assert!(
             gui.harness.query_by_label("M  a.txt").is_some(),
             "the changed file is not on screen"
+        );
+    }
+}
+
+/// The commands that talk to a remote, against a remote that lives on this disk.
+#[cfg(test)]
+mod the_remote {
+    use super::the_git_panel::{git, managed, show_panel};
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A bare repository to push to, and `origin` in the project pointed at it.
+    fn remote_for(gui: &Gui) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", "remote.git"],
+        );
+        git(
+            gui._project.path(),
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        // The directory is handed back, so the remote lives exactly as long as the test
+        // does and no two tests share one.
+        (dir, remote)
+    }
+
+    fn head_of(path: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("git ran");
+        assert!(output.status.success(), "rev-parse failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn wait(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            gui.settle();
+            if check(gui) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        panic!(
+            "{what} did not happen; the panel says {:?}",
+            gui.app().state.git.outcome
+        );
+    }
+
+    #[test]
+    fn a_project_without_a_remote_offers_no_fetch_pull_or_push() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        show_panel(&mut gui);
+        assert!(
+            !gui.app().state.git.has_remote,
+            "a project with no remote believes it has one"
+        );
+        assert!(
+            gui.harness.query_by_label("Push").is_none(),
+            "there is a Push button for a project with nowhere to push"
+        );
+    }
+
+    #[test]
+    fn push_sends_the_branch_and_sets_up_the_upstream() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let (_remote_dir, remote) = remote_for(&gui);
+        // The panel learns about a remote when it re-reads, which it is asked to do
+        // here: the test does not want to wait out the timer.
+        gui.app_mut().state.git.refresh(true);
+        show_panel(&mut gui);
+
+        gui.harness.get_by_label("Push").click();
+        wait(&mut gui, "the push finishing", |gui| {
+            gui.app().state.git.network_busy.is_none()
+        });
+
+        let there = head_of(&remote);
+        let here = head_of(gui._project.path());
+        assert_eq!(there, here, "the remote does not hold the same commit");
+        let said = gui.app().state.git.outcome.clone().unwrap_or_default();
+        assert!(
+            !said.trim().is_empty(),
+            "the panel says nothing about what git answered"
+        );
+        assert!(
+            gui.app().state.git.error.is_none(),
+            "the panel reports an error after a push that worked: {:?}",
+            gui.app().state.git.error
+        );
+    }
+
+    #[test]
+    fn a_push_to_a_remote_that_is_not_there_is_reported_and_changes_nothing() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let before = head_of(gui._project.path());
+        git(
+            gui._project.path(),
+            &["remote", "add", "origin", "/nowhere/at/all.git"],
+        );
+        gui.app_mut().state.git.refresh(true);
+        show_panel(&mut gui);
+
+        gui.harness.get_by_label("Push").click();
+        wait(&mut gui, "the push finishing", |gui| {
+            gui.app().state.git.network_busy.is_none()
+        });
+
+        let said = gui.app().state.git.outcome.clone().unwrap_or_default();
+        assert!(
+            said.contains("nowhere") || said.contains("does not appear"),
+            "git's own complaint did not reach the panel: {said:?}"
+        );
+        assert_eq!(
+            head_of(gui._project.path()),
+            before,
+            "the refusal moved HEAD"
         );
     }
 }
