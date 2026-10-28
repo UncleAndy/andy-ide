@@ -5,7 +5,7 @@
 //! gesture that changes something should be one the user can see and aim at.
 
 use egui::Ui;
-use ide_git::{Area, Change};
+use ide_git::{Area, Branch, Change};
 
 use crate::state::{Action, AppState};
 
@@ -16,6 +16,8 @@ enum Asked {
     StageAll,
     Commit,
     History,
+    Switch(String),
+    CreateBranch,
 }
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
@@ -46,6 +48,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         {
             asked = Some(Asked::History);
         }
+        branches_menu(ui, state, &mut asked);
     });
     ui.separator();
 
@@ -81,6 +84,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         });
     }
 
+    let mut enter_used = false;
     ui.horizontal(|ui| {
         let field = egui::TextEdit::singleline(&mut state.git.message)
             .hint_text("Commit message")
@@ -88,8 +92,12 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         let response = ui.add(field);
         // Enter in the field commits: the field has the keyboard, so Enter cannot
         // mean "show the diff" here, and a second key to commit would be a mystery.
+        // `lost_focus` and not `has_focus`: a single-line field gives the focus up
+        // when Enter is pressed, so on that frame it no longer has it — the frame
+        // that carries the Enter is the frame it lost the focus in.
         let typed_enter =
             response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        enter_used = typed_enter;
         if ui
             .add_enabled(
                 !state.git.message.trim().is_empty(),
@@ -119,7 +127,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
 
     // The panel is in front, so the keyboard is not the editor's: Enter on the
     // selected change is the shortest way to its diff.
-    if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+    if !enter_used && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
         state.git.open_selected_diff();
     }
 
@@ -199,6 +207,50 @@ fn apply(state: &mut AppState, asked: Option<Asked>) {
         Some(Asked::StageAll) => state.git.stage_all(),
         Some(Asked::Commit) => state.git.commit(),
         Some(Asked::History) => state.git.show_history = true,
+        Some(Asked::Switch(name)) => state.git.switch_to(&name),
+        Some(Asked::CreateBranch) => state.git.create_branch(),
         None => {}
     }
+}
+
+/// The branches, and the field that starts a new one.
+///
+/// Switching is a menu rather than a keystroke: it moves `HEAD`, and a list with the
+/// current branch marked is the state of the world the choice is made against.
+fn branches_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
+    // The menu reads the list while the field is edited, so the field is taken out
+    // for the duration and put back after: two mutable borrows of the same state
+    // would not compile, and one of them being a text buffer is no reason to clone.
+    let branches: Vec<Branch> = state.git.branches.clone();
+    let mut name = std::mem::take(&mut state.git.branch_name);
+
+    ui.menu_button("Branches", |ui| {
+        for branch in &branches {
+            let label = if branch.is_head {
+                format!("• {}", branch.name)
+            } else {
+                branch.name.clone()
+            };
+            if ui.button(label).clicked() {
+                *asked = Some(Asked::Switch(branch.name.clone()));
+                ui.close();
+            }
+        }
+        if !branches.is_empty() {
+            ui.separator();
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut name)
+                    .hint_text("new branch")
+                    .desired_width(140.0),
+            );
+            if ui.button("New branch").clicked() {
+                *asked = Some(Asked::CreateBranch);
+                ui.close();
+            }
+        });
+    });
+
+    state.git.branch_name = name;
 }

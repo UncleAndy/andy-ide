@@ -65,6 +65,14 @@ pub enum Area {
     Worktree,
 }
 
+/// A branch, as the panel lists it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Branch {
+    pub name: String,
+    /// Whether this is the one checked out.
+    pub is_head: bool,
+}
+
 /// One changed file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Change {

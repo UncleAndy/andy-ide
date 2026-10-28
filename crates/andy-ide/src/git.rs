@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ide_git::{Area, Change, Commit, Repo};
+use ide_git::{Area, Branch, Change, Commit, Repo};
 
 /// How often the panels re-read the repository while they are on screen.
 pub const REFRESH: Duration = Duration::from_millis(1200);
@@ -36,6 +36,10 @@ pub struct GitState {
     pub changes: Vec<Change>,
     /// The change the panel has selected, by index into `changes`.
     pub selected: Option<usize>,
+    /// The local branches, the one checked out first.
+    pub branches: Vec<Branch>,
+    /// The name being typed for a new branch.
+    pub branch_name: String,
     /// The last read of the history, newest first.
     pub commits: Vec<Commit>,
     /// The commit the history panel has selected, by index into `commits`.
@@ -108,6 +112,7 @@ impl GitState {
             }
             Err(error) => self.error = Some(format!("{error}")),
         }
+        self.branches = repo.branches().unwrap_or_default();
         match repo.log(HISTORY) {
             Ok(commits) => {
                 self.commits = commits;
@@ -201,6 +206,20 @@ impl GitState {
     /// The branch name to put in the title, when there is one.
     pub fn branch(&self) -> Option<String> {
         self.repo.as_ref().map(Repo::head_label)
+    }
+
+    /// Moves `HEAD` to another branch, and says what `git` answered.
+    pub fn switch_to(&mut self, name: &str) {
+        let name = name.to_owned();
+        self.apply(|repo| repo.switch_to(&name), "switched");
+    }
+
+    /// Starts a branch at `HEAD` with the name in the field.
+    pub fn create_branch(&mut self) {
+        let name = self.branch_name.clone();
+        if self.apply(|repo| repo.create_branch(&name), "created") {
+            self.branch_name.clear();
+        }
     }
 
     /// Puts the selected change into the index.

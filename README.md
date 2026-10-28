@@ -74,7 +74,9 @@ changes into the index and `Commit` writes them with the message in the field. R
 is native; writing is the real `git`, so hooks, signing and commit templates behave
 exactly as they do on the command line, and a hook's refusal is shown in its own
 words. `Show history` lists the last two hundred commits newest first; `Enter` on one
-of them shows what it changed, in the same `Diff` tab.
+of them shows what it changed, in the same `Diff` tab. The `Branches` menu switches
+`HEAD` and starts new ones — through the real `git switch`, so a dirty tree that would
+lose work is refused by `git` itself instead of by a guess.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).

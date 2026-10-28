@@ -2460,6 +2460,7 @@ mod real_navigation_tests {
 
     #[test]
     fn f12_finds_the_definition_with_rust_analyzer() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2688,6 +2689,7 @@ mod real_reference_tests {
 
     #[test]
     fn shift_f12_lists_the_uses_with_rust_analyzer() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -3027,6 +3029,7 @@ mod real_symbol_tests {
 
     #[test]
     fn ctrl_f12_lists_the_symbols_of_the_file() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -3070,6 +3073,7 @@ mod real_symbol_tests {
 
     #[test]
     fn ctrl_shift_f12_finds_a_symbol_by_name() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -3125,6 +3129,7 @@ mod real_hover_tests {
 
     #[test]
     fn resting_on_a_call_shows_its_signature() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -3293,6 +3298,7 @@ mod real_highlight_tests {
 
     #[test]
     fn the_uses_of_a_type_are_found_in_the_file() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -3560,6 +3566,7 @@ mod real_rename_tests {
 
     #[test]
     fn a_function_is_renamed_everywhere_it_is_used() {
+        let _server = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

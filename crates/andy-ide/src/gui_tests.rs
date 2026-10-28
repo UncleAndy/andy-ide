@@ -3240,6 +3240,149 @@ mod the_git_panel {
         assert_eq!(worktree, vec!["b.txt"], "the other file was staged too");
     }
 
+    /// The branch names the panel knows, in the order the menu shows them.
+    fn branch_names(gui: &Gui) -> Vec<String> {
+        gui.app()
+            .state
+            .git
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_branches_menu_switches_head() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        git(gui._project.path(), &["branch", "feature"]);
+        show_panel(&mut gui);
+
+        assert_eq!(
+            branch_names(&gui),
+            vec!["main".to_owned(), "feature".to_owned()],
+            "the panel does not know the branches"
+        );
+        assert!(
+            gui.harness.query_by_label("main").is_some(),
+            "the checked-out branch is not in the panel"
+        );
+
+        gui.harness.get_by_label("Branches").click();
+        gui.settle();
+        gui.harness.get_by_label("feature").click();
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(
+            gui.app().state.git.branch().as_deref(),
+            Some("feature"),
+            "the switch did not move HEAD"
+        );
+        assert_eq!(
+            gui.app()
+                .state
+                .git
+                .branches
+                .first()
+                .map(|branch| branch.name.clone()),
+            Some("feature".to_owned()),
+            "the panel still lists the old branch first"
+        );
+        assert!(
+            gui.harness.query_by_label("feature").is_some(),
+            "the new branch is not named in the panel"
+        );
+    }
+
+    #[test]
+    fn a_new_branch_is_created_from_the_panel() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        show_panel(&mut gui);
+
+        gui.app_mut().state.git.branch_name = "topic".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Branches").click();
+        gui.settle();
+        gui.harness.get_by_label("New branch").click();
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(
+            gui.app().state.git.branch().as_deref(),
+            Some("topic"),
+            "the new branch was not checked out"
+        );
+        assert!(
+            branch_names(&gui).contains(&"topic".to_owned()),
+            "the new branch is not in the list: {:?}",
+            branch_names(&gui)
+        );
+        assert!(
+            gui.app().state.git.branch_name.is_empty(),
+            "the field kept the name it just used"
+        );
+    }
+
+    #[test]
+    fn switching_branches_leaves_the_files_alone() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        git(gui._project.path(), &["branch", "feature"]);
+        let file = gui._project.path().join("a.txt");
+        std::fs::write(&file, "one\nwork in progress\n").unwrap();
+        show_panel(&mut gui);
+
+        gui.harness.get_by_label("Branches").click();
+        gui.settle();
+        gui.harness.get_by_label("feature").click();
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(gui.app().state.git.branch().as_deref(), Some("feature"));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "one\nwork in progress\n",
+            "the switch touched the working file"
+        );
+    }
+
+    #[test]
+    fn typing_in_the_message_field_and_pressing_enter_commits() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+        show_panel(&mut gui);
+        gui.harness.get_by_label("Stage all").click();
+        gui.settle();
+
+        let field = gui.harness.get_by_role(egui::accesskit::Role::TextInput);
+        field.focus();
+        field.type_text("typed in the field");
+        gui.settle();
+        assert_eq!(
+            gui.app().state.git.message,
+            "typed in the field",
+            "the text did not reach the field"
+        );
+
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        assert!(
+            gui.app().state.git.changes.is_empty(),
+            "Enter in the field did not commit: {:?}",
+            gui.app().state.git.changes
+        );
+        let log = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(gui._project.path())
+            .output()
+            .expect("git ran");
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "typed in the field",
+            "the commit did not carry the typed message"
+        );
+    }
+
     #[test]
     fn the_history_lists_the_commits_and_shows_what_one_changed() {
         let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));

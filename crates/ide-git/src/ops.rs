@@ -14,6 +14,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::Branch;
+
 use crate::Repo;
 
 impl Repo {
@@ -39,6 +41,39 @@ impl Repo {
             Ok(output) => Ok(output),
             Err(_) => self.git(&["rm", "--cached", "-q", "--", &file]),
         }
+    }
+
+    /// The local branches, the one checked out first.
+    pub fn branches(&self) -> Result<Vec<Branch>> {
+        let head = self.branch();
+        let mut branches = Vec::new();
+        for reference in self.inner().references()?.local_branches()? {
+            let reference = reference?;
+            let shortened = reference.name().shorten();
+            let name = String::from_utf8_lossy(shortened.as_ref()).into_owned();
+            branches.push(Branch {
+                is_head: head.as_deref() == Some(name.as_str()),
+                name,
+            });
+        }
+        branches.sort_by(|a, b| b.is_head.cmp(&a.is_head).then(a.name.cmp(&b.name)));
+        Ok(branches)
+    }
+
+    /// Moves `HEAD` to another branch.
+    ///
+    /// `git switch` refuses when the move would throw away local changes, and that
+    /// refusal is the answer: it is shown, not worked around.
+    pub fn switch_to(&self, name: &str) -> Result<String> {
+        self.git(&["switch", name])
+    }
+
+    /// Starts a branch at `HEAD` and moves to it.
+    pub fn create_branch(&self, name: &str) -> Result<String> {
+        if name.trim().is_empty() {
+            bail!("A branch needs a name.");
+        }
+        self.git(&["switch", "-c", name])
     }
 
     /// Commits what is in the index, and returns what `git` printed about it.
@@ -113,6 +148,59 @@ mod tests {
                 .expect("git ran");
         }
         repo
+    }
+
+    #[test]
+    fn the_branch_in_use_is_first_in_the_list() {
+        let (_dir, root) = scratch();
+        let repo = with_identity(&root);
+        repo.stage_all().expect("staged");
+        repo.commit("first").expect("committed");
+        repo.create_branch("feature").expect("a branch");
+
+        let branches = repo.branches().expect("the branches");
+        let names: Vec<(&str, bool)> = branches
+            .iter()
+            .map(|branch| (branch.name.as_str(), branch.is_head))
+            .collect();
+        assert_eq!(names, vec![("feature", true), ("main", false)]);
+        assert_eq!(repo.branch().as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn switching_moves_head_to_another_branch() {
+        let (_dir, root) = scratch();
+        let repo = with_identity(&root);
+        repo.stage_all().expect("staged");
+        repo.commit("first").expect("committed");
+        repo.create_branch("feature").expect("a branch");
+
+        repo.switch_to("main").expect("switched");
+
+        assert_eq!(repo.branch().as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_branch_that_does_not_exist_is_refused_by_git() {
+        let (_dir, root) = scratch();
+        let repo = with_identity(&root);
+        repo.stage_all().expect("staged");
+        repo.commit("first").expect("committed");
+
+        let error = repo.switch_to("nope").expect_err("a branch appeared");
+        assert!(
+            !format!("{error}").trim().is_empty(),
+            "git said nothing about the refusal"
+        );
+        assert_eq!(repo.branch().as_deref(), Some("main"), "HEAD moved anyway");
+    }
+
+    #[test]
+    fn an_empty_branch_name_is_refused_before_git_runs() {
+        let (_dir, root) = scratch();
+        let repo = with_identity(&root);
+        let error = repo.create_branch("   ").expect_err("a branch appeared");
+        assert!(format!("{error}").contains("needs a name"));
     }
 
     #[test]

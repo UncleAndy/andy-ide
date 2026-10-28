@@ -8,6 +8,8 @@ mod gui_tests;
 mod lsp;
 mod rename;
 mod state;
+#[cfg(test)]
+mod test_serial;
 mod ui;
 
 use std::path::PathBuf;
