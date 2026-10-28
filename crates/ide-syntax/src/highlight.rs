@@ -190,6 +190,11 @@ impl Highlighter {
             .and_then(|parser| parser.parse(&self.source, previous.as_ref()));
     }
 
+    /// The text the tree was parsed from; equal to the buffer text when in sync.
+    pub fn source_text(&self) -> &str {
+        &self.source
+    }
+
     /// Highlight ranges intersecting lines `first_line..=last_line`.
     ///
     /// Spans covering the given lines, as a partition: sorted, non-overlapping,
@@ -200,7 +205,7 @@ impl Highlighter {
     /// twice. The window is painted once per byte instead, so the innermost
     /// capture wins.
     pub fn spans_for_lines(&self, first_line: usize, last_line: usize) -> Vec<HighlightSpan> {
-        let range = self.line_byte_range(first_line, last_line);
+        let range = self.window_range(first_line, last_line);
         if range.is_empty() {
             return Vec::new();
         }
@@ -264,6 +269,7 @@ impl Highlighter {
                 *slot = Some(span.kind);
             }
         }
+        snap_to_characters(&self.source, range.clone(), &mut kinds);
 
         let mut spans = Vec::new();
         let mut index = 0;
@@ -295,6 +301,23 @@ impl Highlighter {
     }
 
     /// Byte range covered by `first_line..=last_line`, clamped to the text.
+    /// The byte window for the given lines, inside the parsed text and on
+    /// character boundaries: the lines of a small stale table must not turn
+    /// into a slice outside the text.
+    fn window_range(&self, first_line: usize, last_line: usize) -> Range<usize> {
+        let range = self.line_byte_range(first_line, last_line);
+        let len = self.source.len();
+        let mut start = range.start.min(len);
+        while start > 0 && !self.source.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = range.end.clamp(start, len);
+        while end < len && !self.source.is_char_boundary(end) {
+            end += 1;
+        }
+        start..end
+    }
+
     pub fn line_byte_range(&self, first_line: usize, last_line: usize) -> Range<usize> {
         let start = self
             .line_starts
@@ -406,4 +429,90 @@ fn compile_query(lang: Language, ts: &tree_sitter::Language) -> Option<Arc<Query
         .expect("query cache poisoned")
         .insert(lang, compiled.clone());
     compiled
+}
+
+/// Colours whole characters: a capture that starts or ends inside a multi-byte
+/// character takes the rest of that character with it.
+///
+/// tree-sitter can hand out such ranges after an incremental reparse — the byte
+/// grid would then hold half a letter, and drawing half a letter panics in the
+/// layout. One character of a slightly wrong colour is invisible; a panic is
+/// not.
+fn snap_to_characters(source: &str, range: Range<usize>, kinds: &mut [Option<TokenKind>]) {
+    let text = &source[range.start..range.end];
+    let mut fixed = 0usize;
+    for (offset, character) in text.char_indices() {
+        let width = character.len_utf8();
+        if width == 1 {
+            continue;
+        }
+        let slots = &kinds[offset..offset + width];
+        let Some(kind) = slots.iter().find_map(|slot| *slot) else {
+            continue;
+        };
+        if slots.iter().all(|slot| *slot == Some(kind)) {
+            continue;
+        }
+        fixed += 1;
+        kinds[offset..offset + width].fill(Some(kind));
+    }
+    if fixed > 0 {
+        tracing::debug!(
+            fixed,
+            start = range.start,
+            "colour extended over whole characters"
+        );
+    }
+}
+
+#[cfg(test)]
+mod character_tests {
+    use super::*;
+
+    fn grid(text: &str) -> Vec<Option<TokenKind>> {
+        vec![None; text.len()]
+    }
+
+    #[test]
+    fn half_a_capture_takes_the_whole_character() {
+        let text = "// ПП x";
+        let mut kinds = grid(text);
+        // Colour only the second byte of the first letter, as a stale tree could.
+        kinds[4] = Some(TokenKind::String);
+        snap_to_characters(text, 0..text.len(), &mut kinds);
+        let coloured: Vec<usize> = kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(coloured, vec![3, 4], "the letter at bytes 3..5 stays whole");
+    }
+
+    #[test]
+    fn a_capture_that_cuts_a_character_does_not_leave_half_of_it() {
+        let text = "let s = \"Привет\";";
+        let open = text.find('П').unwrap();
+        let mut kinds = grid(text);
+        for slot in &mut kinds[open + 1..open + 7] {
+            *slot = Some(TokenKind::String);
+        }
+        snap_to_characters(text, 0..text.len(), &mut kinds);
+
+        let mut index = 0;
+        while index < kinds.len() {
+            if kinds[index].is_none() {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < kinds.len() && kinds[index].is_some() {
+                index += 1;
+            }
+            assert!(
+                text.is_char_boundary(start) && text.is_char_boundary(index),
+                "coloured run {start}..{index} splits a character"
+            );
+        }
+    }
 }

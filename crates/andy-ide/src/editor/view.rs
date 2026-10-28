@@ -410,17 +410,35 @@ fn line_job(
         if end <= start {
             continue;
         }
-        push_section(&mut job, &buffer.text()[cursor..start], DEFAULT_FG, font);
-        push_section(
-            &mut job,
-            &buffer.text()[start..end],
-            token_color(span.kind),
-            font,
-        );
+        let plain = text_slice(buffer.text(), cursor, start);
+        push_section(&mut job, plain, DEFAULT_FG, font);
+        let coloured = text_slice(buffer.text(), start, end);
+        push_section(&mut job, coloured, token_color(span.kind), font);
         cursor = end;
     }
-    push_section(&mut job, &buffer.text()[cursor..line_end], DEFAULT_FG, font);
+    let rest = text_slice(buffer.text(), cursor, line_end);
+    push_section(&mut job, rest, DEFAULT_FG, font);
     job
+}
+
+/// Slices text by byte range, moving both ends back onto characters.
+///
+/// Highlight spans are aligned to characters already, but a rendering path must
+/// not be able to panic. Both ends move *inwards*: a half letter is skipped
+/// rather than drawn twice by two neighbouring slices.
+fn text_slice(text: &str, start: usize, end: usize) -> &str {
+    let mut start = floor_boundary(text, start.min(text.len()));
+    let end = floor_boundary(text, end.clamp(start, text.len())).max(start);
+    start = start.min(end);
+    &text[start..end]
+}
+
+fn floor_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn paint_galleys(painter: &egui::Painter, layouts: &LineLayouts, origin: Pos2, row_h: f32) {
@@ -821,6 +839,202 @@ mod line_job_tests {
                 "line {line} was laid out as {:?} but holds {:?}",
                 job.text, expected
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_tests {
+    use super::*;
+    use egui::FontId;
+    use std::path::PathBuf;
+
+    const MIXED: &str = "//! The andy-ide application: window, panels and the editor.\n\nmod app;\nmod editor;\n\n//\n// При открытии каждого файла заново компилировался запрос\n// подсветки, и это было видно.\n//\nfn main() {\n    let text = \"Привет\";\n}\n";
+
+    fn buffer(text: &str) -> EditorBuffer {
+        EditorBuffer::from_text(PathBuf::from("main.rs"), text.to_owned())
+    }
+
+    fn assert_spans_fit(buffer: &EditorBuffer, stage: &str) {
+        let spans = buffer
+            .highlighter
+            .as_ref()
+            .expect("rust highlighting")
+            .spans_for_lines(0, buffer.line_count());
+        let text = buffer.text();
+        for span in &spans {
+            assert!(
+                text.is_char_boundary(span.start_byte) && text.is_char_boundary(span.end_byte),
+                "{stage}: span {:?} splits a character in byte {} of {text:?}",
+                span,
+                if !text.is_char_boundary(span.start_byte) {
+                    span.start_byte
+                } else {
+                    span.end_byte
+                }
+            );
+        }
+        // And the layout must survive too, which is where the panic happened.
+        let font = FontId::monospace(14.0);
+        for line in 0..buffer.line_count() {
+            let _ = line_job(buffer, &spans, &font, line);
+        }
+    }
+
+    #[test]
+    fn spans_stay_on_characters_after_a_block_move() {
+        let mut buffer = buffer(MIXED);
+        assert_spans_fit(&buffer, "fresh");
+
+        // Cut the Cyrillic paragraph: from "//\n" down to "//\n".
+        let cut_start = buffer.line_starts()[5];
+        let cut_end = buffer.line_starts()[9];
+        buffer.set_caret(cut_start);
+        buffer.set_drag_caret(cut_end);
+        buffer.insert_text("");
+        assert_spans_fit(&buffer, "after the cut");
+
+        // Paste it above `fn main`, which is where moving a block ends up.
+        let paste_at = buffer.line_starts()[buffer.line_count() - 4];
+        buffer.set_caret(paste_at);
+        buffer.insert_text("//\n// При открытии каждого файла заново компилировался запрос\n// подсветки, и это было видно.\n//\n");
+        assert_spans_fit(&buffer, "after the paste");
+    }
+
+    /// The panic that started this: a capture boundary inside a Cyrillic
+    /// letter used to slice the text in half and take the window down.
+    #[test]
+    fn a_span_that_cuts_a_character_does_not_panic_the_layout() {
+        let buffer =
+            EditorBuffer::from_text(PathBuf::from("a.rs"), "// Привет, мир и покой\n".to_owned());
+        let text = buffer.text().to_owned();
+        let middle = text.find('П').expect("the letter is there") + 1;
+        let spans = vec![HighlightSpan {
+            start_byte: middle,
+            end_byte: middle + 3,
+            kind: ide_syntax::TokenKind::Comment,
+            priority: 0,
+        }];
+
+        let font = FontId::monospace(14.0);
+        let job = line_job(&buffer, &spans, &font, 0);
+        assert_eq!(
+            job.text,
+            buffer.line_text(0),
+            "every character is laid out once"
+        );
+    }
+
+    #[test]
+    fn slices_move_back_onto_characters() {
+        let text = "abПриветcd";
+        assert_eq!(text_slice(text, 0, 3), "ab", "a cut character stays out");
+        assert_eq!(text_slice(text, 3, 4), "П");
+        assert_eq!(text_slice(text, 4, 6), "р");
+        assert_eq!(text_slice(text, 2, 2), "");
+        assert_eq!(text_slice(text, 99, 99), "");
+        assert_eq!(text_slice(text, 4, 99), "риветcd");
+    }
+
+    #[test]
+    fn typing_cyrillic_one_letter_at_a_time_keeps_spans_clean() {
+        let mut buffer = buffer("fn main() {}\n");
+        buffer.set_caret(buffer.text().len());
+        for letter in ["П", "р", "и", " ", "в", "е"] {
+            buffer.insert_text(letter);
+            assert_spans_fit(&buffer, "typing");
+        }
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_fuzz_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    fn boundary_near(text: &str, index: usize) -> usize {
+        let mut index = index.min(text.len());
+        while index > 0 && !text.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    }
+
+    /// Whatever the user does, tree-sitter captures must land on characters of
+    /// *our* text: a capture boundary from a stale tree used to cut a Cyrillic
+    /// letter in half and panicked the layout.
+    #[test]
+    fn random_edits_never_split_a_character() {
+        let source = include_str!("../../src/main.rs");
+        let mut buffer = EditorBuffer::from_text(PathBuf::from("main.rs"), source.to_owned());
+        let pieces = [
+            "П",
+            "привет ",
+            "x",
+            "\n",
+            "// комментарий\n",
+            "fn f() {}",
+            "",
+            "\n\n\n",
+            "\"строка\"",
+        ];
+        let mut state = 7u64;
+
+        for step in 0..300 {
+            let text = buffer.text().to_owned();
+            let caret = boundary_near(&text, (next(&mut state) as usize) % (text.len() + 1));
+            let spread = (next(&mut state) as usize) % 40;
+            let end = boundary_near(&text, caret + spread);
+            buffer.set_caret(caret);
+            buffer.set_drag_caret(end);
+            let action = (next(&mut state) as usize) % 8;
+            let piece = pieces[(next(&mut state) as usize) % pieces.len()];
+            match action {
+                0 => buffer.insert_text(piece),
+                1 => {
+                    buffer.backspace();
+                }
+                2 => {
+                    buffer.delete_forward();
+                }
+                3 => buffer.indent(),
+                4 => buffer.outdent(),
+                5 => {
+                    buffer.undo();
+                }
+                6 => {
+                    buffer.redo();
+                }
+                _ => buffer.insert_text(piece),
+            }
+
+            let highlighter = buffer.highlighter.as_ref().expect("rust highlighting");
+            assert_eq!(
+                highlighter.source_text(),
+                buffer.text(),
+                "step {step}: the parsed text drifted from the buffer"
+            );
+            let spans = highlighter.spans_for_lines(0, buffer.line_count());
+            let current = buffer.text();
+            for span in &spans {
+                assert!(
+                    current.is_char_boundary(span.start_byte),
+                    "step {step}: start {} splits a character",
+                    span.start_byte
+                );
+                assert!(
+                    current.is_char_boundary(span.end_byte),
+                    "step {step}: end {} splits a character",
+                    span.end_byte
+                );
+            }
         }
     }
 }
