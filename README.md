@@ -42,7 +42,7 @@ until Enter is pressed on that list. The problems panel shows what the server pu
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
 
-Milestone M3 (terminal) is under way: `ide-term` runs a shell on a real pseudo-terminal
+Milestone M3 (terminal) is done: `ide-term` runs a shell on a real pseudo-terminal
 (`portable-pty`) and emulates the screen (`vt100`, 2000 lines of scrollback); the bottom
 strip of the window is one row of tabs, so `Terminal` and `Problems` share it and whichever
 tab is in front uses the whole width. Keys go to the panel that was clicked last, arrows
