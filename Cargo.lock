@@ -212,6 +212,7 @@ dependencies = [
  "egui_commonmark",
  "egui_dock",
  "egui_kittest",
+ "ide-agents",
  "ide-buffer",
  "ide-core",
  "ide-git",

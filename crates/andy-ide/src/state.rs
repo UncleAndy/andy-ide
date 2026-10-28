@@ -124,6 +124,8 @@ pub struct AppState {
     pub terminal: crate::ui::terminal::Terminal,
     /// The repository behind the project, and what it last said.
     pub git: crate::git::GitState,
+    /// The conversation with an agent, and the worker that owns it.
+    pub agent: crate::agent::AgentState,
     /// The language server of the project, once one has been needed.
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
@@ -146,7 +148,7 @@ pub struct AppState {
     watcher: Option<ide_core::ProjectWatcher>,
     fs_events: Option<Receiver<FsEvent>>,
     next_buffer_id: usize,
-    config_dir: PathBuf,
+    pub(crate) config_dir: PathBuf,
     /// `.andy-ide` of the open project, when it could be created.
     workspace: Option<Workspace>,
     /// Background file walk, so startup is not blocked by it.
@@ -194,6 +196,7 @@ impl AppState {
             rename: crate::ui::rename::Rename::new(),
             terminal: crate::ui::terminal::Terminal::new(),
             git: crate::git::GitState::default(),
+            agent: crate::agent::AgentState::default(),
             lsp: None,
             lsp_status: String::new(),
             highlight_key: None,

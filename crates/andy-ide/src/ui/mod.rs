@@ -1,5 +1,6 @@
 //! Panels and the dock contents.
 
+pub mod agent;
 pub mod diff;
 pub mod editor;
 pub mod git;
@@ -32,6 +33,7 @@ pub enum Tab {
     Git,
     Diff,
     History,
+    Agent,
 }
 
 impl Tab {
@@ -44,6 +46,7 @@ impl Tab {
             Tab::Git => "Git",
             Tab::Diff => "Diff",
             Tab::History => "History",
+            Tab::Agent => "Agent",
         }
     }
 }
@@ -73,6 +76,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Git => git::panel(ui, self.state),
             Tab::Diff => diff::panel(ui, self.state),
             Tab::History => history::panel(ui, self.state),
+            Tab::Agent => agent::panel(ui, self.state),
         }
     }
 
@@ -81,7 +85,13 @@ impl TabViewer for Viewer<'_> {
     fn is_closeable(&self, tab: &Tab) -> bool {
         !matches!(
             tab,
-            Tab::Projects | Tab::Editor | Tab::Problems | Tab::Terminal | Tab::Git | Tab::Diff
+            Tab::Projects
+                | Tab::Editor
+                | Tab::Problems
+                | Tab::Terminal
+                | Tab::Git
+                | Tab::Diff
+                | Tab::Agent
         )
     }
 }

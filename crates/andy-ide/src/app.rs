@@ -83,7 +83,8 @@ fn default_layout() -> DockState<Tab> {
 /// may have no terminal tab at all, or it may have one in a pane of its own from a
 /// version that split the strip.
 fn with_terminal(dock: DockState<Tab>) -> DockState<Tab> {
-    let dock = place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Git);
+    let dock = place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Agent);
+    let dock = place_beside_problems(dock, Tab::Git);
     let dock = place_beside_problems(dock, Tab::Diff);
     place_beside_problems(dock, Tab::History)
 }
@@ -206,6 +207,8 @@ impl App {
         // of project does any work here, and only the panel re-reads the status.
         let root = self.state.project.as_ref().map(|project| project.root());
         self.state.git.follow(root);
+        let config = self.state.config_dir.clone();
+        self.state.agent.follow(root, &config);
         if std::mem::take(&mut self.state.git.show_diff) {
             bring_to_front(&mut self.dock, Tab::Diff);
         }
@@ -320,6 +323,9 @@ impl App {
         // The blame of the line under the caret, asked for and not shown by default:
         // walking the history of a file is not something to do on every keystroke.
         let blame = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::B);
+        // Alt+0 is the agents panel: the keys around it are taken (Alt+9 is Git,
+        // Alt+F12 the terminal), and the bottom strip is where a conversation belongs.
+        let agent_panel = KeyboardShortcut::new(Modifiers::ALT, Key::Num0);
 
         // The longer shortcut has to be taken first: Ctrl+Shift+S would
         // otherwise be read as Ctrl+S with a stray modifier.
@@ -339,6 +345,9 @@ impl App {
             .ctx()
             .input_mut(|input| input.consume_shortcut(&git_panel));
         let blame_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&blame));
+        let agent_pressed = ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&agent_panel));
 
         if save_all_pressed {
             self.state.save_all();
@@ -354,6 +363,9 @@ impl App {
         }
         if blame_pressed {
             self.state.toggle_blame();
+        }
+        if agent_pressed {
+            bring_to_front(&mut self.dock, Tab::Agent);
         }
         if quick_open_pressed {
             self.state.quick_open.open();
@@ -523,7 +535,7 @@ mod tests {
     fn default_layout_holds_every_panel() {
         let dock = default_layout();
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(tabs.len(), 7, "every panel is part of the layout: {tabs:?}");
+        assert_eq!(tabs.len(), 8, "every panel is part of the layout: {tabs:?}");
         assert!(tabs.contains(&Tab::Projects));
         assert!(tabs.contains(&Tab::Editor));
         assert!(tabs.contains(&Tab::Problems));
@@ -862,7 +874,7 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 7);
+        assert_eq!(back.iter_all_tabs().count(), 8);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
@@ -885,7 +897,7 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 7);
+        assert_eq!(restored.dock.iter_all_tabs().count(), 8);
         assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
     }
 
@@ -904,7 +916,7 @@ mod layout_persistence_tests {
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 7);
+        assert_eq!(app.dock.iter_all_tabs().count(), 8);
     }
 }
 
@@ -3794,7 +3806,7 @@ mod the_bottom_strip {
             terminal.node_path(),
             "the terminal still has a pane of its own"
         );
-        assert_eq!(tab_count_in_the_problems_leaf(&dock), 5);
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 6);
         let git = dock.find_tab(&Tab::Git).expect("a git tab");
         assert_eq!(
             problems.node_path(),
@@ -3835,7 +3847,7 @@ mod the_bottom_strip {
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(problems.node_path(), terminal.node_path());
-        assert_eq!(tidied.iter_all_tabs().count(), 6, "a tab was duplicated");
+        assert_eq!(tidied.iter_all_tabs().count(), 7, "a tab was duplicated");
     }
 
     /// A layout written before the Git panel existed must gain one, not lose it.
@@ -3876,6 +3888,6 @@ mod the_bottom_strip {
             active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
             Some(Tab::Problems)
         );
-        assert_eq!(tidied.iter_all_tabs().count(), 6);
+        assert_eq!(tidied.iter_all_tabs().count(), 7);
     }
 }

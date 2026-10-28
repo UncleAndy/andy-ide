@@ -100,7 +100,12 @@ project's copy wins over the user's. The client answers what an agent asks it fo
 the editor has allowed it, permissions by policy or by a question in the panel — and
 refuses to claim a terminal it does not yet offer. `crates/ide-agents/src/bin/acp_test_agent.rs`
 is a stand-in agent the tests drive, so the client can be exercised without a model
-installed. The panel that shows a conversation is next.
+installed.
+
+The panel is `Alt+0`: a list of the agents in the file, the conversation as it arrives, a
+field whose Enter sends, and a permission question that stops the turn until it is
+answered. The session lives on a worker thread — the panel posts what was typed, the
+worker pumps what the agent says — so an answer is drawn while it is still being written.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m5.md`](.hermes/plans/2026-10-28_andy-ide-m5.md).

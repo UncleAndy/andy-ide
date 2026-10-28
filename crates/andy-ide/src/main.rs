@@ -1,5 +1,6 @@
 //! The andy-ide application: window, panels and the editor.
 
+mod agent;
 mod app;
 mod editor;
 mod git;

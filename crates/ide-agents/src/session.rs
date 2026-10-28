@@ -91,6 +91,8 @@ pub enum Event {
         /// What is being asked.
         request: PermissionRequest,
     },
+    /// The turn ended, in the agent's own word: `end_turn`, `refusal`, `cancelled`.
+    Finished(String),
     /// The agent closed its output: the process is gone.
     Closed,
     /// Its own words, when it failed.
@@ -123,6 +125,8 @@ pub struct Session {
     allow_writes: bool,
     stderr: Arc<Mutex<String>>,
     closed: bool,
+    /// The request id of the turn in flight, so its answer can end the turn.
+    turn: Option<u64>,
 }
 
 impl Session {
@@ -231,6 +235,7 @@ impl Session {
             allow_writes: false,
             stderr: kept,
             closed: false,
+            turn: None,
         };
 
         session.hello()?;
@@ -271,6 +276,24 @@ impl Session {
             .and_then(Value::as_str)
             .context("the agent opened no session")?;
         self.session_id = id.to_owned();
+        Ok(())
+    }
+
+    /// Starts a turn without waiting for it: the events arrive through
+    /// [`Session::next_event`], and `Event::Finished` ends it.
+    ///
+    /// A chat panel cannot spend a turn blocking: the answer has to be drawn while it
+    /// is being written, so the request is sent here and the rest is the event loop.
+    pub fn start_turn(&mut self, text: &str) -> Result<()> {
+        let id = self.session_id.clone();
+        let request = self.next_id;
+        self.next_id += 1;
+        self.send(Message::request(
+            request,
+            "session/prompt",
+            prompt_params(&id, text),
+        ))?;
+        self.turn = Some(request);
         Ok(())
     }
 
@@ -490,9 +513,30 @@ impl Session {
                     Update::Other { kind, .. } => Some(Event::Other { kind }),
                 }
             }
-            // An answer nobody is waiting for: a request was answered twice, or the
-            // agent invented an id. Neither is worth stopping the conversation over.
-            Message::Response { .. } => None,
+            // The answer to the turn in flight ends it; any other answer belongs to a
+            // wait that has already given up, and is of no use to anybody.
+            Message::Response {
+                id, result, error, ..
+            } => {
+                if self.turn != Some(id) {
+                    return None;
+                }
+                self.turn = None;
+                match (result, error) {
+                    (_, Some(error)) => Some(Event::Failed(format!(
+                        "the agent refused the turn: {}",
+                        error.message
+                    ))),
+                    (Some(result), None) => Some(Event::Finished(
+                        result
+                            .get("stopReason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("end_turn")
+                            .to_owned(),
+                    )),
+                    (None, None) => Some(Event::Finished("end_turn".to_owned())),
+                }
+            }
         }
     }
 

@@ -3796,3 +3796,178 @@ mod the_remote {
         );
     }
 }
+
+/// The conversation panel, driven by the stand-in agent the crate ships for its tests.
+#[cfg(test)]
+mod the_agent_panel {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The stand-in agent, wherever cargo put it.
+    ///
+    /// `CARGO_BIN_EXE_…` is only defined for the package that owns the binary, so the
+    /// path is built from the target directory instead: `cargo test --workspace` builds
+    /// that binary, and a run of this package alone does not — which is why the tests
+    /// say they were skipped rather than failing on a missing fixture.
+    fn stand_in() -> Option<PathBuf> {
+        let profile = std::env::var("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target"));
+        let path = profile.join("debug").join("acp_test_agent");
+        path.is_file().then_some(path)
+    }
+
+    fn with_agent() -> Option<Gui> {
+        let agent = stand_in()?;
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(
+            project.path().join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        Some(gui)
+    }
+
+    fn wait(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            gui.settle();
+            if check(gui) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen; the panel says {:?} with {:?}",
+            gui.app().state.agent.status,
+            gui.app().state.agent.transcript
+        );
+    }
+
+    fn answer(gui: &Gui) -> String {
+        gui.app()
+            .state
+            .agent
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                crate::agent::Line::Agent(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alt_0_shows_the_panel_with_the_agents_from_the_file() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+
+        let names: Vec<String> = gui
+            .app()
+            .state
+            .agent
+            .registry
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["stand-in".to_owned()],
+            "the panel did not read agents.toml"
+        );
+        assert_eq!(gui.app().state.agent.chosen.as_deref(), Some("stand-in"));
+        assert!(
+            gui.harness.query_by_label("Start").is_some(),
+            "there is no way to start the agent"
+        );
+    }
+
+    #[test]
+    fn a_question_gets_an_answer_that_streams_in() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer", |gui| !answer(gui).is_empty());
+
+        assert_eq!(answer(&gui), "Hello", "the pieces did not add up");
+        assert!(
+            gui.harness.query_by_label_contains("Hello").is_some(),
+            "the answer is not on screen"
+        );
+        wait(&mut gui, "the turn ending", |gui| {
+            !gui.app().state.agent.busy
+        });
+    }
+
+    #[test]
+    fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "ask".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the question", |gui| {
+            gui.app().state.agent.asking.is_some()
+        });
+
+        let (_, request) = gui.app().state.agent.asking.clone().expect("a question");
+        assert_eq!(request.title(), "Run the tests");
+        assert!(
+            gui.harness.query_by_label("Allow").is_some(),
+            "the question is not on screen with its options"
+        );
+
+        gui.harness.get_by_label("Allow").click();
+        wait(&mut gui, "the answer to the question", |gui| {
+            answer(gui) == "allowed"
+        });
+        assert!(
+            gui.app().state.agent.asking.is_none(),
+            "the question stayed after it was answered"
+        );
+    }
+}
