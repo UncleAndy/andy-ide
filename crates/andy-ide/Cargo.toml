@@ -14,3 +14,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = "0.36.2"
 egui = "0.36.2"
+egui_dock = "0.21.1"
+
+[dev-dependencies]
+tempfile = "3"

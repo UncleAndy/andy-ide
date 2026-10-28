@@ -1,5 +1,9 @@
 //! The andy-ide application: window, panels and the editor.
 
+mod app;
+mod state;
+mod ui;
+
 use std::path::PathBuf;
 
 use tracing_subscriber::EnvFilter;
@@ -24,28 +28,6 @@ impl Args {
             }
         }
         parsed
-    }
-}
-
-/// Application state. In this milestone it only remembers what was asked to open.
-struct App {
-    project: Option<PathBuf>,
-    file: Option<PathBuf>,
-}
-
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading(format!("andy-ide {}", env!("CARGO_PKG_VERSION")));
-            ui.separator();
-            match &self.project {
-                Some(path) => ui.label(format!("project: {}", path.display())),
-                None => ui.label("project: none"),
-            };
-            if let Some(path) = &self.file {
-                ui.label(format!("file: {}", path.display()));
-            }
-        });
     }
 }
 
@@ -74,10 +56,10 @@ fn main() -> eframe::Result<()> {
         "andy-ide",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(App {
-                project: args.project.clone(),
-                file: args.file.clone(),
-            }))
+            Ok(Box::new(app::App::new(
+                args.project.clone(),
+                args.file.clone(),
+            )))
         }),
     )
 }
