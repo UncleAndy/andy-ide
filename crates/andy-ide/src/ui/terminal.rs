@@ -149,6 +149,15 @@ impl Terminal {
                             self.copy_selection(ui);
                             continue;
                         }
+                        // `Shift+Insert` pastes, the other habit from the same
+                        // keyboard. The backend owns the clipboard, so it is asked to
+                        // read the text and send it back as a paste event, exactly as
+                        // the editor does.
+                        if *key == egui::Key::Insert && modifiers.shift {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                            continue;
+                        }
                         if let Some(byte) = control_letter(*key, *modifiers) {
                             bytes.push(byte);
                         } else if let Some(input) = input_for_key(*key, *modifiers, app) {

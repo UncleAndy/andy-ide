@@ -50,8 +50,8 @@ and `Home`/`End` follow the cursor-key mode the program asked for, and `F1`..`F1
 sent as xterm sends them, and clicks reach a program that asked for the mouse
 (`mc` selects the file under the pointer). With `Shift` held the mouse works for the
 terminal again: a drag picks text even out of a program that wants the mouse, and
-`Ctrl+Shift+C` or `Ctrl+Insert` copies it. `Alt+F12` brings the terminal forward,
-`View` names both panels.
+`Ctrl+Shift+C` or `Ctrl+Insert` copies it, and `Shift+Insert` pastes. `Alt+F12` brings
+the terminal forward, `View` names both panels.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).

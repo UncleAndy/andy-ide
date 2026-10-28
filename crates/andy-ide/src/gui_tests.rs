@@ -2582,3 +2582,93 @@ mod the_terminal_copy_chord {
         gui.app_mut().state.terminal.restart();
     }
 }
+
+/// `Shift+Insert` puts the clipboard into the terminal, as it does in the editor.
+mod the_terminal_paste_chord {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn open_terminal(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+        rect
+    }
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "{what} did not happen: {:?}",
+            gui.app().state.terminal.contents()
+        );
+    }
+
+    #[test]
+    fn shift_insert_asks_for_the_clipboard_and_types_it_into_the_shell() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        open_terminal(&mut gui);
+        let before = gui.app().state.terminal.contents();
+
+        gui.harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+        gui.harness.step();
+        let asked = gui
+            .harness
+            .output()
+            .viewport_output
+            .values()
+            .flat_map(|viewport| viewport.commands.iter())
+            .any(|command| matches!(command, egui::ViewportCommand::RequestPaste));
+        assert!(
+            asked,
+            "Shift+Insert did not ask the backend for the clipboard"
+        );
+        assert_eq!(
+            gui.app().state.terminal.contents(),
+            before,
+            "the paste chord was typed into the shell as a key sequence"
+        );
+
+        // What the backend sends back once it has read the clipboard.
+        gui.harness
+            .input_mut()
+            .events
+            .push(egui::Event::Paste("echo $((6*7))\n".to_owned()));
+        gui.harness.step();
+        wait_until(&mut gui, "the pasted command to run", |gui| {
+            gui.app().state.terminal.contents().contains("42")
+        });
+        gui.app_mut().state.terminal.restart();
+    }
+}
