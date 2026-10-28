@@ -322,3 +322,154 @@ fn ctrl_shift_m_toggles_the_preview_split() {
         "the second Ctrl+Shift+M did not bring the split back"
     );
 }
+
+/// The window's cross: the question it puts, and the answer that has to stick.
+///
+/// `ViewportCommand::Close` is delivered back to the application as a fresh close
+/// request. An application that cancels every request while edits are unsaved
+/// therefore cancels its own quit, and the question comes back for ever; these
+/// checks exist because that is exactly what happened.
+mod closing_the_window {
+    use super::*;
+
+    /// The commands of one frame, in which the cross was clicked.
+    fn frame_with_the_cross(gui: &mut Gui) -> Vec<egui::ViewportCommand> {
+        gui.harness.input_mut().viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        gui.harness.step();
+        commands(&gui.harness)
+    }
+
+    /// The commands of one frame, in which a button of the question was clicked.
+    fn frame_with_the_button(gui: &mut Gui, label: &str) -> Vec<egui::ViewportCommand> {
+        gui.harness.get_by_label(label).click();
+        gui.harness.step();
+        commands(&gui.harness)
+    }
+
+    fn commands(harness: &Harness<'static, App>) -> Vec<egui::ViewportCommand> {
+        harness
+            .output()
+            .viewport_output
+            .values()
+            .flat_map(|viewport| viewport.commands.clone())
+            .collect()
+    }
+
+    fn has(commands: &[egui::ViewportCommand], wanted: fn(&egui::ViewportCommand) -> bool) -> bool {
+        commands.iter().any(wanted)
+    }
+
+    fn dirty_window() -> Gui {
+        let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
+        click_at(&mut gui.harness, egui::pos2(320.0, 60.0));
+        gui.settle();
+        gui.harness.event(egui::Event::Text("X".to_owned()));
+        gui.settle();
+        assert!(
+            gui.app().state.has_unsaved(),
+            "the window has nothing to ask about"
+        );
+        gui
+    }
+
+    #[test]
+    fn the_cross_asks_once_and_the_answer_closes_the_window() {
+        let mut gui = dirty_window();
+
+        let asked = frame_with_the_cross(&mut gui);
+        // The question is put at the end of that frame; the widgets of the modal
+        // need a settled frame before a click can land.
+        gui.settle();
+        assert_eq!(
+            gui.app().state.prompt,
+            Some(Prompt::Quit),
+            "the cross did not ask"
+        );
+        assert!(
+            has(&asked, |command| matches!(
+                command,
+                egui::ViewportCommand::CancelClose
+            )),
+            "the close was not cancelled, the edits would be lost: {asked:?}"
+        );
+
+        // "Quit without saving" is a real button on the screen.
+        let answered = frame_with_the_button(&mut gui, "Quit without saving");
+        assert!(gui.app().state.prompt.is_none(), "the question stayed");
+        assert!(
+            has(&answered, |command| matches!(
+                command,
+                egui::ViewportCommand::Close
+            )),
+            "the window was not told to close: {answered:?}"
+        );
+
+        // eframe turns that Close into a close request on the next frame. It is
+        // the same decision, not a new question: nothing may cancel it again.
+        let again = frame_with_the_cross(&mut gui);
+        assert!(
+            !has(&again, |command| matches!(
+                command,
+                egui::ViewportCommand::CancelClose
+            )),
+            "the window cancelled its own quit: {again:?}"
+        );
+        assert!(gui.app().state.prompt.is_none(), "the question came back");
+    }
+
+    #[test]
+    fn cancel_keeps_the_window_and_the_next_click_asks_again() {
+        let mut gui = dirty_window();
+        frame_with_the_cross(&mut gui);
+        gui.settle();
+
+        let answered = frame_with_the_button(&mut gui, "Cancel");
+        assert!(gui.app().state.prompt.is_none(), "Cancel left the question");
+        assert!(
+            !has(&answered, |command| matches!(
+                command,
+                egui::ViewportCommand::Close
+            )),
+            "Cancel closed the window: {answered:?}"
+        );
+        assert!(gui.app().state.has_unsaved(), "the edits were dropped");
+
+        // The request is over; a second click is a new question.
+        gui.harness.step();
+        frame_with_the_cross(&mut gui);
+        assert_eq!(
+            gui.app().state.prompt,
+            Some(Prompt::Quit),
+            "the second click on the cross did not ask"
+        );
+    }
+
+    #[test]
+    fn save_all_and_quit_writes_the_file_and_closes() {
+        let mut gui = dirty_window();
+        frame_with_the_cross(&mut gui);
+        gui.settle();
+
+        let answered = frame_with_the_button(&mut gui, "Save all and quit");
+
+        assert_eq!(
+            std::fs::read_to_string(gui._project.path().join("a.rs")).unwrap(),
+            "Xone\ntwo\n",
+            "the file was not written"
+        );
+        assert!(!gui.app().state.has_unsaved(), "the buffer is still dirty");
+        assert!(
+            has(&answered, |command| matches!(
+                command,
+                egui::ViewportCommand::Close
+            )),
+            "the window was not told to close: {answered:?}"
+        );
+    }
+}

@@ -82,6 +82,9 @@ pub struct AppState {
     pub prompt: Option<Prompt>,
     /// Set when the user chose to leave; the next frame closes the window.
     pub quit_requested: bool,
+    /// The user answered the quit question: the window may go, and a close that
+    /// comes back as a request again must not be cancelled a second time.
+    pub quit_decided: bool,
     /// Whether the Markdown preview sits beside the source.
     pub preview_open: bool,
     /// The quick-open field.
@@ -138,6 +141,7 @@ impl AppState {
             layout: None,
             prompt: None,
             quit_requested: false,
+            quit_decided: false,
             preview_open: false,
             quick_open: crate::ui::quick_open::QuickOpen::new(),
             lsp: None,
@@ -894,6 +898,7 @@ impl AppState {
                 }
                 Action::Quit => {
                     self.prompt = None;
+                    self.quit_decided = true;
                     self.quit_requested = true;
                     self.save_workspace(None, 0.0, true);
                 }

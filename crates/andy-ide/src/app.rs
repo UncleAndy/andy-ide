@@ -140,11 +140,15 @@ impl App {
             // The user answered the question already: let the window go.
             self.state.quit_requested = false;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if closing && self.state.has_unsaved() {
-            // Never lose edits to a stray click on the window's cross.
+        } else if closing && !self.state.quit_decided && self.state.has_unsaved() {
+            // Never lose edits to a stray click on the window's cross. The
+            // question is put once, not once a frame: a request that arrives
+            // while an answer is pending must not replace what is on screen.
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.state.prompt = Some(crate::state::Prompt::Quit);
+            if self.state.prompt.is_none() {
+                self.state.prompt = Some(crate::state::Prompt::Quit);
+            }
             closing = false;
         }
         // Serializing the dock on every frame costs more than it is worth;

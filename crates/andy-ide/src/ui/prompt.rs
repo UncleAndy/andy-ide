@@ -66,7 +66,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save all and quit").clicked() {
-                        answer = Some(Action::SaveAll);
+                        // Saving alone would leave the window open: the close was
+                        // already cancelled by the question.
+                        state.pending.push(Action::SaveAll);
+                        answer = Some(Action::Quit);
                     }
                     if ui.button("Quit without saving").clicked() {
                         answer = Some(Action::Quit);
