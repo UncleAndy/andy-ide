@@ -2114,12 +2114,14 @@ mod navigation_tests {
     }
 
     #[test]
-    fn a_definition_outside_the_project_is_reported_not_opened() {
+    fn a_definition_outside_the_project_opens_its_file() {
         let (project, _config, mut app) = project(&[("a.rs", "fn a() {}\n")]);
         app.state.open_file(std::path::Path::new("a.rs"));
 
         let outside = tempfile::tempdir().unwrap();
-        let uri = ide_lsp::path_to_uri(&outside.path().join("other.rs")).unwrap();
+        let far = outside.path().join("other.rs");
+        std::fs::write(&far, "alpha\nbeta\n").unwrap();
+        let uri = ide_lsp::path_to_uri(&far).unwrap();
         app.state.apply_outcome(Outcome::Definitions {
             from: project.path().join("a.rs"),
             locations: vec![Location {
@@ -2144,9 +2146,12 @@ mod navigation_tests {
         );
         assert_eq!(
             app.state.tabs.items().len(),
-            1,
-            "no tab was opened for a file outside the project"
+            2,
+            "the external file did not open"
         );
+        let buffer = app.state.active_buffer().expect("a buffer");
+        assert_eq!(buffer.path, far, "the tab holds the absolute path");
+        assert_eq!(buffer.text(), "alpha\nbeta\n", "the code was not read");
     }
 
     #[test]

@@ -629,3 +629,153 @@ mod the_reference_list {
         );
     }
 }
+
+/// What happens after a jump: the code has to be on screen, and a definition
+/// outside the project has to be readable.
+mod jumps {
+    use super::*;
+    use crate::lsp::Outcome;
+    use lsp_types::{Location, Position, Range};
+
+    fn caret_on_screen(gui: &Gui) -> (egui::Pos2, egui::Rect) {
+        gui.harness
+            .ctx
+            .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")))
+            .expect("the editor did not publish where it drew the caret")
+    }
+
+    fn long_file(lines: usize) -> String {
+        (0..lines).map(|n| format!("line {n}\n")).collect()
+    }
+
+    #[test]
+    fn a_jump_far_away_brings_the_caret_into_sight() {
+        let mut gui = Gui::new(&[("a.rs", &long_file(400))], Some("a.rs"));
+        gui.settle();
+        let (before, _) = caret_on_screen(&gui);
+        assert!(before.y < 160.0, "the caret started at {before:?}");
+
+        // A definition on line 300: nothing was typed, nothing was clicked, the
+        // application moved the caret.
+        let uri = ide_lsp::path_to_uri(&gui._project.path().join("a.rs")).unwrap();
+        gui.app_mut().state.apply_outcome(Outcome::Definitions {
+            from: PathBuf::from("a.rs"),
+            locations: vec![Location {
+                uri,
+                range: Range {
+                    start: Position {
+                        line: 300,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 300,
+                        character: 4,
+                    },
+                },
+            }],
+        });
+        gui.settle();
+
+        let (caret, editor) = caret_on_screen(&gui);
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().line_col().0,
+            300,
+            "the caret did not move"
+        );
+        assert!(
+            caret.y >= editor.top() && caret.y <= editor.bottom(),
+            "the caret at {caret:?} is outside the editor {editor:?}: the view did not scroll"
+        );
+    }
+
+    #[test]
+    fn a_definition_outside_the_project_opens_the_file() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.rs");
+        std::fs::write(&far, "one\ntwo\nfn far () {}\nfour\n").unwrap();
+
+        gui.app_mut().state.apply_outcome(Outcome::Definitions {
+            from: PathBuf::from("a.rs"),
+            locations: vec![Location {
+                uri: ide_lsp::path_to_uri(&far).unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 2,
+                        character: 3,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 9,
+                    },
+                },
+            }],
+        });
+        gui.settle();
+
+        assert_eq!(
+            gui.active_tab(),
+            Some(far.clone()),
+            "the definition outside the project did not open"
+        );
+        let buffer = gui.app().state.active_buffer().expect("a buffer");
+        assert_eq!(buffer.line_text(2), "fn far () {}", "the code is not there");
+        assert_eq!(buffer.line_col(), (2, 3), "the caret is not on the symbol");
+        assert!(
+            gui.app().state.status.contains("outside the project"),
+            "the status does not say the file is external: {:?}",
+            gui.app().state.status
+        );
+
+        // The tab is named after the file, and the editor really draws it.
+        assert!(
+            gui.harness.query_by_label("far.rs").is_some(),
+            "the tab or the tree does not name far.rs"
+        );
+    }
+
+    #[test]
+    fn an_external_file_saves_where_it_lives() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.rs");
+        std::fs::write(&far, "one\n").unwrap();
+
+        gui.app_mut().state.apply_outcome(Outcome::Definitions {
+            from: PathBuf::from("a.rs"),
+            locations: vec![Location {
+                uri: ide_lsp::path_to_uri(&far).unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+            }],
+        });
+        gui.settle();
+
+        // Type one letter and save with the keyboard.
+        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        gui.settle();
+        gui.harness.event(egui::Event::Text("X".to_owned()));
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::S);
+        gui.settle();
+
+        assert_eq!(
+            std::fs::read_to_string(&far).unwrap(),
+            "Xone\n",
+            "the external file was not written"
+        );
+        assert!(
+            !gui._project.path().join("far.rs").exists(),
+            "a copy was written into the project"
+        );
+    }
+}

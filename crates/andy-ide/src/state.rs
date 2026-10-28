@@ -504,13 +504,16 @@ impl AppState {
             self.status = display_name(rel);
             return;
         }
-        let Some(root) = self
-            .project
-            .as_ref()
-            .map(|project| project.root().to_path_buf())
-        else {
-            self.status = "no project open".to_owned();
-            return;
+        // A file outside the project (a dependency's source, a definition in the
+        // registry) is opened by its absolute path; everything below joins the
+        // root, and joining an absolute path leaves it alone.
+        let root = match self.project.as_ref() {
+            Some(project) => project.root().to_path_buf(),
+            None if rel.is_absolute() => PathBuf::new(),
+            None => {
+                self.status = "no project open".to_owned();
+                return;
+            }
         };
         match EditorBuffer::load(&root, rel) {
             Ok(buffer) => {
@@ -786,19 +789,33 @@ impl AppState {
                     .project
                     .as_ref()
                     .map(|project| project.root().to_path_buf());
-                let rel = root
+                // A definition outside the project (a crate in the registry, a
+                // dependency of the workspace) is opened all the same: it is
+                // the code the user asked to see, and the tab keeps the absolute
+                // path, which is what reading and saving use.
+                // Inside the project the tab keeps a relative path, like every other
+                // tab; outside it keeps the absolute one, which is what reading and
+                // saving use.
+                let rel = match root
                     .as_ref()
                     .and_then(|root| absolute.strip_prefix(root).ok())
-                    .map(Path::to_path_buf);
-                let Some(rel) = rel else {
-                    self.status = format!("{} is outside the project", absolute.display());
-                    return;
+                {
+                    Some(rel) => rel.to_path_buf(),
+                    None => absolute.clone(),
                 };
+                let external = rel.is_absolute();
                 let text = std::fs::read_to_string(&absolute).unwrap_or_default();
                 let byte = ide_lsp::position_to_byte(&text, first.range.start);
                 self.open_file(&rel);
                 self.place_caret(&rel, byte);
-                self.status = if locations.len() > 1 {
+                self.status = if external {
+                    format!(
+                        "{}:{}:{} (outside the project)",
+                        absolute.display(),
+                        first.range.start.line + 1,
+                        first.range.start.character + 1
+                    )
+                } else if locations.len() > 1 {
                     format!(
                         "{} definitions, jumped to {}:{}",
                         locations.len(),
@@ -844,6 +861,8 @@ impl AppState {
         };
         if let Some(buffer) = self.buffers.get_mut(&buffer_id) {
             buffer.set_caret_byte(byte);
+            // The view has to show what the jump was for.
+            buffer.request_reveal();
         }
     }
 

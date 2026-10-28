@@ -38,6 +38,9 @@ pub struct EditorBuffer {
     /// A Ctrl+Click asked for the definition of the character at this index, and
     /// the application has not answered it yet.
     nav_request: Option<usize>,
+    /// The caret was moved by the application, not by the user: the view has to
+    /// bring it into sight even though no key was pressed.
+    reveal_caret: bool,
 }
 
 impl EditorBuffer {
@@ -68,6 +71,7 @@ impl EditorBuffer {
             line_ends: Vec::new(),
             max_line_chars: 0,
             nav_request: None,
+            reveal_caret: false,
         };
         buffer.refresh();
         buffer
@@ -141,6 +145,16 @@ impl EditorBuffer {
         let line = line.min(self.line_count().saturating_sub(1));
         let col = col.min(self.line_text(line).chars().count());
         self.doc.line_col_to_char(line, col)
+    }
+
+    /// Asks the view to scroll the caret into sight on the next frame.
+    pub fn request_reveal(&mut self) {
+        self.reveal_caret = true;
+    }
+
+    /// Takes the request, if the caret has to be brought into sight.
+    pub fn take_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.reveal_caret)
     }
 
     /// Records that the character at this index was clicked with Ctrl held.

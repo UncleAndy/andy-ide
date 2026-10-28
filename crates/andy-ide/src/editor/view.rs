@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use egui::text::{ByteIndex, CCursor, LayoutJob, LayoutSection};
 use egui::{
-    Color32, CornerRadius, Event, FontId, Galley, Key, Pos2, Rect, Sense, TextFormat, TextStyle,
-    Ui, Vec2,
+    Color32, CornerRadius, Event, FontId, Galley, Id, Key, Pos2, Rect, Sense, TextFormat,
+    TextStyle, Ui, Vec2,
 };
 use ide_core::Theme;
 use ide_syntax::{HighlightSpan, TokenKind};
@@ -277,7 +277,21 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
             // A wheel scroll moves the view and leaves the caret alone: chasing
             // it then would fight the wheel. Only a caret move or an explicit
             // navigation key pulls the view.
-            let pull = outside && (navigated || previous.is_none());
+            // A jump the application asked for (a definition, a diagnostic, a
+            // reference in the list) has no key press behind it, so it is
+            // announced by the buffer: the caret must end up in sight.
+            let reveal = buffer.take_reveal();
+            let pull = reveal || (outside && (navigated || previous.is_none()));
+            // Where the caret was drawn, for the tests: the only way to check
+            // that a jump scrolled the view is to look at this.
+            // The clip rect is what the user can actually see: the allocated rect
+            // spans the whole content and would make any caret look visible.
+            ui.data_mut(|data| {
+                data.insert_temp(
+                    Id::new("andy-ide-caret-on-screen"),
+                    (caret_pos, ui.clip_rect()),
+                );
+            });
             if pull && !drag_scrolled {
                 // Instant, like an editor: a smooth animation would leave the
                 // caret off screen for a moment after Ctrl+Home.
