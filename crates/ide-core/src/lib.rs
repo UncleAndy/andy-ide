@@ -2,9 +2,14 @@
 //!
 //! This crate is UI-agnostic: it must never depend on `egui` or `eframe`.
 
+pub mod config;
+pub mod fs;
 pub mod project;
+pub mod session;
 
+pub use config::{Config, Theme};
 pub use project::{Entry, EntryKind, Project, TreeOptions};
+pub use session::{RECENT_LIMIT, Recent, Session, TabState};
 
 /// Version of the crate, taken from its manifest.
 pub fn version() -> &'static str {
