@@ -46,6 +46,9 @@ pub struct EditorBuffer {
     /// Where the pointer rests in the text, in line and column, with the screen
     /// position of the hint. Set by the view every frame it draws.
     pub hover: Option<(usize, usize, egui::Pos2)>,
+    /// Byte ranges of every use of the symbol under the caret, in this file.
+    /// Emptied by every edit: the offsets stop meaning anything.
+    pub occurrences: Vec<(usize, usize)>,
 }
 
 impl EditorBuffer {
@@ -78,6 +81,7 @@ impl EditorBuffer {
             nav_request: None,
             reveal_caret: 0,
             hover: None,
+            occurrences: Vec::new(),
         };
         buffer.refresh();
         buffer
@@ -420,6 +424,8 @@ impl EditorBuffer {
 
     /// Rebuilds the flat mirror, the line table and the highlight spans.
     fn refresh(&mut self) {
+        // The offsets of the last highlight belong to the old text.
+        self.occurrences.clear();
         let previous = std::mem::take(&mut self.text);
         self.text = self.doc.text();
         let lines = split_lines(&self.text);

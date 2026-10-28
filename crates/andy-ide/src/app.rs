@@ -163,6 +163,9 @@ impl App {
         if let Some(wait) = self.state.track_hover(now) {
             ui.ctx().request_repaint_after(wait);
         }
+        if let Some(wait) = self.state.track_highlights(now) {
+            ui.ctx().request_repaint_after(wait);
+        }
         self.state.hover.show(ui.ctx());
 
         self.frames += 1;
@@ -3038,5 +3041,181 @@ mod real_hover_tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("no hint came back in 120 s");
+    }
+}
+
+/// The uses of the symbol under the caret, and the rules around them.
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+    use crate::lsp::Outcome;
+
+    const TEXT: &str = "fn make() -> u8 { 1 }\n\nfn other() -> u8 {\n    make()\n}\n";
+
+    fn app_with_text() -> (tempfile::TempDir, tempfile::TempDir, App) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), TEXT).unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("a.rs"));
+        (project, config, app)
+    }
+
+    fn occurrences(app: &App) -> Vec<(usize, usize)> {
+        app.state
+            .active_buffer()
+            .map(|buffer| buffer.occurrences.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_use_under_the_caret_stops_the_question_until_it_moves() {
+        let (_project, _config, mut app) = app_with_text();
+        let caret = TEXT.find("make()").unwrap();
+        app.state.active_buffer_mut().unwrap().set_caret_byte(caret);
+
+        assert!(
+            app.state.track_highlights(0.0).is_some(),
+            "the caret moved and nothing was scheduled"
+        );
+        // Nothing is asked while the caret is still; no server is running, and one
+        // is not started for decoration.
+        assert!(app.state.track_highlights(1.0).is_none());
+        assert!(
+            app.state.lsp.is_none(),
+            "a server was started for a highlight"
+        );
+    }
+
+    #[test]
+    fn an_answer_is_turned_into_byte_ranges_of_this_text() {
+        let (_project, _config, mut app) = app_with_text();
+        let caret = TEXT.rfind("make").unwrap();
+        app.state.active_buffer_mut().unwrap().set_caret_byte(caret);
+        app.state.apply_outcome(Outcome::Highlights {
+            path: std::path::PathBuf::from("a.rs"),
+            line: 3,
+            character: 4,
+            spots: vec![(0, 3, 0, 7), (3, 4, 3, 8)],
+        });
+
+        assert_eq!(
+            occurrences(&app),
+            vec![
+                (3, 7),
+                (TEXT.rfind("make").unwrap(), TEXT.rfind("make").unwrap() + 4)
+            ],
+            "the protocol positions were not turned into the bytes of this text"
+        );
+    }
+
+    #[test]
+    fn an_answer_about_another_symbol_is_dropped() {
+        let (_project, _config, mut app) = app_with_text();
+        let caret = TEXT.find("make()").unwrap();
+        app.state.active_buffer_mut().unwrap().set_caret_byte(caret);
+
+        // The caret has moved to `other` while the server was thinking.
+        app.state.apply_outcome(Outcome::Highlights {
+            path: std::path::PathBuf::from("a.rs"),
+            line: 2,
+            character: 3,
+            spots: vec![(0, 3, 0, 7)],
+        });
+
+        assert!(
+            occurrences(&app).is_empty(),
+            "the uses of the old symbol were painted"
+        );
+    }
+}
+
+/// Highlights through the real server.
+#[cfg(test)]
+mod real_highlight_tests {
+    use super::*;
+
+    const SOURCE: &str = "pub struct Point {\n    pub x: i32,\n    pub y: i32,\n}\n\npub fn make() -> Point {\n    Point { x: 1, y: 2 }\n}\n";
+
+    #[test]
+    fn the_uses_of_a_type_are_found_in_the_file() {
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/lib.rs")) else {
+            println!("no server for rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/lib.rs"), SOURCE).unwrap();
+
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/lib.rs"));
+
+        // A server is not started for decoration, so one is started the way the
+        // user would start it: by asking for the file's symbols.
+        app.state.file_symbols();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline && !app.state.results.open {
+            app.state.poll_lsp();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(app.state.results.open, "the server never answered");
+        app.state.results.open = false;
+
+        let declaration = SOURCE.find("Point").unwrap();
+        app.state
+            .active_buffer_mut()
+            .unwrap()
+            .set_caret_byte(declaration);
+
+        let mut now = 0.0;
+        while std::time::Instant::now() < deadline {
+            now += 0.1;
+            app.state.poll_lsp();
+            app.state.track_highlights(now);
+            let buffer = app.state.active_buffer().unwrap();
+            if buffer.occurrences.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            let text = SOURCE;
+            let found: Vec<&str> = buffer
+                .occurrences
+                .iter()
+                .map(|(start, end)| &text[*start..*end])
+                .collect();
+            println!("highlights: {found:?}");
+            assert!(
+                found.len() >= 2,
+                "a type used twice was found {found:?} times"
+            );
+            assert!(
+                found.iter().all(|word| *word == "Point"),
+                "a highlight covers something that is not the symbol: {found:?}"
+            );
+            return;
+        }
+        panic!("no highlights came back in 120 s");
     }
 }

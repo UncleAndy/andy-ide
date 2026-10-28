@@ -33,6 +33,9 @@ const CARET_BLINK: f64 = 0.53;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub selection: Color32,
+    /// Behind a use of the symbol under the caret, dimmer than a selection: it is
+    /// context, not a choice the user made.
+    pub occurrence: Color32,
     pub caret: Color32,
     pub gutter_bg: Color32,
     pub gutter_fg: Color32,
@@ -43,6 +46,7 @@ pub struct Palette {
 impl Palette {
     pub const DARK: Palette = Palette {
         selection: Color32::from_rgb(38, 79, 120),
+        occurrence: Color32::from_rgba_premultiplied(46, 74, 46, 90),
         caret: Color32::from_rgb(220, 220, 220),
         gutter_bg: Color32::from_rgb(30, 30, 30),
         gutter_fg: Color32::from_rgb(110, 110, 110),
@@ -52,6 +56,7 @@ impl Palette {
 
     pub const LIGHT: Palette = Palette {
         selection: Color32::from_rgb(181, 213, 255),
+        occurrence: Color32::from_rgba_premultiplied(180, 214, 180, 120),
         caret: Color32::from_rgb(20, 20, 20),
         gutter_bg: Color32::from_rgb(240, 240, 240),
         gutter_fg: Color32::from_rgb(140, 140, 140),
@@ -262,6 +267,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 char_w,
                 row_h,
             };
+            paint_occurrences(paint_ctx(), buffer, &layouts, first_line, last_line);
             paint_selection(paint_ctx(), buffer, &layouts, first_line, last_line);
             paint_galleys(&painter, palette, &layouts, text_origin, row_h);
             let (caret_line, _) = buffer.line_col();
@@ -372,6 +378,51 @@ fn caret_follow(previous: Option<usize>, caret: usize, viewport: Rect, row: Rect
         return (false, false);
     }
     (true, !viewport.contains_rect(row))
+}
+
+////// Every use of the symbol under the caret in this file, in a colour dimmer than
+/// a selection: the eye can see the other uses without the text looking chosen.
+fn paint_occurrences(
+    ctx: PaintCtx,
+    buffer: &EditorBuffer,
+    layouts: &LineLayouts,
+    first_line: usize,
+    last_line: usize,
+) {
+    if buffer.occurrences.is_empty() {
+        return;
+    }
+    let starts = buffer.line_starts();
+    for &(start, end) in &buffer.occurrences {
+        // A range that belongs to another line is not painted here: the list has
+        // one entry per occurrence, and most of them are on lines out of sight.
+        let Some(line) = starts
+            .iter()
+            .rposition(|line_start| *line_start <= start)
+            .filter(|line| *line >= first_line && *line < last_line)
+        else {
+            continue;
+        };
+        let line_start = starts[line];
+        let text = buffer.line_text(line);
+        let line_end = line_start + text.len();
+        let from = start.max(line_start);
+        let to = end.min(line_end);
+        if from >= to {
+            continue;
+        }
+        let first = text[..from - line_start].chars().count();
+        let last = text[..to - line_start].chars().count();
+        let y = ctx.origin.y + (line as f32) * ctx.row_h;
+        let x1 = ctx.origin.x + x_for_col(layouts, text, line, first, ctx.char_w);
+        let x2 = ctx.origin.x + x_for_col(layouts, text, line, last, ctx.char_w);
+        let rect = Rect::from_min_max(
+            Pos2::new(x1, y),
+            Pos2::new((x2 - 1.0).max(x1 + 2.0), y + ctx.row_h),
+        );
+        ctx.painter
+            .rect_filled(rect, CornerRadius::from(2), ctx.palette.occurrence);
+    }
 }
 
 /// Line numbers along the left edge, in a muted colour.

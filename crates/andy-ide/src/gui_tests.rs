@@ -1538,3 +1538,71 @@ mod the_hint {
         );
     }
 }
+
+/// The dim background under the other uses of the symbol under the caret.
+///
+/// Painted rather than built from widgets, so the checks are: a frame with the
+/// ranges drawn does not panic, and the ranges do not outlive the text they were
+/// measured in.
+mod the_occurrence_background {
+    use super::*;
+
+    fn set_occurrences(gui: &mut Gui, ranges: &[(usize, usize)]) {
+        let buffer = gui
+            .app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("no open buffer");
+        buffer.occurrences = ranges.to_vec();
+    }
+
+    #[test]
+    fn a_range_over_cyrillic_is_drawn_without_slicing_a_character() {
+        let mut gui = Gui::new(&[("a.rs", "let привет = привет;\n")], Some("a.rs"));
+        let text = gui.app().state.active_buffer().unwrap().text().to_owned();
+        let first = text.find("привет").unwrap();
+        let last = text.rfind("привет").unwrap();
+        set_occurrences(
+            &mut gui,
+            &[
+                (first, first + "привет".len()),
+                (last, last + "привет".len()),
+            ],
+        );
+
+        gui.settle();
+        assert!(
+            gui.app().state.active_buffer().unwrap().occurrences.len() == 2,
+            "the ranges were lost"
+        );
+    }
+
+    #[test]
+    fn a_range_that_runs_past_its_line_is_clipped() {
+        let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
+        // A range from the first line into the second: a stale answer looks like
+        // this, and painting it must not run off the end of a line.
+        set_occurrences(&mut gui, &[(0, 7)]);
+        gui.settle();
+    }
+
+    #[test]
+    fn an_edit_clears_the_ranges() {
+        let mut gui = Gui::new(&[("a.rs", "alpha beta\n")], Some("a.rs"));
+        set_occurrences(&mut gui, &[(0, 5)]);
+        gui.settle();
+
+        gui.harness.event(egui::Event::Text("X".to_owned()));
+        gui.settle();
+
+        assert!(
+            gui.app()
+                .state
+                .active_buffer()
+                .unwrap()
+                .occurrences
+                .is_empty(),
+            "the ranges still point into text that has changed"
+        );
+    }
+}

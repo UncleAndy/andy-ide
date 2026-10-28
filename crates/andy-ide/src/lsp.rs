@@ -41,6 +41,11 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// Where the symbol at one position is used in this file.
+    Highlights {
+        path: PathBuf,
+        position: Position,
+    },
     /// The outline of one file.
     Symbols {
         path: PathBuf,
@@ -74,6 +79,13 @@ pub enum Outcome {
         line: u32,
         character: u32,
         text: Option<String>,
+    },
+    /// The uses of a symbol in one file, as ranges of the protocol's positions.
+    Highlights {
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        spots: Vec<(u32, u32, u32, u32)>,
     },
     /// The outline of one file, as the server nested it.
     Symbols {
@@ -340,6 +352,30 @@ fn apply(session: &mut LspSession, job: Job, warm: &mut bool) -> Option<Outcome>
                 line: position.line,
                 character: position.character,
                 text,
+            })
+        }
+        Job::Highlights { path, position } => {
+            let spots = match session.document_highlights(&path, position) {
+                Ok(highlights) => highlights
+                    .iter()
+                    .map(|highlight| {
+                        (
+                            highlight.range.start.line,
+                            highlight.range.start.character,
+                            highlight.range.end.line,
+                            highlight.range.end.character,
+                        )
+                    })
+                    .collect(),
+                // A highlight is decoration: a server that cannot answer must not
+                // put an error in the status bar on every caret move.
+                Err(_) => Vec::new(),
+            };
+            Some(Outcome::Highlights {
+                path,
+                line: position.line,
+                character: position.character,
+                spots,
             })
         }
         Job::WorkspaceSymbols { query } => Some(match session.workspace_symbols(&query) {

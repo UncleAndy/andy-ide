@@ -112,6 +112,10 @@ pub struct AppState {
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
     pub lsp_status: String,
+    /// The caret whose uses were last asked for, and when it got there.
+    highlight_key: Option<(PathBuf, usize)>,
+    highlight_asked: Option<(PathBuf, usize)>,
+    highlight_since: f64,
     /// When the zoom last changed, in input time, and the size last written.
     zoom_changed_at: f64,
     saved_font_size: f32,
@@ -172,6 +176,9 @@ impl AppState {
             hover: crate::ui::hover::Hover::new(),
             lsp: None,
             lsp_status: String::new(),
+            highlight_key: None,
+            highlight_asked: None,
+            highlight_since: 0.0,
             zoom_changed_at: 0.0,
             saved_font_size,
             last_sync: 0.0,
@@ -437,6 +444,80 @@ impl AppState {
         });
         self.hover.asked(spot);
         None
+    }
+
+    /// Asks the server where the symbol under the caret is used in this file.
+    ///
+    /// Like the hint, this waits for the caret to stop: every key press moves it,
+    /// and a request per press would queue in front of the next definition. A
+    /// server that is not running yet is not started for decoration alone — the
+    /// highlight appears once the editor has a reason to run a server.
+    pub fn track_highlights(&mut self, now: f64) -> Option<std::time::Duration> {
+        /// How long the caret stays put before its uses are asked for.
+        const DELAY: f64 = 0.12;
+
+        let Some(buffer) = self.active_buffer() else {
+            self.highlight_key = None;
+            self.highlight_asked = None;
+            return None;
+        };
+        let key = (buffer.path.clone(), buffer.caret_byte());
+        if self.highlight_key.as_ref() != Some(&key) {
+            self.highlight_key = Some(key);
+            self.highlight_since = now;
+            return Some(std::time::Duration::from_secs_f64(DELAY));
+        }
+        if self.highlight_asked.as_ref() == self.highlight_key.as_ref() {
+            return None;
+        }
+        let waited = now - self.highlight_since;
+        if waited < DELAY {
+            return Some(std::time::Duration::from_secs_f64(DELAY - waited));
+        }
+        let (path, caret) = self.highlight_key.clone()?;
+        let buffer = self.active_buffer()?;
+        let position = ide_lsp::byte_to_position(buffer.text(), caret);
+        let lsp = self.lsp.as_ref()?;
+        lsp.send(crate::lsp::Job::Highlights { path, position });
+        self.highlight_asked = self.highlight_key.clone();
+        None
+    }
+
+    /// The uses of a symbol, as ranges of bytes in the file they were asked for.
+    fn apply_highlights(
+        &mut self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        spots: &[(u32, u32, u32, u32)],
+    ) {
+        let Some(buffer) = self.active_buffer_mut() else {
+            return;
+        };
+        if buffer.path != path {
+            return;
+        }
+        // The caret may have moved while the server was thinking: the places of
+        // the old symbol are not the places of the new one.
+        let (caret_line, caret_col) = buffer.line_col();
+        if caret_line != line as usize || caret_col != character as usize {
+            return;
+        }
+        let text = buffer.text().to_owned();
+        let ranges: Vec<(usize, usize)> = spots
+            .iter()
+            .map(|(start_line, start_col, end_line, end_col)| {
+                let start = ide_lsp::position_to_byte(
+                    &text,
+                    lsp_types::Position::new(*start_line, *start_col),
+                );
+                let end =
+                    ide_lsp::position_to_byte(&text, lsp_types::Position::new(*end_line, *end_col));
+                (start, end.max(start))
+            })
+            .filter(|(start, end)| end > start)
+            .collect();
+        buffer.occurrences = ranges;
     }
 
     /// Where the pointer rests, as the view of the active tab last saw it.
@@ -1073,6 +1154,12 @@ impl AppState {
                 character,
                 text,
             } => self.hover.answer(&path, line, character, text),
+            crate::lsp::Outcome::Highlights {
+                path,
+                line,
+                character,
+                spots,
+            } => self.apply_highlights(&path, line, character, &spots),
             crate::lsp::Outcome::NoDefinition { from } => {
                 self.status = format!("no definition for the symbol in {}", display_name(&from));
             }

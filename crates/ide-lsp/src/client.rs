@@ -391,6 +391,18 @@ impl LspSession {
         Ok(serde_json::from_value(result).ok().flatten())
     }
 
+    /// Every place the symbol at `position` is used in this file.
+    ///
+    /// A server may answer `null` instead of an empty list, so both are one.
+    pub fn document_highlights(
+        &mut self,
+        path: &Path,
+        position: Position,
+    ) -> Result<Vec<lsp_types::DocumentHighlight>> {
+        let result = self.positioned_request("textDocument/documentHighlight", path, position)?;
+        Ok(serde_json::from_value(result).unwrap_or_default())
+    }
+
     /// Diagnostics the server published since the last call.
     pub fn drain_diagnostics(&self) -> Vec<PublishDiagnosticsParams> {
         self.process
