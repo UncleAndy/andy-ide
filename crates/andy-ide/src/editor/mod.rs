@@ -39,8 +39,10 @@ pub struct EditorBuffer {
     /// the application has not answered it yet.
     nav_request: Option<usize>,
     /// The caret was moved by the application, not by the user: the view has to
-    /// bring it into sight even though no key was pressed.
-    reveal_caret: bool,
+    /// bring it into sight even though no key was pressed. Counted in frames,
+    /// because the first frame of a fresh scroll area may not know its size yet
+    /// and would swallow the scroll.
+    reveal_caret: u8,
 }
 
 impl EditorBuffer {
@@ -71,7 +73,7 @@ impl EditorBuffer {
             line_ends: Vec::new(),
             max_line_chars: 0,
             nav_request: None,
-            reveal_caret: false,
+            reveal_caret: 0,
         };
         buffer.refresh();
         buffer
@@ -147,14 +149,21 @@ impl EditorBuffer {
         self.doc.line_col_to_char(line, col)
     }
 
-    /// Asks the view to scroll the caret into sight on the next frame.
+    /// Asks the view to bring the caret into sight on the next frames.
     pub fn request_reveal(&mut self) {
-        self.reveal_caret = true;
+        // Eight frames, because a scroll area that has just appeared does not
+        // know its content size yet and swallows the first requests; every frame
+        // after the caret is in sight does nothing.
+        self.reveal_caret = 8;
     }
 
-    /// Takes the request, if the caret has to be brought into sight.
+    /// Takes one frame of the request: the view may need more than one.
     pub fn take_reveal(&mut self) -> bool {
-        std::mem::take(&mut self.reveal_caret)
+        if self.reveal_caret == 0 {
+            return false;
+        }
+        self.reveal_caret -= 1;
+        true
     }
 
     /// Records that the character at this index was clicked with Ctrl held.

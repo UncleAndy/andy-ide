@@ -281,7 +281,10 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
             // reference in the list) has no key press behind it, so it is
             // announced by the buffer: the caret must end up in sight.
             let reveal = buffer.take_reveal();
-            let pull = reveal || (outside && (navigated || previous.is_none()));
+            // A reveal only relaxes the need for a key press: the view still
+            // scrolls just when the caret is out of sight, so a second frame of
+            // the same request cannot drag the text further than the first.
+            let pull = outside && (reveal || navigated || previous.is_none());
             // Where the caret was drawn, for the tests: the only way to check
             // that a jump scrolled the view is to look at this.
             // The clip rect is what the user can actually see: the allocated rect
@@ -293,13 +296,23 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette) -> bool {
                 );
             });
             if pull && !drag_scrolled {
+                // A jump from elsewhere lands the caret in the middle third of the
+                // view: scrolling just enough would leave it on the last row, where
+                // it is easy to miss and can be clipped by the edge of the window.
+                // A key press only scrolls as far as it must, or every arrow would
+                // re-centre the text.
+                let target = if reveal {
+                    let margin = Vec2::new(0.0, ui.clip_rect().height() / 3.0);
+                    Rect::from_min_max(
+                        caret_pos - margin,
+                        caret_pos + Vec2::new(1.0, row_h) + margin,
+                    )
+                } else {
+                    Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0)
+                };
                 // Instant, like an editor: a smooth animation would leave the
                 // caret off screen for a moment after Ctrl+Home.
-                ui.scroll_to_rect_animation(
-                    Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0),
-                    None,
-                    egui::style::ScrollAnimation::none(),
-                );
+                ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
             }
         });
 

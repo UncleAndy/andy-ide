@@ -648,6 +648,16 @@ mod jumps {
         (0..lines).map(|n| format!("line {n}\n")).collect()
     }
 
+    /// The caret has to be inside the view, with room around it: a caret on the
+    /// very last row is easy to miss and the edge of the window can clip it.
+    fn assert_in_sight(caret: egui::Pos2, view: egui::Rect) {
+        let margin = view.height() / 6.0;
+        assert!(
+            caret.y > view.top() + margin && caret.y < view.bottom() - margin,
+            "the caret at {caret:?} is on the edge of {view:?}: the jump did not centre it"
+        );
+    }
+
     #[test]
     fn a_jump_far_away_brings_the_caret_into_sight() {
         let mut gui = Gui::new(&[("a.rs", &long_file(400))], Some("a.rs"));
@@ -686,6 +696,46 @@ mod jumps {
             caret.y >= editor.top() && caret.y <= editor.bottom(),
             "the caret at {caret:?} is outside the editor {editor:?}: the view did not scroll"
         );
+        assert_in_sight(caret, editor);
+    }
+
+    #[test]
+    fn a_jump_into_an_external_file_scrolls_it_into_sight() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.rs");
+        std::fs::write(&far, long_file(400)).unwrap();
+
+        gui.app_mut().state.apply_outcome(Outcome::Definitions {
+            from: PathBuf::from("a.rs"),
+            locations: vec![Location {
+                uri: ide_lsp::path_to_uri(&far).unwrap(),
+                range: Range {
+                    start: Position {
+                        line: 300,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 300,
+                        character: 6,
+                    },
+                },
+            }],
+        });
+        gui.settle();
+
+        assert_eq!(
+            gui.active_tab(),
+            Some(far),
+            "the external file did not open"
+        );
+        assert_eq!(
+            gui.app().state.active_buffer().unwrap().line_col(),
+            (300, 2),
+            "the caret is not on the definition"
+        );
+        let (caret, editor) = caret_on_screen(&gui);
+        assert_in_sight(caret, editor);
     }
 
     #[test]
