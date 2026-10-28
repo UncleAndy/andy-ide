@@ -8,3 +8,8 @@ repository.workspace = true
 description = "Project model, configuration and sessions for andy-ide"
 
 [dependencies]
+anyhow.workspace = true
+ignore = "0.4.34"
+
+[dev-dependencies]
+tempfile = "3"
