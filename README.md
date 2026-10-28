@@ -26,7 +26,12 @@ agent is a configuration entry rather than a code change.
 
 ## Status
 
-Milestone M1 in progress (framework and editing). Specification: `docs/TZ_andy_ide_v0.1.md`.
+Milestone M1 (framework and editing) is complete: window with dock panels, project tree,
+rope-backed editor with tree-sitter highlighting for twelve languages, tabs, quick open,
+session and layout restore, atomic save, filesystem watching, Markdown preview, dark and
+light themes. Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
+
+Next: M2, navigation through the language server. Specification: `docs/TZ_andy_ide_v0.1.md`.
 
 ## Crates
 
