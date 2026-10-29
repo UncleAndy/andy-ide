@@ -751,6 +751,9 @@ pub struct ChoiceRequest {
     /// Whether several variants may be chosen at once. Hermes asks for several by making the
     /// property an array of the same strings (`acp_adapter/elicitation.py`).
     pub multiple: bool,
+    /// Whether the answer is written rather than picked: Hermes asks for free text with a bare
+    /// `{"type": "string"}` and no values to choose between.
+    pub free_text: bool,
 }
 
 impl ChoiceRequest {
@@ -765,18 +768,18 @@ impl ChoiceRequest {
         let properties = schema
             .and_then(|schema| schema.get("properties"))
             .and_then(Value::as_object);
-        let (field, options, multiple) = properties
+        let (field, options, multiple, free_text) = properties
             .and_then(|properties| properties.iter().next())
             .map(|(field, property)| {
-                (
-                    field.clone(),
-                    choice_options_of(property).unwrap_or_else(|| {
-                        // A single string with an enum is the common shape; a bare
-                        // property the editor cannot draw leaves only a refusal.
-                        Vec::new()
-                    }),
-                    property.get("type").and_then(Value::as_str) == Some("array"),
-                )
+                let options = choice_options_of(property).unwrap_or_default();
+                let kind = property.get("type").and_then(Value::as_str);
+                let multiple = kind == Some("array");
+                // A string — or an array of strings — with nothing to choose between is a
+                // question to be written out. A property of any other shape is one this editor
+                // cannot draw, and then the card offers nothing but a refusal.
+                let free_text =
+                    options.is_empty() && matches!(kind, Some("string") | Some("array"));
+                (field.clone(), options, multiple, free_text)
             })
             .unwrap_or_default();
         Self {
@@ -789,6 +792,7 @@ impl ChoiceRequest {
             field,
             options,
             multiple,
+            free_text,
         }
     }
 
@@ -1020,6 +1024,56 @@ mod tests {
             Update::from_value(&update),
             Update::Text("Hello".to_owned())
         );
+    }
+
+    #[test]
+    fn a_question_to_be_written_out_is_read_as_one() {
+        // Hermes asks for free text with a bare string and no values to choose between
+        // (`acp_adapter/elicitation.py`: the schema stays `{"type": "string"}` when the agent
+        // offered no choices). There is nothing to click, so the card has to offer somewhere
+        // to write — a card with a heading and a refusal is a question nobody can answer.
+        let params = json!({
+            "sessionId": "editor-session",
+            "mode": "form",
+            "message": "What should I call it?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"]
+            }
+        });
+        let request = ChoiceRequest::from_params(&params);
+        assert!(
+            request.free_text,
+            "a question to be written out was read as one to pick"
+        );
+        assert!(request.options.is_empty(), "there are no variants to offer");
+        assert!(!request.multiple);
+        assert_eq!(request.field, "answer");
+
+        // And the answer goes back as the words themselves, not as a list.
+        assert_eq!(
+            choice_answer(
+                &request.field,
+                request.multiple,
+                Some(&["a name of my own".to_owned()])
+            ),
+            json!({"action": "accept", "content": {"answer": "a name of my own"}})
+        );
+
+        // A property of some other shape is still one this editor cannot draw: no field, no
+        // variants, and only the refusal is left.
+        let odd = ChoiceRequest::from_params(&json!({
+            "sessionId": "editor-session",
+            "mode": "form",
+            "message": "How many?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}}
+            }
+        }));
+        assert!(!odd.free_text, "a number was read as something to write");
+        assert!(odd.options.is_empty());
     }
 
     #[test]

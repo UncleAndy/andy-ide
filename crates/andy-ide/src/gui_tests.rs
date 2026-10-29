@@ -5836,6 +5836,83 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_question_with_nothing_to_pick_is_answered_by_writing() {
+        // Hermes asks for free text with a bare string and nothing to choose between
+        // (`acp_adapter/elicitation.py`). A card with a heading and a refusal is a question
+        // nobody can answer, so such a question is drawn with somewhere to write the answer.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "ask-text".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the question", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+        assert!(
+            gui.app()
+                .state
+                .agent
+                .choice
+                .as_ref()
+                .is_some_and(|(_, request)| request.free_text),
+            "a question with nothing to pick was not read as one to write"
+        );
+
+        // The field to write in is there, and the keyboard is in it: the question is what the
+        // person has to deal with, not the message they might send next.
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::TextInput);
+        let written = fields.last().expect("nowhere to write the answer");
+        assert!(
+            written.is_focused(),
+            "the keyboard did not go to the card: {:?} is focused",
+            gui.harness.ctx.memory(|memory| memory.focused())
+        );
+
+        gui.harness
+            .event(egui::Event::Text("a name of my own".to_owned()));
+        gui.harness.step();
+        gui.harness.key_press(egui::Key::Enter);
+        wait(&mut gui, "the answer reaching the agent", |gui| {
+            answer(gui).contains("wrote:")
+        });
+        assert_eq!(
+            answer(&gui),
+            "wrote: a name of my own",
+            "the agent heard something other than what was written"
+        );
+        assert!(
+            gui.app().state.agent.choice.is_none(),
+            "the question stayed after it was answered"
+        );
+        // The only thing sent as a message is the prompt that asked the question: the answer
+        // went back as an answer, not as another prompt.
+        assert_eq!(
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .filter(|line| matches!(line, crate::agent::Line::You(_)))
+                .count(),
+            1,
+            "the answer was sent as a message as well: {:?}",
+            gui.app().state.agent.transcript
+        );
+    }
+
+    #[test]
     fn a_variant_can_be_refused() {
         // A question the agent is waiting on has to have a way out: an agent that hears
         // nothing waits forever, and a person who wants none of the variants has to be

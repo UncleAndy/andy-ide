@@ -415,6 +415,34 @@ fn main() {
                         chunk(&session, if allowed { "allowed" } else { "refused" });
                         turn_answer(&session, id);
                     }
+                    "ask-text" => {
+                        next_id += 1;
+                        let asked = next_id;
+                        // A question with nothing to choose between: Hermes asks for it with a
+                        // bare string and no values (`acp_adapter/elicitation.py`, where the
+                        // schema is `{"type": "string"}` when no choices were offered).
+                        request(
+                            asked,
+                            "elicitation/create",
+                            json!({
+                                "sessionId": session,
+                                "mode": "form",
+                                "message": "What should I call it?",
+                                "requestedSchema": {
+                                    "type": "object",
+                                    "properties": {"answer": {"type": "string"}},
+                                    "required": ["answer"]
+                                }
+                            }),
+                        );
+                        let written = wait_for_answer(&mut input, asked)
+                            .and_then(|value| value.get("content").cloned())
+                            .and_then(|content| content.get("answer").cloned())
+                            .and_then(|answer| answer.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "none".to_owned());
+                        chunk(&session, &format!("wrote: {written}"));
+                        turn_answer(&session, id);
+                    }
                     "choose-many" => {
                         next_id += 1;
                         let asked = next_id;

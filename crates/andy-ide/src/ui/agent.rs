@@ -58,6 +58,16 @@ const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
 const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
 
+/// Whether the key was pressed with nothing else held.
+///
+/// egui's `consume_key` asks for the modifiers a shortcut *needs* and lets others be held
+/// alongside, so `Shift`+`Enter` would answer to a plain `Enter` — and send a message, or
+/// answer a question, instead of making the new line it is meant to make.
+fn plain_key(ui: &mut Ui, key: egui::Key) -> bool {
+    let nothing_held = ui.input(|input| input.modifiers == egui::Modifiers::NONE);
+    nothing_held && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+}
+
 /// A line of text as heavy as a bold face would be.
 ///
 /// egui's own `strong()` brightens the colour and nothing else: the fonts it ships have no
@@ -138,6 +148,8 @@ struct Card<'a> {
     offers: &'a [Offer],
     /// Whether several answers may be chosen at once.
     multiple: bool,
+    /// Whether the answer is written rather than picked.
+    free_text: bool,
     /// The label of the way out of a question whose answers a person wants none of.
     refusal: &'a str,
     /// What the pointer says when it rests on the way out.
@@ -163,6 +175,8 @@ fn waiting_card(
     room: egui::Rect,
     card: &Card<'_>,
     picked: &mut Vec<String>,
+    typed: &mut String,
+    wants_focus: &mut bool,
 ) -> (Option<Option<Vec<String>>>, egui::Rect) {
     // Two points are taken off as well as the padding: the frame's own outline.
     let width = (room.width() - 2.0 * CARD_PAD - 2.0).max(80.0);
@@ -212,46 +226,80 @@ fn waiting_card(
             // in, and the conversation's scroll area is drawn in the same ui: two of them
             // under one id share their state and egui, in a debug build, draws a red box and
             // a `\u{1f525} ID clash` over both.
-            egui::ScrollArea::vertical()
-                .id_salt("agent-question")
-                .max_height(answers)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    for offer in card.offers {
-                        // One line each, whatever the answer's length: the reasons for three
-                        // answers and for thirty differ by nothing else in the panel, and the
-                        // whole text is a pointer's rest away. Answers that wrap make a card
-                        // as tall as the panel for no answer's sake.
-                        // When several may be chosen, an answer is a switch rather than a
-                        // button: pressing one leaves the question open, because the answer
-                        // is the set of them.
-                        let answer = if card.multiple {
-                            let picked_already = picked.iter().any(|value| value == &offer.value);
-                            egui::Button::selectable(picked_already, &offer.title)
-                        } else {
-                            egui::Button::new(&offer.title)
-                        };
-                        let answer = answer
-                            .min_size(egui::vec2(width, 26.0))
-                            .corner_radius(5)
-                            .wrap_mode(egui::TextWrapMode::Truncate);
-                        if ui.add(answer).on_hover_text(&offer.hint).clicked() {
-                            if card.multiple {
-                                if let Some(at) =
-                                    picked.iter().position(|value| value == &offer.value)
-                                {
-                                    picked.remove(at);
-                                } else {
-                                    picked.push(offer.value.clone());
-                                }
-                            } else {
-                                chosen = Some(Some(vec![offer.value.clone()]));
-                            }
-                        }
-                        ui.add_space(3.0);
+            if card.free_text {
+                // Nothing to choose between: the answer is written, and `Enter` answers the
+                // question the way it sends a message in the field under the conversation.
+                let here = egui::Id::new("agent-answer");
+                // The key is read before the field is drawn: a field of one line hands the focus
+                // back on `Enter`, and by the time it has drawn itself the key is spent.
+                let answered =
+                    ui.memory(|memory| memory.has_focus(here)) && plain_key(ui, egui::Key::Enter);
+                let field = ui.add(
+                    egui::TextEdit::singleline(typed)
+                        .id(here)
+                        .hint_text("Write the answer\u{2026}")
+                        .desired_width(width),
+                );
+                if *wants_focus {
+                    if field.has_focus() {
+                        *wants_focus = false;
+                    } else {
+                        field.request_focus();
+                        ui.ctx().request_repaint();
                     }
-                });
+                }
+                let written = typed.trim().to_owned();
+                let pressed = ui
+                    .add_enabled(!written.is_empty(), egui::Button::new("Answer"))
+                    .clicked();
+                if !written.is_empty() && (pressed || answered) {
+                    chosen = Some(Some(vec![written]));
+                }
+                ui.add_space(2.0);
+            }
+            if !card.free_text {
+                egui::ScrollArea::vertical()
+                    .id_salt("agent-question")
+                    .max_height(answers)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        for offer in card.offers {
+                            // One line each, whatever the answer's length: the reasons for three
+                            // answers and for thirty differ by nothing else in the panel, and the
+                            // whole text is a pointer's rest away. Answers that wrap make a card
+                            // as tall as the panel for no answer's sake.
+                            // When several may be chosen, an answer is a switch rather than a
+                            // button: pressing one leaves the question open, because the answer
+                            // is the set of them.
+                            let answer = if card.multiple {
+                                let picked_already =
+                                    picked.iter().any(|value| value == &offer.value);
+                                egui::Button::selectable(picked_already, &offer.title)
+                            } else {
+                                egui::Button::new(&offer.title)
+                            };
+                            let answer = answer
+                                .min_size(egui::vec2(width, 26.0))
+                                .corner_radius(5)
+                                .wrap_mode(egui::TextWrapMode::Truncate);
+                            if ui.add(answer).on_hover_text(&offer.hint).clicked() {
+                                if card.multiple {
+                                    if let Some(at) =
+                                        picked.iter().position(|value| value == &offer.value)
+                                    {
+                                        picked.remove(at);
+                                    } else {
+                                        picked.push(offer.value.clone());
+                                    }
+                                } else {
+                                    chosen = Some(Some(vec![offer.value.clone()]));
+                                }
+                            }
+                            ui.add_space(3.0);
+                        }
+                    });
+            }
             ui.add_space(2.0);
             // The row is given the height of the button and no more. `with_layout` is handed
             // the whole available size and starts its child at the top of it, so a
@@ -323,10 +371,13 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
             heading: &heading,
             offers: &offers,
             multiple,
+            free_text: request.free_text,
             refusal: "None of these",
             refusal_hint: "the agent is told you wanted none of them",
         },
         &mut state.agent.picked,
+        &mut state.agent.card_text,
+        &mut state.agent.card_wants_focus,
     );
     state.agent.card_rect = Some(drawn);
     if let Some(answer) = answer {
@@ -765,6 +816,8 @@ fn question(ui: &mut Ui, state: &mut AppState) {
         .collect();
     let room = room_of(state, ui);
     let mut none = Vec::new();
+    let mut nothing_written = String::new();
+    let mut no_focus = false;
     let (answer, drawn) = waiting_card(
         ui,
         room,
@@ -773,10 +826,13 @@ fn question(ui: &mut Ui, state: &mut AppState) {
             heading: &heading,
             offers: &offers,
             multiple: false,
+            free_text: false,
             refusal: "Refuse",
             refusal_hint: "the agent is told no",
         },
         &mut none,
+        &mut nothing_written,
+        &mut no_focus,
     );
     state.agent.card_rect = Some(drawn);
     // A permission is answered with one option or with none: the card hands back a list for
@@ -827,26 +883,18 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         state.agent.command_pick = 0;
     }
 
-    // A key is read as plainly pressed or not at all. `consume_key` asks for the modifiers a
-    // shortcut *needs* and lets others be held as well, so `Shift`+`Enter` would be read as
-    // `Enter` and send the message instead of making the new line it is meant to make.
-    fn plain(ui: &mut Ui, key: egui::Key) -> bool {
-        let nothing_held = ui.input(|input| input.modifiers == egui::Modifiers::NONE);
-        nothing_held && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
-    }
-
     // The keyboard is read before the field is drawn: in a field of several lines `Enter`
     // would otherwise go to a new line, and the key is spent by the time the field has drawn
     // itself. `Shift`+`Enter` is left alone, and that is what makes a new line.
     if has_keyboard && !matches.is_empty() {
-        if plain(ui, egui::Key::ArrowDown) {
+        if plain_key(ui, egui::Key::ArrowDown) {
             state.agent.command_pick = (state.agent.command_pick + 1) % matches.len();
         }
-        if plain(ui, egui::Key::ArrowUp) {
+        if plain_key(ui, egui::Key::ArrowUp) {
             state.agent.command_pick =
                 (state.agent.command_pick + matches.len() - 1) % matches.len();
         }
-        let complete = plain(ui, egui::Key::Enter) | plain(ui, egui::Key::Tab);
+        let complete = plain_key(ui, egui::Key::Enter) | plain_key(ui, egui::Key::Tab);
         if complete {
             state.agent.input = format!("/{} ", matches[state.agent.command_pick].name);
             state.agent.wants_focus = true;
@@ -855,7 +903,7 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     }
     // Enter sends. Without the keyboard the field is not the one being typed in, and the key
     // belongs to whoever holds it.
-    let enter = has_keyboard && plain(ui, egui::Key::Enter);
+    let enter = has_keyboard && plain_key(ui, egui::Key::Enter);
 
     // The field takes the width it can and three lines to start with: it is where a message of
     // several lines is written, and it grows by itself as the lines are added.

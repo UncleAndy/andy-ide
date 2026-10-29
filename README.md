@@ -183,6 +183,20 @@ claims ACP's `elicitation` in `initialize`, and an `elicitation/create` request 
 in the panel, answered with the variant's value — the word the agent asked for, which is often
 not the words on the button — or declined with `None of these`.
 
+An agent can also ask a question there is nothing to choose from — Hermes asks for free text with
+a bare `{"type": "string"}` and no values. That arrives with no variants at all, and a card of
+heading and refusal is a question nobody can answer: such a question is drawn with a place to
+write the answer, and `Enter` in it answers, the way it sends a message in the field under the
+conversation. A question that is neither — a number, an object, a shape this editor has no form
+for — is still shown with only the refusal, because refusing is the one answer that always fits.
+
+A question of several answers is told apart from a question of one by the shape of the schema and
+nothing else: Hermes asks for several by making the property an array of the same strings
+(`acp_adapter/elicitation.py`). Such a question is drawn with a switch for each answer rather than
+a button, because one click cannot be the whole answer, and the answer is sent with `Answer` once
+it is complete; it goes back as a list, because the agent asked for a list. A refusal stays a
+refusal — which is a different thing from an empty list.
+
 A question is drawn as a card of its own: a heading in the colour of what is being asked (amber
 for a permission, blue for a choice), the answers stacked full width below it, and the refusal as
 a quieter button on its own line. A permission and a choice look the same, because from the

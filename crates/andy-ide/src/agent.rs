@@ -158,6 +158,10 @@ pub struct AgentState {
     /// number of points is a promise the field breaks the moment a second line is typed.
     pub field_rect: Option<egui::Rect>,
     pub below: f32,
+    /// What is being written into a question that has no answers to pick, and whether the
+    /// card is asking for the keyboard to write it with.
+    pub card_text: String,
+    pub card_wants_focus: bool,
     /// Which of the offered commands the keyboard is on, while a slash is being typed.
     pub command_pick: usize,
     /// The commands the agent offers — `/help`, `/model` and the rest — as it named them.
@@ -241,6 +245,8 @@ impl Default for AgentState {
             picked: Vec::new(),
             commands: Vec::new(),
             command_pick: 0,
+            card_text: String::new(),
+            card_wants_focus: false,
             field_rect: None,
             below: 64.0,
             command: String::new(),
@@ -294,6 +300,8 @@ impl AgentState {
         self.asking = None;
         self.choice = None;
         self.picked.clear();
+        self.card_text.clear();
+        self.card_wants_focus = false;
         self.busy = false;
         self.session = None;
         self.resume = None;
@@ -586,6 +594,8 @@ impl AgentState {
             return;
         };
         self.picked.clear();
+        self.card_text.clear();
+        self.card_wants_focus = false;
         let Some(worker) = &self.worker else {
             return;
         };
@@ -672,6 +682,8 @@ impl AgentState {
         self.asking = None;
         self.choice = None;
         self.picked.clear();
+        self.card_text.clear();
+        self.card_wants_focus = false;
         self.busy = false;
         self.started = None;
         self.took = None;
@@ -782,6 +794,8 @@ impl AgentState {
         self.asking = None;
         self.choice = None;
         self.picked.clear();
+        self.card_text.clear();
+        self.card_wants_focus = false;
         // Stopping is a decision: a process ended on purpose is not one to start again.
         self.retry_at = None;
         self.attempts = 0;
@@ -873,9 +887,14 @@ impl AgentState {
                 }
                 AgentEvent::Choice { id, request } => {
                     self.status = request.title().to_owned();
-                    // A new question starts with nothing picked: what was picked for the last
-                    // one is not an answer to this one.
+                    // A new question starts with nothing picked and nothing written: what was
+                    // answered for the last one is not an answer to this one.
                     self.picked.clear();
+                    self.card_text.clear();
+                    // The question is what the person has to deal with, so the keyboard goes to
+                    // the card and not to the field that asks for the next message.
+                    self.wants_focus = false;
+                    self.card_wants_focus = true;
                     self.choice = Some((id, request));
                 }
                 AgentEvent::Setup(state) => {
