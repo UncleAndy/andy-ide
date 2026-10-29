@@ -183,6 +183,9 @@ pub struct AgentState {
     pub models_open: bool,
     /// Where the model button was drawn, so the list can sit above it.
     pub model_button: Option<egui::Rect>,
+    /// Where the row of facts under the field was drawn. It is one row by design: the foot of
+    /// the panel must not grow when a figure in it gains a character.
+    pub status_rect: Option<egui::Rect>,
     /// The modes it offers — what it may do without asking — and the one in use.
     pub modes: Vec<Mode>,
     pub current_mode: Option<String>,
@@ -256,6 +259,7 @@ impl Default for AgentState {
             current_model: None,
             models_open: false,
             model_button: None,
+            status_rect: None,
             modes: Vec::new(),
             current_mode: None,
             options: Vec::new(),

@@ -140,11 +140,16 @@ account for. The id is written the moment the agent names it rather than on the 
 crash is the case where a conversation is most wanted back. It is kept per agent, since an
 id offered to a different agent asks a stranger to remember somebody else's afternoon.
 
-A status line under the conversation says how long the turn is taking, which model is
-answering, how hard it is thinking and how much of its context window is spent — all three
-choices are menus, and all three are answered by the agent, not by us. Anything the agent
-does not report is a dash rather than a guess. The shell opens in the project's own
-directory, and the agent is told that directory the moment the session is opened.
+The foot of the panel is the field, and one row under it: the facts about the turn on the left —
+how long it is taking, which model is answering, how hard it is thinking, how much of its context
+window is spent — and the button that sends on the right. All three choices among the facts are
+menus, and all three are answered by the agent, not by us. Anything the agent does not report is a
+dash rather than a guess. The facts share the button's row and never wrap: a row that wraps is a
+second row, and the second row is the height of the foot, which belongs to the field alone — a
+figure gaining a character (the timer does it several times a second) would otherwise make the foot
+a line taller, on a panel that is repainted only when something moves. What does not fit is left
+out with a mark, which is cheaper than a line the conversation loses. The shell opens in the
+project's own directory, and the agent is told that directory the moment the session is opened.
 
 A model is listed under the provider that serves it. An agent wired to several providers
 offers a flat list nobody can read, so the models are grouped by the part of their id before
@@ -249,9 +254,11 @@ the agent's reasoning is folded away
 behind a `Thinking…` marker: the working out is not the answer, and pouring it into the same
 column makes the answer harder to find.
 
-What the rows under the conversation take is measured rather than counted: the field grows a line
-at a time, and a conversation drawn first with a fixed number of points kept back is a conversation
-that pushes the status line out of the panel the moment a second line is typed.
+The room kept for the rows under the conversation is the field's own height plus its row, computed
+from what those rows are rather than measured against the bottom of the panel: measured to the
+bottom, the reserve also carried the panel's own padding, and it was measured against a drawing the
+conversation above it had just moved — two figures each leaning on the other. The field grows a
+line at a time, and the row under it does not move.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m5.md`](.hermes/plans/2026-10-28_andy-ide-m5.md).

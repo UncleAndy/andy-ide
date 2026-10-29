@@ -38,13 +38,18 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
     transcript(ui, state);
     ui.separator();
+    // The field, the facts and the button are one foot, drawn together by `input`: the height
+    // of the foot is the height of the field and one row, and nothing else may change it.
     input(ui, state);
-    status(ui, state);
     // The list of models floats in a layer of its own, above the button that opened it.
     models(ui, state);
-    // What the rows under the conversation took, for the conversation to leave next frame.
-    if let (Some(field), Some(panel)) = (state.agent.field_rect, state.agent.shown_rect) {
-        state.agent.below = (panel.bottom() - field.top()).max(64.0);
+    // What the rows under the conversation take, for the conversation to leave next frame: the
+    // field and the single row under it, and nothing else. Measured against the bottom of the
+    // panel, the reserve also carried the panel's own padding, and it was measured against a
+    // drawing the conversation itself had moved — two numbers each leaning on the other.
+    if let Some(field) = state.agent.field_rect {
+        let row = ui.spacing().interact_size.y;
+        state.agent.below = (field.height() + row + 6.0).max(24.0);
     }
 }
 
@@ -490,143 +495,205 @@ fn models(ui: &mut Ui, state: &mut AppState) {
 /// menus rather than labels because a model or a level that cannot be changed is a fact
 /// about the agent, and one that can is a decision about the answer being written.
 fn status(ui: &mut Ui, state: &mut AppState) {
-    // Wrapped, not one line: a narrow panel would push the model and the context figure
-    // past its right edge, and a fact that is off-screen is a fact nobody has.
-    ui.horizontal_wrapped(|ui| {
-        match state.agent.elapsed() {
-            Some(took) => {
-                ui.label(format!("⏱ {:.1} s", took.as_secs_f64()));
+    // One row, always. A wrapped row is a second row, and the second row is the height of the
+    // panel's foot, which belongs to the field alone — and a row that wraps is a row that grows
+    // by itself: the moment a figure in it gains a character, the timer does that several times
+    // a second, the row comes out a line taller, and the panel is repainted only when something
+    // moves. That is the foot growing while the mouse is moved. What does not fit is left out,
+    // with an ellipsis saying so: a fact that is off the edge and a fact not drawn are the same
+    // fact, and only one of them costs the conversation a line.
+    let mut dropped = false;
+    let row = ui.horizontal(|ui| {
+        'facts: {
+            let elapsed = match state.agent.elapsed() {
+                Some(took) => format!("⏱ {:.1} s", took.as_secs_f64()),
+                None => "⏱ —".to_owned(),
+            };
+            if !room_for(ui, &elapsed) {
+                dropped = true;
+                break 'facts;
             }
-            None => {
-                ui.weak("⏱ —");
+            ui.label(elapsed);
+            if state.agent.busy {
+                // A running timer has to be repainted to move, and the panel is otherwise
+                // idle while an answer is coming.
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
-        }
-        if state.agent.busy {
-            // A running timer has to be repainted to move, and the panel is otherwise
-            // idle while an answer is coming.
-            ui.ctx().request_repaint_after(Duration::from_millis(200));
-        }
-        ui.separator();
+            ui.separator();
 
-        let model = state.agent.current_model.clone();
-        if state.agent.models.is_empty() {
-            ui.weak("model —");
-        } else {
-            let shown = model
-                .as_deref()
-                .and_then(|id| {
-                    state
-                        .agent
-                        .models
-                        .iter()
-                        .find(|model| model.id == id)
-                        .map(|model| model.name.clone())
-                })
-                .unwrap_or_else(|| "model —".to_owned());
-            // A button rather than a combo box: the name of the model is then part of the
-            // button's own text, so it is on screen and readable, not only inside a list
-            // that has to be opened to find out what is answering. The list itself is
-            // drawn by `models`, above this line.
-            let button = ui
-                .button(format!("{shown} ▾"))
-                .on_hover_text("Choose the model that answers");
-            state.agent.model_button = Some(button.rect);
-            if button.clicked() {
-                state.agent.models_open = !state.agent.models_open;
+            let model = state.agent.current_model.clone();
+            if !room_for(ui, "model — a model name") {
+                dropped = true;
+                break 'facts;
             }
-        }
-        ui.separator();
-
-        // How hard the model thinks. The agent names the levels it has — ACP carries them
-        // as a setting of its own, `thought_level`, and Hermes' are none, minimal, low,
-        // medium, high, xhigh, max and ultra. An agent that offers no such setting gets a
-        // button that says so rather than a menu of levels it would refuse: Hermes 0.22.5
-        // over ACP offers only the edit policy, and there the level belongs to the model
-        // in the Hermes profile.
-        match crate::agent::thought_level(&state.agent.options) {
-            Some(option) => {
-                let config = option.id.clone();
-                let current = option.current.clone();
-                let choices = option.choices.clone();
-                let shown = option.current_name().unwrap_or_else(|| option.name.clone());
-                let mut asked = None;
-                ui.menu_button(format!("{shown} ▾"), |ui| {
-                    for choice in &choices {
-                        let chosen = current.as_deref() == Some(choice.value.as_str());
-                        if ui.selectable_label(chosen, &choice.name).clicked() && !chosen {
-                            asked = Some(choice.value.clone());
-                            ui.close();
-                        }
-                    }
-                })
-                .response
-                .on_hover_text(format!("{}: what the agent offers here", option.name));
-                if let Some(asked) = asked {
-                    state.agent.set_setting(&config, &asked);
+            if state.agent.models.is_empty() {
+                ui.weak("model —");
+            } else {
+                let shown = model
+                    .as_deref()
+                    .and_then(|id| {
+                        state
+                            .agent
+                            .models
+                            .iter()
+                            .find(|model| model.id == id)
+                            .map(|model| model.name.clone())
+                    })
+                    .unwrap_or_else(|| "model —".to_owned());
+                // A button rather than a combo box: the name of the model is then part of the
+                // button's own text, so it is on screen and readable, not only inside a list
+                // that has to be opened to find out what is answering. The list itself is
+                // drawn by `models`, above this line.
+                let button = ui
+                    .button(format!("{shown} ▾"))
+                    .on_hover_text("Choose the model that answers");
+                state.agent.model_button = Some(button.rect);
+                if button.clicked() {
+                    state.agent.models_open = !state.agent.models_open;
                 }
             }
-            None => {
-                ui.add_enabled(false, egui::Button::new("thinking —"))
+            ui.separator();
+
+            // How hard the model thinks. The agent names the levels it has — ACP carries them
+            // as a setting of its own, `thought_level`, and Hermes' are none, minimal, low,
+            // medium, high, xhigh, max and ultra. An agent that offers no such setting gets a
+            // button that says so rather than a menu of levels it would refuse: Hermes 0.22.5
+            // over ACP offers only the edit policy, and there the level belongs to the model
+            // in the Hermes profile.
+            if !room_for(ui, "thinking — a level") {
+                dropped = true;
+                break 'facts;
+            }
+            match crate::agent::thought_level(&state.agent.options) {
+                Some(option) => {
+                    let config = option.id.clone();
+                    let current = option.current.clone();
+                    let choices = option.choices.clone();
+                    let shown = option.current_name().unwrap_or_else(|| option.name.clone());
+                    let mut asked = None;
+                    ui.menu_button(format!("{shown} ▾"), |ui| {
+                        for choice in &choices {
+                            let chosen = current.as_deref() == Some(choice.value.as_str());
+                            if ui.selectable_label(chosen, &choice.name).clicked() && !chosen {
+                                asked = Some(choice.value.clone());
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(format!("{}: what the agent offers here", option.name));
+                    if let Some(asked) = asked {
+                        state.agent.set_setting(&config, &asked);
+                    }
+                }
+                None => {
+                    ui.add_enabled(false, egui::Button::new("thinking —"))
                     .on_disabled_hover_text(
                         "this agent does not offer a level of thinking over ACP; Hermes sets it \
                          for a model in its own profile (agent.reasoning_overrides)",
                     );
-            }
-        }
-        ui.separator();
-
-        // What the agent may do without asking: ACP's modes, which are the edit policy and
-        // never a level of thinking.
-        let mode = state.agent.current_mode.clone();
-        let permissions: Vec<_> = state.agent.modes.clone();
-        if permissions.is_empty() {
-            ui.weak("mode —");
-        } else {
-            let shown = mode
-                .as_deref()
-                .and_then(|id| {
-                    permissions
-                        .iter()
-                        .find(|mode| mode.id == id)
-                        .map(|mode| mode.name.clone())
-                })
-                .unwrap_or_else(|| "mode —".to_owned());
-            let choices = permissions.clone();
-            let mut asked = None;
-            ui.menu_button(format!("{shown} ▾"), |ui| {
-                for option in &choices {
-                    let chosen = mode.as_deref() == Some(option.id.as_str());
-                    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
-                        asked = Some(option.id.clone());
-                        ui.close();
-                    }
                 }
-            });
-            if let Some(asked) = asked {
-                state.agent.set_mode(&asked);
             }
-        }
-        ui.separator();
+            ui.separator();
 
-        match state.agent.usage {
-            Some(usage) => {
-                let text = match usage.window {
-                    // A percentage of nothing is not a number; without a window only the
-                    // count is shown.
+            // What the agent may do without asking: ACP's modes, which are the edit policy and
+            // never a level of thinking.
+            let mode = state.agent.current_mode.clone();
+            if !room_for(ui, "mode — a mode name") {
+                dropped = true;
+                break 'facts;
+            }
+            let permissions: Vec<_> = state.agent.modes.clone();
+            if permissions.is_empty() {
+                ui.weak("mode —");
+            } else {
+                let shown = mode
+                    .as_deref()
+                    .and_then(|id| {
+                        permissions
+                            .iter()
+                            .find(|mode| mode.id == id)
+                            .map(|mode| mode.name.clone())
+                    })
+                    .unwrap_or_else(|| "mode —".to_owned());
+                let choices = permissions.clone();
+                let mut asked = None;
+                ui.menu_button(format!("{shown} ▾"), |ui| {
+                    for option in &choices {
+                        let chosen = mode.as_deref() == Some(option.id.as_str());
+                        if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
+                            asked = Some(option.id.clone());
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some(asked) = asked {
+                    state.agent.set_mode(&asked);
+                }
+            }
+            ui.separator();
+
+            let usage_text = match &state.agent.usage {
+                Some(usage) => match usage.window {
+                    // A percentage of nothing is not a number; without a window only the count is
+                    // shown.
                     Some(window) if window > 0 => format!(
                         "ctx {}% of {}",
                         (usage.used.saturating_mul(100) / window).min(100),
                         short_tokens(window)
                     ),
                     _ => format!("ctx {} tokens", short_tokens(usage.used)),
-                };
-                ui.label(text);
+                },
+                None => "ctx —".to_owned(),
+            };
+            if !room_for(ui, &usage_text) {
+                dropped = true;
+                break 'facts;
             }
-            None => {
-                ui.weak("ctx —");
+            match state.agent.usage {
+                Some(usage) => {
+                    let text = match usage.window {
+                        // A percentage of nothing is not a number; without a window only the
+                        // count is shown.
+                        Some(window) if window > 0 => format!(
+                            "ctx {}% of {}",
+                            (usage.used.saturating_mul(100) / window).min(100),
+                            short_tokens(window)
+                        ),
+                        _ => format!("ctx {} tokens", short_tokens(usage.used)),
+                    };
+                    ui.label(text);
+                }
+                None => {
+                    ui.weak("ctx —");
+                }
+            }
+            if dropped {
+                // The row is one row: what was left out is said by a mark in it, never by a
+                // second row under it.
+                ui.weak("\u{2026}");
             }
         }
     });
+    state.agent.status_rect = Some(row.response.rect);
+}
+
+/// Whether a fact of this shape has room in the row that is left, measured the way egui will
+/// draw it, with a margin for the padding a button adds around its text.
+fn room_for(ui: &Ui, text: &str) -> bool {
+    let height = ui.text_style_height(&egui::TextStyle::Body);
+    let width = ui
+        .painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(height),
+            egui::Color32::PLACEHOLDER,
+        )
+        .size()
+        .x;
+    // The padding of a button, the separator that follows it, and the ellipsis that may have to
+    // come after everything: a fact that fits exactly is a fact that pushes the mark off.
+    ui.available_width() >= width + 46.0
 }
 
 /// Tokens, small enough to read at a glance: `4200`, `42k`, `1.2M`.
@@ -915,8 +982,27 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     let response = ui.add_enabled(!busy, field);
     state.agent.field_rect = Some(response.rect);
 
-    // The button stands under the field, where the message it sends ends.
-    let pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
+    // The foot of the panel: one row under the field, the facts about the agent on the left and
+    // the button that sends on the right. The height of the foot is then the height of the field
+    // plus one row of a fixed height, and the conversation above it cannot change it.
+    const SEND_ROOM: f32 = 72.0;
+    let row_height = ui.spacing().interact_size.y;
+    let mut pressed = false;
+    ui.horizontal(|ui| {
+        let facts_room = (ui.available_width() - SEND_ROOM).max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(facts_room, row_height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| status(ui, state),
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), row_height),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
+            },
+        );
+    });
 
     if enter || pressed {
         state.agent.send();

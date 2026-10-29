@@ -5913,6 +5913,174 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_facts_under_the_field_are_one_row_in_a_narrow_panel() {
+        // The foot of the panel is a field, a button and a row of facts. A row that wraps is
+        // two rows, and the second one is a line the conversation loses — and it appears the
+        // moment a figure in it gains a character, which the timer does several times a
+        // second: the panel is repainted, the row wraps differently, and the foot grows while
+        // the mouse is being moved and nothing else is happening.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // A narrow dock, and the longest figures the panel ever shows: a model, a level, a
+        // mode, and a context figure of six digits.
+        gui.harness.set_size(egui::vec2(320.0, 700.0));
+        // The longest facts the panel can be asked to show: a long model name and a context
+        // figure of six digits, in a panel too narrow for all of them at once.
+        gui.app_mut().state.agent.current_model = Some("a-model-id-that-is-long".to_owned());
+        gui.app_mut().state.agent.models = vec![ide_agents::Model {
+            id: "a-model-id-that-is-long".to_owned(),
+            name: "a very long model name that takes a good deal of the row".to_owned(),
+        }];
+        gui.app_mut().state.agent.usage = Some(ide_agents::Usage {
+            used: 42_000,
+            window: Some(100_000),
+        });
+        gui.settle();
+        let row = gui
+            .app()
+            .state
+            .agent
+            .status_rect
+            .expect("the row of facts is not on screen");
+        assert!(
+            row.height() <= 24.0,
+            "the row of facts wrapped: it is {:.1} px tall at {:.0} px wide (the row is {:?})",
+            row.height(),
+            row.width(),
+            row
+        );
+    }
+
+    #[test]
+    fn the_foot_of_the_panel_is_the_field_and_one_row() {
+        // What the field, the button and the facts take together is the height of the field plus
+        // one row — the field grows a line at a time and the row does not move. Anything else in
+        // it is a line the conversation is owed: a foot that is measured against the drawing
+        // above it is a foot the conversation can push down.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        // The longest facts the panel can be asked to show: a long model name and a context
+        // figure of six digits, in a panel too narrow for all of them at once.
+        gui.app_mut().state.agent.current_model = Some("a-model-id-that-is-long".to_owned());
+        gui.app_mut().state.agent.models = vec![ide_agents::Model {
+            id: "a-model-id-that-is-long".to_owned(),
+            name: "a very long model name that takes a good deal of the row".to_owned(),
+        }];
+        gui.app_mut().state.agent.usage = Some(ide_agents::Usage {
+            used: 42_000,
+            window: Some(100_000),
+        });
+
+        // A conversation long enough that the transcript takes what is left rather than what it
+        // would like, in a narrow panel tall enough for the whole foot to be inside it.
+        gui.harness.set_size(egui::vec2(320.0, 1400.0));
+        for index in 0..40 {
+            gui.app_mut()
+                .state
+                .agent
+                .transcript
+                .push(crate::agent::Line::Agent(format!(
+                    "line {index}: some words that take a whole row of the panel by themselves"
+                )));
+        }
+        gui.settle();
+        let field = gui
+            .app()
+            .state
+            .agent
+            .field_rect
+            .expect("the field is not on screen");
+        let foot = gui.app().state.agent.below;
+        // The field, and one row under it with its gaps: 34 px of room for a row of 20 and the
+        // spacing around it. Measured to the bottom of the panel the same foot came to 65 px,
+        // most of it the panel's own padding and a whole extra row for the mark of a fact left
+        // out — the padding is the panel's business, and the mark belongs in the row.
+        assert!(
+            foot <= field.height() + 34.0,
+            "the foot is {foot:.1} px tall for a field of {:.1} px",
+            field.height()
+        );
+
+        // And it does not move when the pointer does: the panel is repainted then and at no
+        // other time, so a foot that is measured against the conversation grows on that frame
+        // and stays grown.
+        let before = (field, foot);
+        for step in 0..8 {
+            gui.harness.event(egui::Event::PointerMoved(egui::pos2(
+                40.0 + step as f32,
+                60.0,
+            )));
+            gui.harness.step();
+        }
+        let after = (
+            gui.app().state.agent.field_rect.expect("the field"),
+            gui.app().state.agent.below,
+        );
+        assert_eq!(
+            (before.0.top(), before.0.height()),
+            (after.0.top(), after.0.height()),
+            "the field moved when the pointer did: {before:?} became {after:?}"
+        );
+        assert!(
+            (before.1 - after.1).abs() < 0.5,
+            "the foot changed height when the pointer moved: {:.1} px became {:.1} px",
+            before.1,
+            after.1
+        );
+    }
+
+    #[test]
+    fn the_send_button_stands_at_the_right_edge() {
+        // The button belongs to the field above it and to the edge the panel ends at: at the
+        // left it looks like the beginning of another row of facts.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        let panel = gui
+            .app()
+            .state
+            .agent
+            .shown_rect
+            .expect("the panel is not on screen");
+        let send = gui.harness.get_by_label("Send").rect();
+        assert!(
+            (panel.right() - send.right()).abs() <= 12.0,
+            "Send stands {:.1} px from the right edge of the panel (panel {:?}, button {:?})",
+            panel.right() - send.right(),
+            panel,
+            send
+        );
+        assert!(
+            send.left() > panel.center().x,
+            "Send is not on the right half of the panel: {:?}",
+            send
+        );
+    }
+
+    #[test]
     fn a_variant_can_be_refused() {
         // A question the agent is waiting on has to have a way out: an agent that hears
         // nothing waits forever, and a person who wants none of the variants has to be
