@@ -2477,9 +2477,6 @@ pub(crate) static REAL_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// The whole chain with the real server: a caret in the editor, F12, the worker
 /// thread, rust-analyzer, and the answer opening the file at the declaration.
 ///
-/// It needs `rust-analyzer` installed and a minute of patience on a cold start;
-/// without the server the check says so and passes, because the editor must not
-/// depend on one.
 /// How long a real language server is given to answer, in a test.
 ///
 /// These tests start a real server — `rust-analyzer`, `pylsp` — and wait for it. Alone, the
@@ -2490,6 +2487,9 @@ pub(crate) static REAL_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 const LSP_ANSWER: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// It needs `rust-analyzer` installed and a minute of patience on a cold start;
+/// without the server the check says so and passes, because the editor must not
+/// depend on one.
 #[cfg(test)]
 mod real_navigation_tests {
     use super::*;
@@ -3236,7 +3236,7 @@ mod real_hover_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        panic!("no hint came back in 120 s");
+        panic!("no hint came back in {} s", LSP_ANSWER.as_secs());
     }
 }
 
@@ -3424,7 +3424,8 @@ mod real_highlight_tests {
             return;
         }
         panic!(
-            "no highlights came back in 120 s; status {:?}, server {}, occurrences {}",
+            "no highlights came back in {} s; status {:?}, server {}, occurrences {}",
+            LSP_ANSWER.as_secs(),
             app.state.status,
             app.state.lsp.is_some(),
             app.state
@@ -3681,7 +3682,8 @@ mod real_rename_tests {
         }
         assert!(
             app.state.rename.preview,
-            "no preview came back in 120 s: {}",
+            "no preview came back in {} s: {}",
+            LSP_ANSWER.as_secs(),
             app.state.status
         );
         let (uses, files) = app.state.rename.extent();
