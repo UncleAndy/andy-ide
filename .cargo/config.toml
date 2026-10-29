@@ -1,0 +1,15 @@
+# Four tests at a time, not one per core.
+#
+# The tests that ask a real `rust-analyzer` about this very project are held to one at a
+# time by `test_serial` (see `crates/andy-ide/src/test_serial.rs`), and that is enough when
+# the machine is quiet. It is not enough when the whole workspace runs: with a test thread
+# per core, sixteen of them, the rest of the suite starts language servers of its own and
+# the one that is supposed to measure an answer measures the load instead. There, a test
+# that answers in a quarter of a second alone waited five minutes for an answer that never
+# came — twice the wall it had been given, and the wall was not the problem.
+#
+# Four threads leave the servers room to answer. The suite is not slower for it: the real
+# server tests are the long ones and they take turns anyway, while the starving was costing
+# every one of them.
+[env]
+RUST_TEST_THREADS = "4"

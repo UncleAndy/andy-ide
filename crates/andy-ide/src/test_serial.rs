@@ -6,6 +6,11 @@
 //! whose whole point is "the answer comes back" starts failing for a reason that has
 //! nothing to do with the answer. One at a time, the answer is the only thing being
 //! measured.
+//!
+//! One at a time is not enough on its own: what starves these servers is the rest of the
+//! suite, which runs a test thread per core and starts servers of its own. That is why the
+//! repository tells cargo to run four tests at a time — see `.cargo/config.toml`, where the
+//! five minutes one of these tests spent waiting for an answer is written down.
 
 #![cfg(test)]
 
