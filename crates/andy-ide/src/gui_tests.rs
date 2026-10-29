@@ -5182,6 +5182,12 @@ mod the_agent_panel {
         gui.harness.step();
         gui.harness.event(egui::Event::PointerMoved(to));
         gui.harness.step();
+        println!(
+            "DBG during drag: label={:?}",
+            gui.harness
+                .query_by_label_contains("Hello")
+                .map(|node| node.rect())
+        );
         gui.harness.event(egui::Event::PointerButton {
             pos: to,
             button: egui::PointerButton::Primary,
@@ -5204,6 +5210,12 @@ mod the_agent_panel {
         gui.harness
             .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
 
+        println!(
+            "DBG label={label:?} shown={:?} has_copy={} commands={:?}",
+            gui.app().state.agent.shown_rect,
+            gui.app().state.agent.wants_copy,
+            output.platform_output.commands
+        );
         let copied = output.platform_output.commands.iter().find_map(|command| {
             if let egui::OutputCommand::CopyText(text) = command {
                 Some(text.clone())
@@ -5282,11 +5294,15 @@ mod the_agent_panel {
         let (_, request) = gui.app().state.agent.choice.clone().expect("a choice");
         assert_eq!(request.title(), "Which variant should I write?");
         assert!(
-            gui.harness.query_by_label("readable").is_some(),
+            gui.harness
+                .query_by_label("Readable \u{2014} a few lines")
+                .is_some(),
             "the variants are not on screen"
         );
 
-        gui.harness.get_by_label("readable").click();
+        gui.harness
+            .get_by_label("Readable \u{2014} a few lines")
+            .click();
         wait(&mut gui, "the chosen variant coming back", |gui| {
             answer(gui).contains("readable")
         });
@@ -5294,6 +5310,49 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.choice.is_none(),
             "the choice stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn a_variant_can_be_refused() {
+        // A question the agent is waiting on has to have a way out: an agent that hears
+        // nothing waits forever, and a person who wants none of the variants has to be
+        // able to say so.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the variants", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+        assert!(
+            gui.harness.query_by_label("None of these").is_some(),
+            "there is no way to refuse the variants"
+        );
+
+        gui.harness.get_by_label("None of these").click();
+        wait(&mut gui, "the refusal coming back", |gui| {
+            answer(gui).contains("none")
+        });
+        assert_eq!(
+            answer(&gui),
+            "none",
+            "the agent was not told of the refusal"
+        );
+        assert!(
+            gui.app().state.agent.choice.is_none(),
+            "the choice stayed after it was refused"
         );
     }
 

@@ -27,42 +27,133 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
     header(ui, state);
+    // The card the agent is waiting on is drawn above the conversation, before it: drawn
+    // below, it would have to fit into what the conversation left over, and a card taller
+    // than that — a question with long variants — would be pushed past the panel's own
+    // edge, where it is clipped and takes no click. Here it takes its own height and the
+    // conversation keeps what is left.
+    question(ui, state);
+    choice(ui, state);
     ui.separator();
     transcript(ui, state);
     ui.separator();
-    question(ui, state);
-    choice(ui, state);
     input(ui, state);
     status(ui, state);
+    // The list of models floats in a layer of its own, above the button that opened it.
     models(ui, state);
+}
+
+/// The colours the panel asks a person in: amber for a permission, blue for a choice among
+/// variants. Nothing else in the panel uses either, so the colour alone says who is waiting.
+const ASKING: egui::Color32 = egui::Color32::from_rgb(226, 192, 96);
+const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
+
+/// The card a question is drawn in, and its edge: a shade above the panel's own background,
+/// so the place a person has to act in is visible before the words are read.
+const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
+const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
+
+/// One answer on offer: what goes back to the agent, what to show, and what to say about it.
+struct Offer {
+    /// The word the agent is sent.
+    value: String,
+    /// What the person reads.
+    title: String,
+    /// What the pointer says when it rests on the answer.
+    hint: String,
+}
+
+/// The agent waiting for a person, drawn as one card.
+///
+/// Both kinds of waiting look the same — a permission and a choice among variants are the
+/// same event from the panel's side: the agent has stopped and only a person can start it
+/// again. Two shapes for one situation would make a person learn both.
+///
+/// Returns the answer when one was given: `Some(Some(value))` for the answer picked,
+/// `Some(None)` for a refusal.
+fn waiting_card(
+    ui: &mut Ui,
+    accent: egui::Color32,
+    heading: &str,
+    offers: &[Offer],
+    refusal: &str,
+    refusal_hint: &str,
+) -> Option<Option<String>> {
+    let mut chosen = None;
+    egui::Frame::group(ui.style())
+        .fill(CARD)
+        .stroke(egui::Stroke::new(1.0, CARD_EDGE))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            // The card is as wide as the panel: a question that stops halfway across leaves
+            // the eye to work out where it ends.
+            ui.set_width(ui.available_width());
+            // Wrapped, not on one line: the agent's question is a sentence, and it has to
+            // fit inside the card rather than run out of the panel's edge.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
+                ui.label(egui::RichText::new(heading).color(accent).strong());
+            });
+            ui.add_space(6.0);
+            let width = ui.available_width();
+            for offer in offers {
+                let answer = egui::Button::new(&offer.title)
+                    .min_size(egui::vec2(width, 26.0))
+                    .corner_radius(5)
+                    .wrap_mode(egui::TextWrapMode::Wrap);
+                if ui.add(answer).on_hover_text(&offer.hint).clicked() {
+                    chosen = Some(Some(offer.value.clone()));
+                }
+                ui.add_space(3.0);
+            }
+            ui.add_space(2.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(egui::RichText::new(refusal).weak())
+                    .on_hover_text(refusal_hint)
+                    .clicked()
+                {
+                    chosen = Some(None);
+                }
+            });
+        });
+    chosen
 }
 
 /// The variants the agent offers, when it is waiting for one to be picked.
 ///
 /// ACP calls this an elicitation: the agent cannot decide which way to go and asks the
-/// person. It is drawn next to the permission question because both are the agent
-/// waiting on a person, and a panel that hid one would leave the agent waiting forever.
+/// person. What goes back is the variant's *value*; the title is for the person, and the
+/// two are often not the same word.
 fn choice(ui: &mut Ui, state: &mut AppState) {
     let Some((_, request)) = &state.agent.choice else {
         return;
     };
-    let title = request.title().to_owned();
-    let options = request.options.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.colored_label(egui::Color32::from_rgb(140, 190, 220), title);
-        let mut chosen: Option<Option<String>> = None;
-        for option in options {
-            if ui.button(option.title).clicked() {
-                chosen = Some(Some(option.value));
-            }
-        }
-        if ui.button("Refuse").clicked() {
-            chosen = Some(None);
-        }
-        if let Some(value) = chosen {
-            state.agent.answer_choice(value.as_deref());
-        }
-    });
+    let heading = request.title().to_owned();
+    let offers: Vec<Offer> = request
+        .options
+        .iter()
+        .map(|option| Offer {
+            value: option.value.clone(),
+            title: option.title.clone(),
+            hint: if option.value == option.title {
+                "the agent is told this is the one".to_owned()
+            } else {
+                format!("the agent is told: {}", option.value)
+            },
+        })
+        .collect();
+    if let Some(answer) = waiting_card(
+        ui,
+        CHOOSING,
+        &heading,
+        &offers,
+        "None of these",
+        "the agent is told you wanted none of them",
+    ) {
+        state.agent.answer_choice(answer.as_deref());
+    }
 }
 
 /// The models on offer, folded by provider, in a layer above the button that opened it.
@@ -421,6 +512,8 @@ fn header(ui: &mut Ui, state: &mut AppState) {
 /// answer harder to find.
 fn transcript(ui: &mut Ui, state: &mut AppState) {
     let lines = state.agent.transcript.clone();
+    // What the rows below the conversation take: the separator, the field and the status
+    // line. They are drawn after it, so the room is kept for them here.
     let height = (ui.available_height() - 64.0).max(60.0);
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
@@ -469,28 +562,27 @@ fn question(ui: &mut Ui, state: &mut AppState) {
     let Some((_, request)) = &state.agent.asking else {
         return;
     };
-    let title = request.title();
-    let options: Vec<(String, String)> = request
+    let heading = request.title().to_owned();
+    let offers: Vec<Offer> = request
         .options
         .iter()
-        .map(|option| (option.option_id.clone(), option.name.clone()))
+        .map(|option| Offer {
+            value: option.option_id.clone(),
+            title: option.name.clone(),
+            // The id is what the agent hears, and it is the thing a person is agreeing to.
+            hint: format!("the agent is told: {}", option.option_id),
+        })
         .collect();
-
-    ui.horizontal_wrapped(|ui| {
-        ui.colored_label(egui::Color32::from_rgb(220, 190, 90), title);
-        let mut chosen: Option<Option<String>> = None;
-        for (id, name) in options {
-            if ui.button(name).clicked() {
-                chosen = Some(Some(id));
-            }
-        }
-        if ui.button("Refuse").clicked() {
-            chosen = Some(None);
-        }
-        if let Some(option) = chosen {
-            state.agent.answer(option);
-        }
-    });
+    if let Some(answer) = waiting_card(
+        ui,
+        ASKING,
+        &heading,
+        &offers,
+        "Refuse",
+        "the agent is told no",
+    ) {
+        state.agent.answer(answer);
+    }
 }
 
 /// The field, and the button that sends it.

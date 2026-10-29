@@ -361,7 +361,11 @@ fn main() {
                                     "properties": {
                                         "variant": {
                                             "type": "string",
-                                            "enum": ["compact", "readable", "fast"]
+                                            "oneOf": [
+                                                {"const": "compact", "title": "Compact \u{2014} one line"},
+                                                {"const": "readable", "title": "Readable \u{2014} a few lines"},
+                                                {"const": "formal", "title": "Formal \u{2014} a report"}
+                                            ]
                                         }
                                     },
                                     "required": ["variant"]

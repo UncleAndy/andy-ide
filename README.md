@@ -180,7 +180,18 @@ conversation is the point of it. `Stop` cancels the waiting as well as the proce
 
 An agent can ask the person to choose between variants, not just to allow or refuse: the client
 claims ACP's `elicitation` in `initialize`, and an `elicitation/create` request becomes buttons
-in the panel, answered with the variant's name or declined.
+in the panel, answered with the variant's value — the word the agent asked for, which is often
+not the words on the button — or declined with `None of these`.
+
+A question is drawn as a card of its own, above the conversation: a heading in the colour of
+what is being asked (amber for a permission, blue for a choice), the answers stacked full width
+below it, and the refusal as a quieter button on its own line. A permission and a choice look
+the same, because from the panel's side they are the same event — the agent has stopped and
+only a person can start it again. The card sits above the conversation rather than below it
+because it has to keep its whole height: drawn below, it would have to fit into what the
+conversation left over, and a question with long variants would be pushed past the panel's own
+edge, where it is clipped and takes no click. This was found by a test that clicked a variant
+and got nothing back — the variant was off the panel, not unclickable by accident.
 
 Sending a message does not move the keyboard: the field keeps it, and a message typed while
 the answer is still coming is queued and goes out when the turn ends. Clicking into the
