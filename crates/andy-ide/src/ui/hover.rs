@@ -223,6 +223,12 @@ impl Hover {
         Some(Duration::from_secs_f64(left))
     }
 
+    /// Whether the pointer is on the hint itself, which is on top of the text: what is
+    /// under the hint is not what the pointer is on, and must not be asked about.
+    pub fn is_over_hint(&self) -> bool {
+        self.over
+    }
+
     /// Where the hint was drawn, if it is on screen: where the pointer has to be for
     /// the hint to stay, and where a test looks for it.
     #[cfg_attr(not(test), allow(dead_code))]

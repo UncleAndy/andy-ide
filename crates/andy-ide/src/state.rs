@@ -455,9 +455,18 @@ impl AppState {
     /// Returns how long the window should wait before the question becomes due,
     /// so an idle window comes back to ask it; `None` means nothing is pending.
     pub fn track_hover(&mut self, now: f64) -> Option<std::time::Duration> {
+        self.hover.forget_if_modal(self.modal_open());
+        // The pointer is on the hint, which floats over the text. The text under it is
+        // not what the pointer is on, so nothing is asked about it: asking replaced the
+        // answer being read with the answer about a symbol hidden behind the hint.
+        // Looking at the spot is skipped too, since that is the first step of asking.
+        if self.hover.is_over_hint() {
+            self.hover.settle(now);
+            return None;
+        }
+
         let spot = self.hover_spot();
         self.hover.look_at(spot, now);
-        self.hover.forget_if_modal(self.modal_open());
         // What is on screen is decided here, before it is drawn: a hint that the pointer
         // has left stays for the linger, and stays for good while the pointer is on it.
         self.hover.settle(now);

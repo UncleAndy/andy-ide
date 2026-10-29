@@ -1732,6 +1732,54 @@ mod the_hint {
     }
 
     #[test]
+    fn the_text_under_the_hint_is_not_asked_about() {
+        // The hint floats over the code, so a pointer on the hint is geometrically on a
+        // symbol it cannot see. Asking about that symbol replaced the answer being read
+        // with an answer about something hidden behind the hint.
+        let text: String = (0..100)
+            .map(|line| format!("alpha beta {line}\n"))
+            .collect();
+        let mut gui = Gui::new(&[("notes.txt", &text)], Some("notes.txt"));
+        gui.settle();
+
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nfirst question");
+        assert!(hint_on_screen(&gui, "first question"));
+
+        // Onto the hint, and long enough for a question to be due.
+        let rect = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        gui.harness.hover_at(rect.center());
+        run_for(&mut gui, HOVER_DELAY * 3.0);
+
+        // The answer to the symbol under the hint arrives: it must be dropped, because
+        // nothing was asked about it.
+        answer(&mut gui, "```text\nbeta\n```\n---\n\nsecond question");
+        assert!(
+            hint_on_screen(&gui, "first question"),
+            "the hint being read was replaced while the pointer was on it"
+        );
+        assert!(
+            !hint_on_screen(&gui, "second question"),
+            "the text under the hint was asked about"
+        );
+
+        // Out of the hint and onto other code, and the mechanism works again.
+        gui.harness.hover_at(egui::pos2(300.0, 300.0));
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\ngamma\n```\n---\n\nthird question");
+        assert!(
+            hint_on_screen(&gui, "third question"),
+            "nothing is asked about the text once the pointer has left the hint"
+        );
+    }
+
+    #[test]
     fn a_hint_too_tall_for_the_window_is_scrolled() {
         // Forty lines of documentation do not fit beside the pointer: the hint is cut
         // to the window and scrolled, not left hanging off the bottom of the screen.
