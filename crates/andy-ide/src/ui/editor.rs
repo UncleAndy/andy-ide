@@ -11,6 +11,10 @@ use crate::ui::tabs;
 /// Draws the tab strip, then the active buffer, with the Markdown preview
 /// beside it when it is switched on and the file is Markdown.
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
+    // The hint under the pointer belongs to this panel: while it is not drawn, there is
+    // no text under the pointer to ask about, and a spot left over from an earlier frame
+    // would follow the pointer into whichever panel the person is actually using.
+    state.editor_drawn = true;
     tabs::strip(ui, state);
     ui.separator();
 

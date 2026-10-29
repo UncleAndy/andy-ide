@@ -130,6 +130,9 @@ impl App {
     /// One frame. Kept separate from the `eframe::App` impl so it can be driven
     /// by a headless test.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // Nothing has been drawn yet this frame: the editor says so itself when its tab
+        // draws, and the hint is only asked about text that was actually on screen.
+        self.state.editor_drawn = false;
         if !self.zoom_applied {
             self.zoom_applied = true;
             let zoom = self.state.config.font_size / DEFAULT_FONT_SIZE;
@@ -3188,6 +3191,9 @@ mod real_hover_tests {
         let spot_character = column as u32;
         app.state
             .set_hover_for_test(spot_line, spot_character, egui::pos2(300.0, 200.0));
+        // No frame is drawn here, so the editor says for itself what a frame would have
+        // said: the spot is a place in text that is on screen.
+        app.state.editor_drawn = true;
 
         let start = std::time::Instant::now();
         let mut now = 0.0;

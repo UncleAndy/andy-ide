@@ -28,6 +28,20 @@ pub fn default_name(command: &str) -> String {
 /// outside quotes takes the next character literally — which is how a file name with a
 /// space in it can be typed without quotes.
 pub fn parse(line: &str) -> Result<AgentSpec> {
+    parse_named("", line, None)
+}
+
+/// Reads a command line into an agent with the name and the terminal the person gave.
+///
+/// The name is not a detail: it is what the menu shows, and two agents started from the
+/// same binary with different arguments — `hermes acp --fast` and `hermes acp --deep` —
+/// are two entries as far as a person is concerned. Without one, the program's own name
+/// is used, which is a guess and only a guess.
+///
+/// The terminal is the command line the agent's own shell commands are run through: the
+/// work may happen in a container or over `ssh`, and an agent that assumes it is on the
+/// machine the editor runs on is an agent that will edit the wrong files.
+pub fn parse_named(name: &str, line: &str, terminal: Option<&str>) -> Result<AgentSpec> {
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut have_word = false;
@@ -77,11 +91,20 @@ pub fn parse(line: &str) -> Result<AgentSpec> {
     let Some(command) = words.next() else {
         bail!("there is no command to run");
     };
+    let name = if name.trim().is_empty() {
+        default_name(&command)
+    } else {
+        name.trim().to_owned()
+    };
     Ok(AgentSpec {
-        name: default_name(&command),
+        name,
         command,
         args: words.collect(),
         env: Default::default(),
+        terminal: terminal
+            .map(str::trim)
+            .filter(|terminal| !terminal.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -94,7 +117,7 @@ pub fn quote(spec: &AgentSpec) -> String {
 
 /// One word, quoted only if it needs to be: a path with a space in it, or an empty
 /// argument, which must not disappear.
-fn quote_word(word: &str) -> String {
+pub(crate) fn quote_word(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .chars()
@@ -171,10 +194,14 @@ mod tests {
                 r#"quote"inside"#.to_owned(),
             ],
             env: Default::default(),
+            terminal: Some("ssh dev@build".to_owned()),
         };
         let line = quote(&spec);
-        let back = parse(&line).expect("the command read back");
+        let back = parse_named(&spec.name, &line, spec.terminal.as_deref())
+            .expect("the command read back");
         assert_eq!(back.command, spec.command);
+        assert_eq!(back.name, "odd", "the name is the one that was given");
+        assert_eq!(back.terminal.as_deref(), Some("ssh dev@build"));
         assert_eq!(back.args, spec.args, "through {line:?}");
     }
 }

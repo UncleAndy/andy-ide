@@ -152,11 +152,21 @@ pub fn initialize_params(capabilities: &ClientCapabilities) -> Value {
 
 /// The `session/new` parameters. `mcpServers` is empty: the editor brings no servers of
 /// its own, and an agent that wants one can start it itself.
-pub fn new_session_params(cwd: &std::path::Path) -> Value {
-    json!({
+/// The `session/new` parameters: the directory, and where the work happens in words the
+/// agent can read.
+///
+/// `_meta.terminal` is not part of ACP, which has no place for "this project lives in a
+/// container". It is sent anyway because the alternative is an agent that assumes it is on
+/// the machine the editor is on, and edits the wrong copy of every file.
+pub fn new_session_params(cwd: &std::path::Path, terminal: Option<&str>) -> Value {
+    let mut params = json!({
         "cwd": cwd.to_string_lossy(),
         "mcpServers": Vec::<Value>::new(),
-    })
+    });
+    if let Some(terminal) = terminal {
+        params["_meta"] = json!({"terminal": terminal});
+    }
+    params
 }
 
 /// The `session/prompt` parameters: one block of text, which is all a chat field sends.

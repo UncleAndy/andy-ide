@@ -76,6 +76,12 @@ pub struct AgentState {
     pub wants_focus: bool,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
+    /// What the menu calls it: two agents from one binary with different arguments are
+    /// two things to a person, and a name taken from the program cannot say which.
+    pub name: String,
+    /// Where the agent's own shell commands are run: `ssh dev@build`, `docker exec -i dev
+    /// sh -c`, or nothing for this machine.
+    pub terminal: String,
     /// What the panel is doing, in one line.
     pub status: String,
     /// The models the agent offers, and the one in use.
@@ -86,6 +92,8 @@ pub struct AgentState {
     pub current_mode: Option<String>,
     /// How much of the model's context is spent, when the agent says.
     pub usage: Option<Usage>,
+    /// Where the panel was last drawn, for the tests that point at it.
+    pub shown_rect: Option<egui::Rect>,
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
     pub took: Option<Duration>,
@@ -129,6 +137,14 @@ impl AgentState {
                     .first()
                     .map(ide_agents::quote_command)
                     .unwrap_or_default();
+                self.name = registry
+                    .first()
+                    .map(|agent| agent.name.clone())
+                    .unwrap_or_default();
+                self.terminal = registry
+                    .first()
+                    .and_then(|agent| agent.terminal.clone())
+                    .unwrap_or_default();
                 self.registry = registry;
                 self.status = match &self.chosen {
                     Some(name) => format!("{name}, not started"),
@@ -158,7 +174,16 @@ impl AgentState {
             self.status = "no project: an agent has nowhere to work".to_owned();
             return;
         };
-        let spec = match ide_agents::parse_command(&self.command) {
+        let terminal = self.terminal.trim().to_owned();
+        let spec = match ide_agents::parse_named(
+            &self.name,
+            &self.command,
+            if terminal.is_empty() {
+                None
+            } else {
+                Some(&terminal)
+            },
+        ) {
             Ok(spec) => spec,
             Err(error) => {
                 self.status = format!("{error}");
@@ -187,7 +212,16 @@ impl AgentState {
     /// Nothing is written until it is asked for: a panel that saved every experiment
     /// would leave a file full of typos to clean up.
     pub fn remember(&mut self) {
-        let spec = match ide_agents::parse_command(&self.command) {
+        let terminal = self.terminal.trim().to_owned();
+        let spec = match ide_agents::parse_named(
+            &self.name,
+            &self.command,
+            if terminal.is_empty() {
+                None
+            } else {
+                Some(&terminal)
+            },
+        ) {
             Ok(spec) => spec,
             Err(error) => {
                 self.status = format!("{error}");

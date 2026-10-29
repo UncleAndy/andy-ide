@@ -117,6 +117,9 @@ pub struct AppState {
     /// The project-symbol search (`Ctrl+Shift+F12`).
     pub symbols: crate::ui::symbols::SymbolSearch,
     pub hover: crate::ui::hover::Hover,
+    /// Whether the editor tab was drawn this frame: the hint belongs to the text under
+    /// the pointer, and there is no such text while the panel is off screen.
+    pub(crate) editor_drawn: bool,
     /// The blame of the active file, once asked for (`Ctrl+Shift+B`).
     pub blame: Option<BlameView>,
     pub rename: crate::ui::rename::Rename,
@@ -192,6 +195,7 @@ impl AppState {
             results: crate::ui::results::Results::new(),
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
+            editor_drawn: false,
             blame: None,
             rename: crate::ui::rename::Rename::new(),
             terminal: crate::ui::terminal::Terminal::new(),
@@ -771,7 +775,14 @@ impl AppState {
     }
 
     /// Where the pointer rests, as the view of the active tab last saw it.
+    ///
+    /// Nothing while the editor is off screen: the spot is a place in a text under the
+    /// pointer, and when that text is not drawn the place means nothing — a hint left
+    /// over from an earlier frame follows the pointer into whatever panel is in use.
     pub(crate) fn hover_spot(&self) -> Option<crate::ui::hover::Spot> {
+        if !self.editor_drawn {
+            return None;
+        }
         let buffer = self.active_buffer()?;
         let (line, character, screen) = buffer.hover?;
         Some(crate::ui::hover::Spot {

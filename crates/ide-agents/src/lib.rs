@@ -19,8 +19,9 @@ pub mod command;
 pub mod protocol;
 pub mod registry;
 pub mod session;
+pub mod terminal;
 
-pub use command::{parse as parse_command, quote as quote_command};
+pub use command::{parse as parse_command, parse_named, quote as quote_command};
 pub use protocol::{Mode, Model, PermissionOption, PermissionRequest, SessionState, Update, Usage};
 pub use registry::Registry;
 pub use session::{AgentSpec, Event, PermissionPolicy, Session};
@@ -71,6 +72,7 @@ mod tests {
                 command: "no-such-agent-binary-anywhere".to_owned(),
                 args: Vec::new(),
                 env: Default::default(),
+                terminal: None,
             }],
         };
         let dir = tempfile::tempdir().unwrap();

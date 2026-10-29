@@ -111,6 +111,12 @@ escapes, and run without a shell in between, so `;` and `` stay characters of a 
 name rather than becoming a second command. `Remember` writes it into `agents.toml`. The
 session lives on a worker thread — the panel posts what was typed, the
 worker pumps what the agent says — so an answer is drawn while it is still being written.
+An agent has three fields of its own: the name the list shows, the command that starts it,
+and the terminal its work happens in — `ssh dev@build`, `docker exec -i dev sh -c`, or
+empty for this machine. That last one is not decoration: the client serves the agent's
+`terminal/*` requests itself, so a project that lives in a container is worked on in the
+container, and the directory the agent is told about is the directory its commands run in.
+
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both
 choices are menus, and both are answered by the agent, not by us. Anything the agent does

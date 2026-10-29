@@ -11,6 +11,7 @@ fn stand_in() -> AgentSpec {
         command: env!("CARGO_BIN_EXE_acp_test_agent").to_owned(),
         args: Vec::new(),
         env: Default::default(),
+        terminal: None,
     }
 }
 
@@ -287,4 +288,45 @@ fn how_much_of_the_window_is_used_arrives_with_the_turn() {
     assert_eq!(usage.used, 42_000);
     assert_eq!(usage.window, Some(100_000));
     assert_eq!(session.usage(), Some(usage));
+}
+
+#[test]
+fn a_shell_the_agent_asks_for_is_run_and_its_output_comes_back() {
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    session.start_turn("run").expect("the turn started");
+    let said = loop {
+        match session.next_event(Duration::from_secs(20)) {
+            Some(Event::Text(text)) => break text,
+            Some(Event::Finished(_)) | None => break String::new(),
+            Some(_) => {}
+        }
+    };
+    assert!(
+        said.contains("FROM-TERMINAL"),
+        "the shell ran but said nothing: {said:?}"
+    );
+    assert!(
+        said.ends_with('0'),
+        "the exit code did not come back: {said:?}"
+    );
+}
+
+#[test]
+fn the_agent_is_told_which_environment_the_work_is_in() {
+    // The directory is one answer; where the commands run is another, and an agent that
+    // is not told will edit whatever copy of the project its own machine has.
+    let dir = project();
+    let mut spec = stand_in();
+    spec.terminal = Some("sh -c".to_owned());
+    let mut session =
+        Session::start(&spec, dir.path(), PermissionPolicy::Deny).expect("the agent started");
+    session.start_turn("where").expect("the turn started");
+    let said = loop {
+        match session.next_event(Duration::from_secs(10)) {
+            Some(Event::Text(text)) => break text,
+            Some(Event::Finished(_)) | None => break String::new(),
+            Some(_) => {}
+        }
+    };
+    assert_eq!(said, dir.path().canonicalize().unwrap().to_string_lossy());
 }

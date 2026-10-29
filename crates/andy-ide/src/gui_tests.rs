@@ -3971,12 +3971,15 @@ mod the_agent_panel {
             "the typed command is not in the file: {text}"
         );
         let read = ide_agents::Registry::load(&place).expect("reading it back");
-        assert!(
-            read.agents
-                .iter()
-                .any(|agent| agent.name == "acp_test_agent"),
-            "the agent did not come back from the file: {:?}",
-            read.agents
+        // The name is the one in the field, not one guessed from the program: the entry
+        // that was there keeps its name and takes the new command.
+        let saved = read
+            .get("stand-in")
+            .unwrap_or_else(|| panic!("the agent did not come back: {:?}", read.agents));
+        assert_eq!(
+            saved.command,
+            stand_in().unwrap().to_string_lossy(),
+            "the command was not saved"
         );
     }
 
@@ -4264,6 +4267,69 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_name_given_by_hand_is_the_one_the_list_shows() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+
+        // A name of its own: two agents run from one binary are two entries to a person,
+        // and a name taken from the program cannot tell them apart.
+        gui.app_mut().state.agent.name = "Fast stand-in".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Remember").click();
+        gui.settle();
+
+        let place = gui._project.path().join(".andy-ide").join("agents.toml");
+        let text = std::fs::read_to_string(&place).expect("the file");
+        assert!(
+            text.contains("Fast stand-in"),
+            "the name is not in the file: {text}"
+        );
+        let read = ide_agents::Registry::load(&place).expect("reading it back");
+        assert!(
+            read.get("Fast stand-in").is_some(),
+            "the agent did not come back under its name: {:?}",
+            read.agents
+        );
+    }
+
+    #[test]
+    fn the_terminal_in_the_field_is_where_the_agents_commands_run() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+
+        // `sh -c` is the same shape as `docker exec -i dev sh -c` and `ssh host`: the
+        // command the agent asks for is appended to it as one argument.
+        gui.app_mut().state.agent.terminal = "sh -c".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "run".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the shell the agent asked for", |gui| {
+            answer(gui).contains("FROM-TERMINAL")
+        });
+        assert!(
+            answer(&gui).ends_with('0'),
+            "the exit code did not come back: {:?}",
+            answer(&gui)
+        );
+    }
+
+    #[test]
     fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
@@ -4298,6 +4364,44 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.asking.is_none(),
             "the question stayed after it was answered"
+        );
+    }
+}
+
+/// The hint belongs to the pointer's place in the text, and nowhere else.
+#[cfg(test)]
+mod the_hint_and_the_panels {
+    use super::*;
+
+    #[test]
+    fn a_frame_that_draws_the_editor_says_so() {
+        let mut gui = Gui::new(&[("a.rs", "use std::fmt;\n")], Some("a.rs"));
+        gui.settle();
+        assert!(
+            gui.app().state.editor_drawn,
+            "the editor did not mark itself drawn"
+        );
+    }
+
+    #[test]
+    fn the_hint_is_nothing_when_the_editor_did_not_draw() {
+        let mut gui = Gui::new(&[("a.rs", "use std::fmt;\n")], Some("a.rs"));
+        gui.settle();
+        // A place under the pointer, as the view would have left it.
+        gui.app_mut()
+            .state
+            .set_hover_for_test(0, 4, egui::pos2(300.0, 200.0));
+        assert!(
+            gui.app().state.hover_spot().is_some(),
+            "the spot is not published while the editor is on screen"
+        );
+
+        // The next frame draws something else in its place: the spot means nothing, and
+        // a hint left over from it would follow the pointer into another panel.
+        gui.app_mut().state.editor_drawn = false;
+        assert!(
+            gui.app().state.hover_spot().is_none(),
+            "the hint outlived the editor not being drawn"
         );
     }
 }
