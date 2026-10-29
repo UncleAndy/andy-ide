@@ -144,6 +144,9 @@ pub struct AgentState {
     /// Set when the person asked to copy from the panel: the window turns the shortcut
     /// into the copy event egui's own text selection listens for.
     pub wants_copy: bool,
+    /// Where the question card was drawn, when one is up: the tests hold the panel to it,
+    /// and nothing else may read it as a place to click.
+    pub card_rect: Option<egui::Rect>,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
     /// What the menu calls it: two agents from one binary with different arguments are
@@ -217,6 +220,7 @@ impl Default for AgentState {
             queued: None,
             wants_focus: false,
             wants_copy: false,
+            card_rect: None,
             command: String::new(),
             name: String::new(),
             status: String::new(),

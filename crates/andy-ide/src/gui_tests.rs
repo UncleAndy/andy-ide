@@ -4135,18 +4135,27 @@ mod the_agent_panel {
     }
 
     fn with_agent() -> Option<Gui> {
+        with_agent_env(&[])
+    }
+
+    /// The same window, with settings for the stand-in agent it starts: how many answers it
+    /// offers, how many models it has.
+    fn with_agent_env(env: &[(&str, &str)]) -> Option<Gui> {
         let agent = stand_in()?;
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
-        std::fs::write(
-            project.path().join(".andy-ide").join("agents.toml"),
-            format!(
-                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
-                agent.to_string_lossy()
-            ),
-        )
-        .unwrap();
+        let mut file = format!(
+            "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+            agent.to_string_lossy()
+        );
+        if !env.is_empty() {
+            file.push_str("\n[agent.env]\n");
+            for (name, value) in env {
+                file.push_str(&format!("{name} = {value:?}\n"));
+            }
+        }
+        std::fs::write(project.path().join(".andy-ide").join("agents.toml"), file).unwrap();
         let mut gui = Gui {
             harness: window(
                 project.path(),
@@ -4159,6 +4168,24 @@ mod the_agent_panel {
         };
         gui.settle();
         Some(gui)
+    }
+
+    /// Starts the panel's stand-in agent and asks it for a choice, up to the point where the
+    /// card is on screen and the agent is waiting.
+    fn ask_for_a_choice(gui: &mut Gui) {
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(gui, "the variants", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
     }
 
     fn wait(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
@@ -5383,6 +5410,119 @@ mod the_agent_panel {
             "Readable \u{2014} a few lines, with the reasoning behind them",
         );
         inside(&gui, "Formal \u{2014} a full report in the usual structure");
+    }
+
+    #[test]
+    fn no_two_widgets_share_an_id_in_the_panel() {
+        // egui warns about two widgets under one id by drawing a red box and a line marked
+        // with a flame over them — but only in a debug build, which is how the editor is run
+        // while it is being written. Two scroll areas are the easy pair to fall into: an
+        // unnamed one takes its id from the ui it is drawn in, and the panel draws the
+        // conversation and the question card in the same ui.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        ask_for_a_choice(&mut gui);
+
+        let warnings = |gui: &Gui| {
+            let mut found = Vec::new();
+            for clipped in &gui.harness.output().shapes {
+                match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.job.text.starts_with('\u{1f525}') => {
+                        found.push(text.galley.job.text.clone());
+                    }
+                    egui::Shape::Rect(rect)
+                        if rect.stroke.color == egui::Color32::from_rgb(255, 0, 0) =>
+                    {
+                        found.push(format!("a red box at {:?}", rect.rect));
+                    }
+                    _ => {}
+                }
+            }
+            found
+        };
+
+        // With the card up — the card holds a scroll area of its own — and after it is gone.
+        assert!(
+            warnings(&gui).is_empty(),
+            "egui is warning about the panel: {:?}",
+            warnings(&gui)
+        );
+        gui.harness.get_by_label("None of these").click();
+        wait(&mut gui, "the refusal coming back", |gui| {
+            answer(gui).contains("none")
+        });
+        gui.harness.step();
+        assert!(
+            warnings(&gui).is_empty(),
+            "egui is warning about the panel: {:?}",
+            warnings(&gui)
+        );
+    }
+
+    #[test]
+    fn the_card_is_as_tall_as_its_answers_and_never_the_whole_panel() {
+        // The card grows with its answers and stops at a share of the panel: a question that
+        // covers the whole panel takes the conversation with it, and the conversation is what
+        // a person reads to decide which answer is right.
+        let Some(mut few) = with_agent_env(&[("ACP_TEST_VARIANTS", "2")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        ask_for_a_choice(&mut few);
+        // A window tall enough that the panel has room: the card is its content there, so a
+        // card with two answers and a card with fourteen differ by what is in them.
+        for gui in [&mut few] {
+            gui.harness.set_size(egui::vec2(1200.0, 1400.0));
+            for _ in 0..10 {
+                gui.harness.step();
+            }
+        }
+        let panel = few
+            .app()
+            .state
+            .agent
+            .shown_rect
+            .expect("the panel is drawn");
+        let short = few
+            .app()
+            .state
+            .agent
+            .card_rect
+            .expect("the card is drawn")
+            .height();
+
+        let Some(mut many) = with_agent_env(&[("ACP_TEST_VARIANTS", "14")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        ask_for_a_choice(&mut many);
+        for gui in [&mut many] {
+            gui.harness.set_size(egui::vec2(1200.0, 1400.0));
+            for _ in 0..10 {
+                gui.harness.step();
+            }
+        }
+        let tall = many
+            .app()
+            .state
+            .agent
+            .card_rect
+            .expect("the card is drawn")
+            .height();
+
+        assert!(
+            tall > short,
+            "the card does not grow with its answers: {tall} against {short}"
+        );
+        for (height, answers) in [(short, 2), (tall, 14)] {
+            assert!(
+                height <= panel.height() * 0.75 + 2.0,
+                "a card with {answers} answers took {height} of the panel's {}",
+                panel.height()
+            );
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // than that — a question with long variants — would be pushed past the panel's own
     // edge, where it is clipped and takes no click. Here it takes its own height and the
     // conversation keeps what is left.
+    state.agent.card_rect = None;
     question(ui, state);
     choice(ui, state);
     ui.separator();
@@ -53,8 +54,27 @@ const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
 const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
 
-/// The padding inside the card's frame, in points.
+/// The card's own measurements, in points: the padding inside its frame, its vertical inner
+/// margin and its outline, the gap under its heading, the room its refusal row takes, and one
+/// answer on one line with the gap under it.
+///
+/// The answers' window is worked out from what the heading actually took, not from an
+/// estimate of it: the heading is a sentence of the agent's and it wraps to two lines as
+/// easily as one, and an estimate that comes up short is a card taller than the panel.
 const CARD_PAD: f32 = 10.0;
+const CARD_MARGIN: f32 = 8.0;
+const CARD_OUTLINE: f32 = 1.0;
+const CARD_GAP: f32 = 6.0;
+const CARD_ROW: f32 = 29.0;
+const CARD_REFUSAL: f32 = 26.0;
+/// Kept back beyond the arithmetic above, because the scroll area has a margin of its own and
+/// being a little short of room is a card that keeps a row back — never a card off the panel.
+const CARD_SLACK: f32 = 8.0;
+
+/// The most of the panel's height a card may take. It is not all of it: a question that
+/// covers the whole panel takes the conversation with it, and the conversation is what a
+/// person reads to decide which answer is right.
+const CARD_SHARE: f32 = 0.75;
 
 /// One answer on offer: what goes back to the agent, what to show, and what to say about it.
 struct Offer {
@@ -87,8 +107,8 @@ fn room_of(state: &AppState, ui: &Ui) -> egui::Rect {
 /// comes out wider than the panel, taking the refusal, which is right aligned, off the edge
 /// with it.
 ///
-/// Returns the answer when one was given: `Some(Some(value))` for the answer picked,
-/// `Some(None)` for a refusal.
+/// Returns the answer when one was given — `Some(Some(value))` for the answer picked,
+/// `Some(None)` for a refusal — and the rect the card was drawn in.
 fn waiting_card(
     ui: &mut Ui,
     room: egui::Rect,
@@ -97,59 +117,92 @@ fn waiting_card(
     offers: &[Offer],
     refusal: &str,
     refusal_hint: &str,
-) -> Option<Option<String>> {
+) -> (Option<Option<String>>, egui::Rect) {
     // Two points are taken off as well as the padding: the frame's own outline.
     let width = (room.width() - 2.0 * CARD_PAD - 2.0).max(80.0);
-    // What the panel has left for the card: everything below the rows drawn before it. A card
-    // taller than that is cut off by the panel's own edge, and a cut-off button takes no
-    // click — the question is on screen, the answers are not, and the agent waits for an
-    // answer nobody can give it. So the card is a scroll of its own: it never grows past what
-    // the panel has, and every answer stays reachable. In a panel with room, nothing scrolls.
-    let window = ui.available_height().max(24.0);
+    // How much of the panel the card may take: a share of it, so that the conversation stays
+    // visible — but never more than is left under the rows drawn before the card, and never so
+    // little that a couple of answers do not show.
+    let floor = CARD_REFUSAL + CARD_GAP + 2.0 * (CARD_MARGIN + CARD_OUTLINE) + 2.0 * CARD_ROW;
+    let allowed = (room.height() * CARD_SHARE).max(floor);
+    let window = allowed.min(ui.available_height().max(floor));
+
     let mut chosen = None;
-    egui::ScrollArea::vertical()
-        .max_height(window)
-        .auto_shrink([false, true])
+    let frame = egui::Frame::group(ui.style())
+        .fill(CARD)
+        .stroke(egui::Stroke::new(CARD_OUTLINE, CARD_EDGE))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(CARD_PAD as i8, CARD_MARGIN as i8))
         .show(ui, |ui| {
-            egui::Frame::group(ui.style())
-                .fill(CARD)
-                .stroke(egui::Stroke::new(1.0, CARD_EDGE))
-                .corner_radius(6)
-                .inner_margin(egui::Margin::symmetric(10, 8))
+            // The card is as wide as the panel: a question that stops halfway across leaves
+            // the eye to work out where it ends.
+            ui.set_width(width);
+            // Wrapped, not on one line: the agent's question is a sentence, and it has to
+            // fit inside the card rather than run out of the panel's edge.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
+                ui.label(egui::RichText::new(heading).color(accent).strong());
+            });
+            ui.add_space(CARD_GAP);
+            // What is left for the answers, from what the heading took: the refusal row and
+            // the frame's own margins are known, the heading is not.
+            let taken = ui.min_rect().height() + CARD_GAP;
+            let answers = (window
+                - taken
+                - CARD_REFUSAL
+                - CARD_GAP
+                - 2.0 * (CARD_MARGIN + CARD_OUTLINE)
+                - CARD_SLACK)
+                .max(CARD_ROW);
+            // The answers scroll in a window of their own; the heading and the refusal stay
+            // where they are, because the refusal is the way out of a question a person
+            // wants none of the answers to, and the way out has to be on screen.
+            //
+            // The scroll area is named. An unnamed one takes its id from the ui it is drawn
+            // in, and the conversation's scroll area is drawn in the same ui: two of them
+            // under one id share their state and egui, in a debug build, draws a red box and
+            // a `\u{1f525} ID clash` over both.
+            egui::ScrollArea::vertical()
+                .id_salt("agent-question")
+                .max_height(answers)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    // The card is as wide as the panel: a question that stops halfway across
-                    // leaves the eye to work out where it ends.
                     ui.set_width(width);
-                    // Wrapped, not on one line: the agent's question is a sentence, and it has
-                    // to fit inside the card rather than run out of the panel's edge.
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
-                        ui.label(egui::RichText::new(heading).color(accent).strong());
-                    });
-                    ui.add_space(6.0);
                     for offer in offers {
+                        // One line each, whatever the answer's length: the reasons for three
+                        // answers and for thirty differ by nothing else in the panel, and the
+                        // whole text is a pointer's rest away. Answers that wrap make a card
+                        // as tall as the panel for no answer's sake.
                         let answer = egui::Button::new(&offer.title)
                             .min_size(egui::vec2(width, 26.0))
                             .corner_radius(5)
-                            .wrap_mode(egui::TextWrapMode::Wrap);
+                            .wrap_mode(egui::TextWrapMode::Truncate);
                         if ui.add(answer).on_hover_text(&offer.hint).clicked() {
                             chosen = Some(Some(offer.value.clone()));
                         }
                         ui.add_space(3.0);
                     }
-                    ui.add_space(2.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(egui::RichText::new(refusal).weak())
-                            .on_hover_text(refusal_hint)
-                            .clicked()
-                        {
-                            chosen = Some(None);
-                        }
-                    });
                 });
+            ui.add_space(2.0);
+            // The row is given the height of the button and no more. `with_layout` is handed
+            // the whole available size and starts its child at the top of it, so a
+            // right-aligned row left to itself stretches the card to the bottom of the panel
+            // — the card would be as tall as the panel whatever it held.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), CARD_REFUSAL),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .button(egui::RichText::new(refusal).weak())
+                        .on_hover_text(refusal_hint)
+                        .clicked()
+                    {
+                        chosen = Some(None);
+                    }
+                },
+            );
         });
-    chosen
+    (chosen, frame.response.rect)
 }
 
 /// The variants the agent offers, when it is waiting for one to be picked.
@@ -169,14 +222,14 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
             value: option.value.clone(),
             title: option.title.clone(),
             hint: if option.value == option.title {
-                "the agent is told this is the one".to_owned()
+                option.title.clone()
             } else {
-                format!("the agent is told: {}", option.value)
+                format!("{}\nthe agent is told: {}", option.title, option.value)
             },
         })
         .collect();
     let room = room_of(state, ui);
-    if let Some(answer) = waiting_card(
+    let (answer, card) = waiting_card(
         ui,
         room,
         CHOOSING,
@@ -184,7 +237,9 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
         &offers,
         "None of these",
         "the agent is told you wanted none of them",
-    ) {
+    );
+    state.agent.card_rect = Some(card);
+    if let Some(answer) = answer {
         state.agent.answer_choice(answer.as_deref());
     }
 }
@@ -549,6 +604,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     // line. They are drawn after it, so the room is kept for them here.
     let height = (ui.available_height() - 64.0).max(60.0);
     egui::ScrollArea::vertical()
+        .id_salt("agent-transcript")
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .max_height(height)
@@ -607,7 +663,7 @@ fn question(ui: &mut Ui, state: &mut AppState) {
         })
         .collect();
     let room = room_of(state, ui);
-    if let Some(answer) = waiting_card(
+    let (answer, card) = waiting_card(
         ui,
         room,
         ASKING,
@@ -615,7 +671,9 @@ fn question(ui: &mut Ui, state: &mut AppState) {
         &offers,
         "Refuse",
         "the agent is told no",
-    ) {
+    );
+    state.agent.card_rect = Some(card);
+    if let Some(answer) = answer {
         state.agent.answer(answer);
     }
 }

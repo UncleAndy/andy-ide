@@ -349,6 +349,24 @@ fn main() {
                     "choose" => {
                         next_id += 1;
                         let asked = next_id;
+                        // How many answers to offer: three with their own names, or as many
+                        // as a test asks for, so that a card can be made taller than the
+                        // panel it is drawn in.
+                        let count = std::env::var("ACP_TEST_VARIANTS")
+                            .ok()
+                            .and_then(|count| count.parse::<usize>().ok())
+                            .unwrap_or(3);
+                        let answers: Vec<Value> = (0..count)
+                            .map(|index| match index {
+                                0 => json!({"const": "compact", "title": "Compact \u{2014} one line, no detail"}),
+                                1 => json!({"const": "readable", "title": "Readable \u{2014} a few lines, with the reasoning behind them"}),
+                                2 => json!({"const": "formal", "title": "Formal \u{2014} a full report in the usual structure"}),
+                                other => json!({
+                                    "const": format!("answer-{other}"),
+                                    "title": format!("Answer {other} \u{2014} a choice of its own, written out at length")
+                                }),
+                            })
+                            .collect();
                         request(
                             asked,
                             "elicitation/create",
@@ -361,11 +379,7 @@ fn main() {
                                     "properties": {
                                         "variant": {
                                             "type": "string",
-                                            "oneOf": [
-                                                {"const": "compact", "title": "Compact \u{2014} one line, no detail"},
-                                                {"const": "readable", "title": "Readable \u{2014} a few lines, with the reasoning behind them"},
-                                                {"const": "formal", "title": "Formal \u{2014} a full report in the usual structure"}
-                                            ]
+                                            "oneOf": answers
                                         }
                                     },
                                     "required": ["variant"]
