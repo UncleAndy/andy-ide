@@ -25,6 +25,10 @@ use lsp_types::{DocumentSymbol, Location, Position, SymbolInformation};
 const WORKER_GRACE: Duration = Duration::from_millis(400);
 
 /// Something the editor wants from the server.
+/// One use of a symbol: the range the server marked it with, as
+/// `(start line, start column, end line, end column)`.
+pub type Spot = (u32, u32, u32, u32);
+
 #[derive(Debug)]
 pub enum Job {
     Open {
@@ -101,7 +105,7 @@ pub enum Outcome {
         path: PathBuf,
         line: u32,
         character: u32,
-        spots: Vec<(u32, u32, u32, u32)>,
+        spots: Vec<Spot>,
         /// Set when the server did not answer, so the question can be asked again.
         /// Without this the answer "no uses" and the answer "no answer" are the same
         /// empty list, and a busy server silently ends the feature for that caret.
@@ -424,6 +428,70 @@ fn work(
 /// Waits before a retry, in steps, so that leaving does not have to wait too.
 ///
 /// Returns `false` when the application is closing: the caller should stop asking.
+/// The uses of a symbol at `position`, asked for until the server is known to be loaded.
+///
+/// rust-analyzer builds its index lazily and answers from the syntax while it does: an outline
+/// comes back from a server that has not loaded the crate, `documentHighlight` does not. That
+/// question needs the index, and a server that has not built it answers `null`, which arrives
+/// here as the same empty list as "used nowhere" — an empty list believed leaves the uses
+/// unmarked until the caret moves. It is the same "not yet" the rename above waits out; here the
+/// empty answer is waited out too, and only while nothing has come back at all. Once the index
+/// has answered, or the waiting has run out with the server still answering, an empty answer is
+/// the answer and the question is not put again.
+///
+/// Returns whether the question was refused, the uses, and whether the empty answers of this
+/// server are to be believed from now on.
+fn highlights_until_loaded(
+    warm: bool,
+    mut ask: impl FnMut() -> anyhow::Result<Vec<lsp_types::DocumentHighlight>>,
+    mut wait: impl FnMut(u64) -> bool,
+) -> (bool, Vec<Spot>, bool) {
+    // The first question goes out at once, the rest after waits that grow: a server that is
+    // loading is asked again, not believed. A server already known to be loaded is asked once.
+    let delays: &[u64] = if warm {
+        &[0]
+    } else {
+        &[0, 250, 500, 1000, 2000, 4000, 8000, 8000]
+    };
+    let spots_of = |highlights: Vec<lsp_types::DocumentHighlight>| -> Vec<Spot> {
+        highlights
+            .iter()
+            .map(|highlight| {
+                (
+                    highlight.range.start.line,
+                    highlight.range.start.character,
+                    highlight.range.end.line,
+                    highlight.range.end.character,
+                )
+            })
+            .collect()
+    };
+    for (index, delay) in delays.iter().enumerate() {
+        if index > 0 && !wait(*delay) {
+            break;
+        }
+        match ask() {
+            Ok(highlights) => {
+                let spots = spots_of(highlights);
+                if !spots.is_empty() {
+                    // The index answered: this server is loaded, and an empty answer from it
+                    // from now on says what it looks like it says.
+                    return (false, spots, true);
+                }
+                if index + 1 == delays.len() {
+                    // The waiting ran out with the server answering. Whatever the empty answer
+                    // means, asking again on the next caret move cannot make it say more.
+                    return (false, Vec::new(), true);
+                }
+            }
+            // A refusal is not "not yet": the question is not put again behind the caller's
+            // back, because the caller is the one who knows when to put it again.
+            Err(_) => return (true, Vec::new(), warm),
+        }
+    }
+    (false, Vec::new(), warm)
+}
+
 fn pause(delay_ms: u64, stopping: &AtomicBool) -> bool {
     const STEP: Duration = Duration::from_millis(20);
     let deadline = Instant::now() + Duration::from_millis(delay_ms);
@@ -571,28 +639,15 @@ fn apply(
             Some(Outcome::Rename { new_name, changes })
         }
         Job::Highlights { path, position } => {
-            let mut failed = false;
-            let spots = match session.document_highlights(&path, position) {
-                Ok(highlights) => highlights
-                    .iter()
-                    .map(|highlight| {
-                        (
-                            highlight.range.start.line,
-                            highlight.range.start.character,
-                            highlight.range.end.line,
-                            highlight.range.end.character,
-                        )
-                    })
-                    .collect(),
-                // A highlight is decoration: a server that cannot answer must not
-                // put an error in the status bar on every caret move — but the failure
-                // is still reported, so the next frame asks again instead of believing
-                // that the symbol has no uses.
-                Err(_) => {
-                    failed = true;
-                    Vec::new()
-                }
-            };
+            // A highlight is decoration: a server that cannot answer must not put an error in
+            // the status bar on every caret move — but the failure is still reported, so the
+            // next frame asks again instead of believing that the symbol has no uses.
+            let (failed, spots, loaded) = highlights_until_loaded(
+                *warm,
+                || session.document_highlights(&path, position),
+                |delay| pause(delay, stopping),
+            );
+            *warm = loaded;
             Some(Outcome::Highlights {
                 path,
                 line: position.line,
@@ -633,6 +688,107 @@ fn apply(
                 Err(error) => Outcome::Failed(format!("{error:#}")),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    fn highlight(line: u32) -> lsp_types::DocumentHighlight {
+        lsp_types::DocumentHighlight {
+            range: lsp_types::Range {
+                start: lsp_types::Position { line, character: 0 },
+                end: lsp_types::Position { line, character: 3 },
+            },
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_from_a_cold_server_is_asked_again() {
+        // A server that has not loaded the crate answers `null`, and `null` is an empty list:
+        // believed, it leaves the uses unmarked until the caret moves. It is asked again.
+        let mut asked = 0;
+        let (failed, spots, loaded) = highlights_until_loaded(
+            false,
+            || {
+                asked += 1;
+                if asked < 3 {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![highlight(7)])
+                }
+            },
+            |_| true,
+        );
+        assert_eq!(asked, 3, "the empty answers were believed");
+        assert!(!failed, "asking again was reported as a refusal");
+        assert_eq!(spots, vec![(7, 0, 7, 3)]);
+        assert!(
+            loaded,
+            "the index answered and the server is not called loaded"
+        );
+    }
+
+    #[test]
+    fn a_loaded_server_is_asked_once_however_empty_the_answer() {
+        // Once the index has answered, an empty answer is the answer: a symbol used nowhere
+        // must not cost a queue of questions.
+        let mut asked = 0;
+        let (failed, spots, loaded) = highlights_until_loaded(
+            true,
+            || {
+                asked += 1;
+                Ok(Vec::new())
+            },
+            |_| true,
+        );
+        assert_eq!(
+            asked, 1,
+            "a loaded server was asked again about an empty answer"
+        );
+        assert!(spots.is_empty() && !failed && loaded);
+    }
+
+    #[test]
+    fn a_refused_question_is_a_failure_and_not_an_empty_answer() {
+        let mut asked = 0;
+        let (failed, spots, _) = highlights_until_loaded(
+            false,
+            || {
+                asked += 1;
+                Err(anyhow::anyhow!("the server did not answer in 30 s"))
+            },
+            |_| true,
+        );
+        assert!(
+            failed,
+            "a server that did not answer was reported as an empty answer"
+        );
+        assert!(spots.is_empty());
+        assert_eq!(
+            asked, 1,
+            "a refusal was asked again as if the crate were loading"
+        );
+    }
+
+    #[test]
+    fn the_waiting_runs_out_and_the_empty_answer_is_believed() {
+        let mut asked = 0;
+        let (failed, spots, loaded) = highlights_until_loaded(
+            false,
+            || {
+                asked += 1;
+                Ok(Vec::new())
+            },
+            |_| true,
+        );
+        assert!(asked > 1, "the empty answer was not waited out at all");
+        assert!(
+            !failed && spots.is_empty() && loaded,
+            "the waiting never ended: {asked} questions asked"
+        );
     }
 }
 
