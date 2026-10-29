@@ -362,9 +362,9 @@ fn main() {
                                         "variant": {
                                             "type": "string",
                                             "oneOf": [
-                                                {"const": "compact", "title": "Compact \u{2014} one line"},
-                                                {"const": "readable", "title": "Readable \u{2014} a few lines"},
-                                                {"const": "formal", "title": "Formal \u{2014} a report"}
+                                                {"const": "compact", "title": "Compact \u{2014} one line, no detail"},
+                                                {"const": "readable", "title": "Readable \u{2014} a few lines, with the reasoning behind them"},
+                                                {"const": "formal", "title": "Formal \u{2014} a full report in the usual structure"}
                                             ]
                                         }
                                     },

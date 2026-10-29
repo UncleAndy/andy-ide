@@ -53,6 +53,9 @@ const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
 const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
 
+/// The padding inside the card's frame, in points.
+const CARD_PAD: f32 = 10.0;
+
 /// One answer on offer: what goes back to the agent, what to show, and what to say about it.
 struct Offer {
     /// The word the agent is sent.
@@ -63,60 +66,88 @@ struct Offer {
     hint: String,
 }
 
+/// The panel's own rect: what the panel is drawn as, which is what a card has to fit in.
+///
+/// `shown_rect` is written by the panel as it draws, and it is the drawn rect. egui's own
+/// idea of the available space is larger in a dock, and a card that trusts it is drawn past
+/// the panel's edge.
+fn room_of(state: &AppState, ui: &Ui) -> egui::Rect {
+    state.agent.shown_rect.unwrap_or_else(|| ui.clip_rect())
+}
+
 /// The agent waiting for a person, drawn as one card.
 ///
 /// Both kinds of waiting look the same — a permission and a choice among variants are the
 /// same event from the panel's side: the agent has stopped and only a person can start it
 /// again. Two shapes for one situation would make a person learn both.
 ///
+/// `room` is the panel's own rect — what is on screen — and not what egui offers as the
+/// available space. In a dock the two are not the same: the available width is the room the
+/// panel *could* be given, which is wider than the panel is drawn, and a card laid out to it
+/// comes out wider than the panel, taking the refusal, which is right aligned, off the edge
+/// with it.
+///
 /// Returns the answer when one was given: `Some(Some(value))` for the answer picked,
 /// `Some(None)` for a refusal.
 fn waiting_card(
     ui: &mut Ui,
+    room: egui::Rect,
     accent: egui::Color32,
     heading: &str,
     offers: &[Offer],
     refusal: &str,
     refusal_hint: &str,
 ) -> Option<Option<String>> {
+    // Two points are taken off as well as the padding: the frame's own outline.
+    let width = (room.width() - 2.0 * CARD_PAD - 2.0).max(80.0);
+    // What the panel has left for the card: everything below the rows drawn before it. A card
+    // taller than that is cut off by the panel's own edge, and a cut-off button takes no
+    // click — the question is on screen, the answers are not, and the agent waits for an
+    // answer nobody can give it. So the card is a scroll of its own: it never grows past what
+    // the panel has, and every answer stays reachable. In a panel with room, nothing scrolls.
+    let window = ui.available_height().max(24.0);
     let mut chosen = None;
-    egui::Frame::group(ui.style())
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0, CARD_EDGE))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(10, 8))
+    egui::ScrollArea::vertical()
+        .max_height(window)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
-            // The card is as wide as the panel: a question that stops halfway across leaves
-            // the eye to work out where it ends.
-            ui.set_width(ui.available_width());
-            // Wrapped, not on one line: the agent's question is a sentence, and it has to
-            // fit inside the card rather than run out of the panel's edge.
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
-                ui.label(egui::RichText::new(heading).color(accent).strong());
-            });
-            ui.add_space(6.0);
-            let width = ui.available_width();
-            for offer in offers {
-                let answer = egui::Button::new(&offer.title)
-                    .min_size(egui::vec2(width, 26.0))
-                    .corner_radius(5)
-                    .wrap_mode(egui::TextWrapMode::Wrap);
-                if ui.add(answer).on_hover_text(&offer.hint).clicked() {
-                    chosen = Some(Some(offer.value.clone()));
-                }
-                ui.add_space(3.0);
-            }
-            ui.add_space(2.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(egui::RichText::new(refusal).weak())
-                    .on_hover_text(refusal_hint)
-                    .clicked()
-                {
-                    chosen = Some(None);
-                }
-            });
+            egui::Frame::group(ui.style())
+                .fill(CARD)
+                .stroke(egui::Stroke::new(1.0, CARD_EDGE))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    // The card is as wide as the panel: a question that stops halfway across
+                    // leaves the eye to work out where it ends.
+                    ui.set_width(width);
+                    // Wrapped, not on one line: the agent's question is a sentence, and it has
+                    // to fit inside the card rather than run out of the panel's edge.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
+                        ui.label(egui::RichText::new(heading).color(accent).strong());
+                    });
+                    ui.add_space(6.0);
+                    for offer in offers {
+                        let answer = egui::Button::new(&offer.title)
+                            .min_size(egui::vec2(width, 26.0))
+                            .corner_radius(5)
+                            .wrap_mode(egui::TextWrapMode::Wrap);
+                        if ui.add(answer).on_hover_text(&offer.hint).clicked() {
+                            chosen = Some(Some(offer.value.clone()));
+                        }
+                        ui.add_space(3.0);
+                    }
+                    ui.add_space(2.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(egui::RichText::new(refusal).weak())
+                            .on_hover_text(refusal_hint)
+                            .clicked()
+                        {
+                            chosen = Some(None);
+                        }
+                    });
+                });
         });
     chosen
 }
@@ -144,8 +175,10 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
             },
         })
         .collect();
+    let room = room_of(state, ui);
     if let Some(answer) = waiting_card(
         ui,
+        room,
         CHOOSING,
         &heading,
         &offers,
@@ -573,8 +606,10 @@ fn question(ui: &mut Ui, state: &mut AppState) {
             hint: format!("the agent is told: {}", option.option_id),
         })
         .collect();
+    let room = room_of(state, ui);
     if let Some(answer) = waiting_card(
         ui,
+        room,
         ASKING,
         &heading,
         &offers,

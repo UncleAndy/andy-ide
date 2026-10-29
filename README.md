@@ -183,15 +183,20 @@ claims ACP's `elicitation` in `initialize`, and an `elicitation/create` request 
 in the panel, answered with the variant's value — the word the agent asked for, which is often
 not the words on the button — or declined with `None of these`.
 
-A question is drawn as a card of its own, above the conversation: a heading in the colour of
-what is being asked (amber for a permission, blue for a choice), the answers stacked full width
-below it, and the refusal as a quieter button on its own line. A permission and a choice look
-the same, because from the panel's side they are the same event — the agent has stopped and
-only a person can start it again. The card sits above the conversation rather than below it
-because it has to keep its whole height: drawn below, it would have to fit into what the
-conversation left over, and a question with long variants would be pushed past the panel's own
-edge, where it is clipped and takes no click. This was found by a test that clicked a variant
-and got nothing back — the variant was off the panel, not unclickable by accident.
+A question is drawn as a card of its own: a heading in the colour of what is being asked (amber
+for a permission, blue for a choice), the answers stacked full width below it, and the refusal as
+a quieter button on its own line. A permission and a choice look the same, because from the
+panel's side they are the same event — the agent has stopped and only a person can start it again.
+
+The card is drawn above the conversation, and it never grows past what the panel has: taller than
+the room left for it, it scrolls as one piece. Both of these were paid for. Drawn below the
+conversation it had only what the conversation left over, and a question with long answers — the
+real ones are whole sentences — went past the panel's own edge, where egui clips it and takes no
+click from it: the question was on screen, the answers were not, and the agent waited for an
+answer nobody could give. Measured by `ui.available_width()` it came out *wider* than the panel,
+because in a dock that is the room the panel could be given rather than the room it is drawn in,
+and the refusal — right aligned — went off the edge with it. The card is measured by the panel's
+own rect and laid out inside a scroll area sized to the room the panel has left.
 
 Sending a message does not move the keyboard: the field keeps it, and a message typed while
 the answer is still coming is queued and goes out when the turn ends. Clicking into the

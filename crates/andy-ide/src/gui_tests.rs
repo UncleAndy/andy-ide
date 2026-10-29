@@ -5182,12 +5182,6 @@ mod the_agent_panel {
         gui.harness.step();
         gui.harness.event(egui::Event::PointerMoved(to));
         gui.harness.step();
-        println!(
-            "DBG during drag: label={:?}",
-            gui.harness
-                .query_by_label_contains("Hello")
-                .map(|node| node.rect())
-        );
         gui.harness.event(egui::Event::PointerButton {
             pos: to,
             button: egui::PointerButton::Primary,
@@ -5210,12 +5204,6 @@ mod the_agent_panel {
         gui.harness
             .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
 
-        println!(
-            "DBG label={label:?} shown={:?} has_copy={} commands={:?}",
-            gui.app().state.agent.shown_rect,
-            gui.app().state.agent.wants_copy,
-            output.platform_output.commands
-        );
         let copied = output.platform_output.commands.iter().find_map(|command| {
             if let egui::OutputCommand::CopyText(text) = command {
                 Some(text.clone())
@@ -5295,13 +5283,13 @@ mod the_agent_panel {
         assert_eq!(request.title(), "Which variant should I write?");
         assert!(
             gui.harness
-                .query_by_label("Readable \u{2014} a few lines")
+                .query_by_label("Readable \u{2014} a few lines, with the reasoning behind them")
                 .is_some(),
             "the variants are not on screen"
         );
 
         gui.harness
-            .get_by_label("Readable \u{2014} a few lines")
+            .get_by_label("Readable \u{2014} a few lines, with the reasoning behind them")
             .click();
         wait(&mut gui, "the chosen variant coming back", |gui| {
             answer(gui).contains("readable")
@@ -5311,6 +5299,90 @@ mod the_agent_panel {
             gui.app().state.agent.choice.is_none(),
             "the choice stayed after it was answered"
         );
+    }
+
+    #[test]
+    fn the_variants_are_inside_the_panel_whatever_the_window() {
+        // The answer to a question has to be on screen. Laid out to what the dock *could*
+        // give rather than to what is drawn, a card comes out wider than the panel and its
+        // refusal is cut away; grown to its own height, its offers go past the bottom edge,
+        // where egui clips them and they take no click — the question is there, the answers
+        // are not, and the agent waits for an answer nobody can give.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the variants", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+
+        let inside = |gui: &Gui, label: &str| {
+            let panel = gui
+                .app()
+                .state
+                .agent
+                .shown_rect
+                .expect("the panel is drawn");
+            let node = gui
+                .harness
+                .query_by_label(label)
+                .unwrap_or_else(|| panic!("{label} is not on screen at all"));
+            let rect = node.rect();
+            assert!(
+                panel.x_range().contains(rect.left())
+                    && panel.x_range().contains(rect.right() - 1.0),
+                "{label} runs out of the panel: {rect:?} in {panel:?}"
+            );
+            assert!(
+                panel.y_range().contains(rect.top())
+                    && panel.y_range().contains(rect.bottom() - 1.0),
+                "{label} is past the panel's edge: {rect:?} in {panel:?}"
+            );
+        };
+
+        // A card that has to scroll keeps a scroll bar, and a scroll bar fades in and out:
+        // `settle` runs until nothing asks to be drawn, which a fading bar never does. A
+        // handful of frames is enough to lay the panel out.
+        let lay_out = |gui: &mut Gui| {
+            for _ in 0..10 {
+                gui.harness.step();
+            }
+        };
+
+        for size in [
+            egui::vec2(1200.0, 800.0),
+            egui::vec2(1000.0, 620.0),
+            egui::vec2(820.0, 560.0),
+        ] {
+            gui.harness.set_size(size);
+            lay_out(&mut gui);
+            // The first answer: the part that has to be on screen for a person to answer
+            // at all, in any panel that can hold it. The question above it is drawn with it
+            // — the card scrolls as one piece — and the rest of the answers are a scroll
+            // away rather than off the panel.
+            inside(&gui, "Compact \u{2014} one line, no detail");
+        }
+
+        // In a panel with room, nothing is left to a scroll: every variant is on screen.
+        gui.harness.set_size(egui::vec2(1200.0, 800.0));
+        lay_out(&mut gui);
+        inside(&gui, "Compact \u{2014} one line, no detail");
+        inside(
+            &gui,
+            "Readable \u{2014} a few lines, with the reasoning behind them",
+        );
+        inside(&gui, "Formal \u{2014} a full report in the usual structure");
     }
 
     #[test]
