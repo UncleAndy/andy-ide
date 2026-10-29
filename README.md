@@ -127,6 +127,8 @@ documentation — while the signature keeps its monospace face. It is a window r
 picture of one: it stays for a moment after the pointer leaves the symbol, so the hand can
 reach it, and while the pointer is on it it does not go away at all — the wheel scrolls an
 answer too tall for the screen, the text can be selected and copied, links can be followed.
+The hint grows to its whole text as long as the window has room; the scroll bar is what
+happens when the window is smaller than the answer, not a habit.
 
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both

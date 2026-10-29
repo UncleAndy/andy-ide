@@ -283,12 +283,17 @@ impl Hover {
         let (signature, prose) = split_hover(&showing.text);
         let viewport = ctx.viewport_rect();
         let margin = 12.0;
+        // The padding of the popup frame is part of the hint's height, so what the text
+        // itself may use is the window minus the margins and that padding.
         let max_width = HINT_WIDTH.min(viewport.width() - 2.0 * margin);
-        // The height the window can spare: an answer of forty lines is read by
-        // scrolling the hint, not by scrolling the window.
-        let max_height = (viewport.height() - 2.0 * margin - 24.0).max(120.0);
+        // The whole window is the budget, not a part of it: a hint is scrolled only when
+        // it has taken all the height there is and still has more to say. The frame's own
+        // padding is taken off inside, where the style is at hand.
+        let max_height = (viewport.height() - 2.0 * margin).max(120.0);
 
-        // Beside the pointer, but never off the window.
+        // Beside the pointer, and the area's own constraint keeps the rest of it inside
+        // the window: a hint that does not fit below the pointer is moved up until it
+        // does, and only a hint taller than the window is scrolled.
         let wanted = showing.spot.screen + egui::vec2(14.0, 20.0);
         let anchor = egui::pos2(
             wanted
@@ -307,10 +312,18 @@ impl Hover {
             .interactable(true)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // What the text may use: the window, less the margins and the frame's
+                    // own padding, which is part of the hint's height.
+                    let room = (max_height - ui.style().spacing.menu_margin.sum().y).max(100.0);
                     ui.set_max_width(max_width);
+                    // The area is given the height this hint is allowed: without it egui
+                    // caps the popup at a fraction of the screen, and a long answer is
+                    // clipped down to a handful of lines while the rest of the window
+                    // stands empty.
+                    ui.set_max_height(room);
                     egui::ScrollArea::vertical()
                         .id_salt("hover_hint_scroll")
-                        .max_height(max_height)
+                        .max_height(room)
                         .show(ui, |ui| {
                             if let Some(signature) = &signature {
                                 ui.label(egui::RichText::new(signature).monospace());
@@ -327,12 +340,13 @@ impl Hover {
                             }
                         });
                 });
+                ui.min_rect()
             });
 
-        self.rect = Some(drawn.response.rect);
+        self.rect = Some(drawn.inner);
         self.over = ctx
             .input(|input| input.pointer.hover_pos())
-            .is_some_and(|pos| drawn.response.rect.contains(pos));
+            .is_some_and(|pos| drawn.inner.contains(pos));
         true
     }
 }

@@ -1613,6 +1613,125 @@ mod the_hint {
     }
 
     #[test]
+    fn a_hint_that_fits_the_window_is_shown_whole() {
+        // Scrolling is a last resort: an answer shorter than the screen is shown in full,
+        // and the scroll bar appears only when the window is genuinely too short for it.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        let body: String = (0..20)
+            .map(|line| format!("- line {line} of the documentation\n"))
+            .collect();
+        answer(&mut gui, &format!("```text\nalpha\n```\n---\n\n{body}"));
+
+        let hint = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        let window = gui.harness.ctx.viewport_rect();
+        assert!(
+            hint.height() < window.height() - 20.0,
+            "the hint takes the whole window for a short answer: {hint:?}"
+        );
+
+        // The last line of the answer is inside the hint: nothing is cut off.
+        let last = gui
+            .harness
+            .query_by_label_contains("line 19 of")
+            .expect("the last line is not there")
+            .rect();
+        assert!(
+            last.bottom() <= hint.bottom() + 0.5 && last.top() >= hint.top(),
+            "the last line is outside the hint: {last:?} in {hint:?}"
+        );
+    }
+
+    #[test]
+    fn a_tall_hint_moves_up_instead_of_running_off_the_window() {
+        // A long answer, still shorter than the window: it must be shown whole, so the
+        // hint is placed where it fits — above the pointer if it has to be — rather than
+        // hanging off the bottom edge with its last lines out of reach.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        let body: String = (0..40)
+            .map(|line| format!("- line {line} of the documentation\n"))
+            .collect();
+        answer(&mut gui, &format!("```text\nalpha\n```\n---\n\n{body}"));
+        // The first frame the hint is drawn it does not know its own height; the frame
+        // after it is placed where it fits.
+        run_for(&mut gui, 0.1);
+
+        let hint = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        let window = gui.harness.ctx.viewport_rect();
+        assert!(
+            hint.height() < window.height() - 20.0,
+            "the hint takes the whole window: {hint:?}"
+        );
+        assert!(
+            hint.top() >= window.top() && hint.bottom() <= window.bottom(),
+            "the hint is not inside the window: {hint:?} in {window:?}"
+        );
+
+        let last = gui
+            .harness
+            .query_by_label_contains("line 39 of")
+            .expect("the last line is not there")
+            .rect();
+        assert!(
+            last.bottom() <= hint.bottom() + 0.5 && last.top() >= hint.top(),
+            "the last line is outside the hint: {last:?} in {hint:?}"
+        );
+    }
+
+    #[test]
+    fn a_hint_beside_the_bottom_of_the_window_stays_inside_it() {
+        // The pointer near the bottom of the code: an answer taller than the space below
+        // it is shown in full, so it has to be placed above the pointer.
+        let text: String = (0..100)
+            .map(|line| format!("alpha beta {line}\n"))
+            .collect();
+        let mut gui = Gui::new(&[("notes.txt", &text)], Some("notes.txt"));
+        gui.settle();
+        gui.harness.hover_at(egui::pos2(315.0, 500.0));
+        gui.harness.step();
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        let body: String = (0..40)
+            .map(|line| format!("- line {line} of the documentation\n"))
+            .collect();
+        answer(&mut gui, &format!("```text\nalpha\n```\n---\n\n{body}"));
+        run_for(&mut gui, 0.1);
+
+        let hint = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        let window = gui.harness.ctx.viewport_rect();
+        assert!(
+            hint.top() >= window.top() && hint.bottom() <= window.bottom(),
+            "the hint is not inside the window: {hint:?} in {window:?}"
+        );
+        let last = gui
+            .harness
+            .query_by_label_contains("line 39 of")
+            .expect("the last line is not there")
+            .rect();
+        assert!(
+            last.bottom() <= hint.bottom() + 0.5,
+            "the last line is cut off: {last:?} in {hint:?}"
+        );
+    }
+
+    #[test]
     fn a_hint_too_tall_for_the_window_is_scrolled() {
         // Forty lines of documentation do not fit beside the pointer: the hint is cut
         // to the window and scrolled, not left hanging off the bottom of the screen.
