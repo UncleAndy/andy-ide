@@ -95,6 +95,19 @@ fn room_of(state: &AppState, ui: &Ui) -> egui::Rect {
     state.agent.shown_rect.unwrap_or_else(|| ui.clip_rect())
 }
 
+/// What a card says: the question, the answers, whose colour it is drawn in, and the way out.
+struct Card<'a> {
+    accent: egui::Color32,
+    heading: &'a str,
+    offers: &'a [Offer],
+    /// Whether several answers may be chosen at once.
+    multiple: bool,
+    /// The label of the way out of a question whose answers a person wants none of.
+    refusal: &'a str,
+    /// What the pointer says when it rests on the way out.
+    refusal_hint: &'a str,
+}
+
 /// The agent waiting for a person, drawn as one card.
 ///
 /// Both kinds of waiting look the same — a permission and a choice among variants are the
@@ -107,17 +120,14 @@ fn room_of(state: &AppState, ui: &Ui) -> egui::Rect {
 /// comes out wider than the panel, taking the refusal, which is right aligned, off the edge
 /// with it.
 ///
-/// Returns the answer when one was given — `Some(Some(value))` for the answer picked,
+/// Returns the answer when one was given — `Some(Some(values))` for the answers picked,
 /// `Some(None)` for a refusal — and the rect the card was drawn in.
 fn waiting_card(
     ui: &mut Ui,
     room: egui::Rect,
-    accent: egui::Color32,
-    heading: &str,
-    offers: &[Offer],
-    refusal: &str,
-    refusal_hint: &str,
-) -> (Option<Option<String>>, egui::Rect) {
+    card: &Card<'_>,
+    picked: &mut Vec<String>,
+) -> (Option<Option<Vec<String>>>, egui::Rect) {
     // Two points are taken off as well as the padding: the frame's own outline.
     let width = (room.width() - 2.0 * CARD_PAD - 2.0).max(80.0);
     // How much of the panel the card may take: a share of it, so that the conversation stays
@@ -140,8 +150,12 @@ fn waiting_card(
             // Wrapped, not on one line: the agent's question is a sentence, and it has to
             // fit inside the card rather than run out of the panel's edge.
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("\u{25c6}").color(accent).small());
-                ui.label(egui::RichText::new(heading).color(accent).strong());
+                ui.label(egui::RichText::new("\u{25c6}").color(card.accent).small());
+                ui.label(
+                    egui::RichText::new(card.heading)
+                        .color(card.accent)
+                        .strong(),
+                );
             });
             ui.add_space(CARD_GAP);
             // What is left for the answers, from what the heading took: the refusal row and
@@ -168,17 +182,36 @@ fn waiting_card(
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    for offer in offers {
+                    for offer in card.offers {
                         // One line each, whatever the answer's length: the reasons for three
                         // answers and for thirty differ by nothing else in the panel, and the
                         // whole text is a pointer's rest away. Answers that wrap make a card
                         // as tall as the panel for no answer's sake.
-                        let answer = egui::Button::new(&offer.title)
+                        // When several may be chosen, an answer is a switch rather than a
+                        // button: pressing one leaves the question open, because the answer
+                        // is the set of them.
+                        let answer = if card.multiple {
+                            let picked_already = picked.iter().any(|value| value == &offer.value);
+                            egui::Button::selectable(picked_already, &offer.title)
+                        } else {
+                            egui::Button::new(&offer.title)
+                        };
+                        let answer = answer
                             .min_size(egui::vec2(width, 26.0))
                             .corner_radius(5)
                             .wrap_mode(egui::TextWrapMode::Truncate);
                         if ui.add(answer).on_hover_text(&offer.hint).clicked() {
-                            chosen = Some(Some(offer.value.clone()));
+                            if card.multiple {
+                                if let Some(at) =
+                                    picked.iter().position(|value| value == &offer.value)
+                                {
+                                    picked.remove(at);
+                                } else {
+                                    picked.push(offer.value.clone());
+                                }
+                            } else {
+                                chosen = Some(Some(vec![offer.value.clone()]));
+                            }
                         }
                         ui.add_space(3.0);
                     }
@@ -193,11 +226,27 @@ fn waiting_card(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     if ui
-                        .button(egui::RichText::new(refusal).weak())
-                        .on_hover_text(refusal_hint)
+                        .button(egui::RichText::new(card.refusal).weak())
+                        .on_hover_text(card.refusal_hint)
                         .clicked()
                     {
                         chosen = Some(None);
+                    }
+                    // Several answers are gathered first and sent together: one click cannot
+                    // mean "these, and also those".
+                    if card.multiple {
+                        let ready = !picked.is_empty();
+                        let hint = if ready {
+                            format!("the agent is told: {}", picked.join(", "))
+                        } else {
+                            "pick at least one answer first".to_owned()
+                        };
+                        let send = ui
+                            .add_enabled(ready, egui::Button::new("Answer"))
+                            .on_hover_text(hint);
+                        if send.clicked() {
+                            chosen = Some(Some(picked.clone()));
+                        }
                     }
                 },
             );
@@ -229,18 +278,23 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
         })
         .collect();
     let room = room_of(state, ui);
-    let (answer, card) = waiting_card(
+    let multiple = request.multiple;
+    let (answer, drawn) = waiting_card(
         ui,
         room,
-        CHOOSING,
-        &heading,
-        &offers,
-        "None of these",
-        "the agent is told you wanted none of them",
+        &Card {
+            accent: CHOOSING,
+            heading: &heading,
+            offers: &offers,
+            multiple,
+            refusal: "None of these",
+            refusal_hint: "the agent is told you wanted none of them",
+        },
+        &mut state.agent.picked,
     );
-    state.agent.card_rect = Some(card);
+    state.agent.card_rect = Some(drawn);
     if let Some(answer) = answer {
-        state.agent.answer_choice(answer.as_deref());
+        state.agent.answer_choice(answer);
     }
 }
 
@@ -663,18 +717,27 @@ fn question(ui: &mut Ui, state: &mut AppState) {
         })
         .collect();
     let room = room_of(state, ui);
-    let (answer, card) = waiting_card(
+    let mut none = Vec::new();
+    let (answer, drawn) = waiting_card(
         ui,
         room,
-        ASKING,
-        &heading,
-        &offers,
-        "Refuse",
-        "the agent is told no",
+        &Card {
+            accent: ASKING,
+            heading: &heading,
+            offers: &offers,
+            multiple: false,
+            refusal: "Refuse",
+            refusal_hint: "the agent is told no",
+        },
+        &mut none,
     );
-    state.agent.card_rect = Some(card);
+    state.agent.card_rect = Some(drawn);
+    // A permission is answered with one option or with none: the card hands back a list for
+    // the shape of a question that allows several, and this one never does.
     if let Some(answer) = answer {
-        state.agent.answer(answer);
+        state
+            .agent
+            .answer(answer.and_then(|values| values.into_iter().next()));
     }
 }
 

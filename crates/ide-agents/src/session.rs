@@ -492,10 +492,17 @@ impl Session {
         self.send(Message::result(id, permission_answer(option)))
     }
 
-    /// Answers an elicitation that was handed over with [`Event::Choice`]: the variant
-    /// the person picked, or a refusal when there is none.
-    pub fn answer_choice(&mut self, id: u64, field: &str, choice: Option<&str>) -> Result<()> {
-        self.send(Message::result(id, choice_answer(field, choice)))
+    /// Answers an elicitation that was handed over with [`Event::Choice`]: the variant the
+    /// person picked — or the variants, when the question allowed several — and a refusal
+    /// when there is none.
+    pub fn answer_choice(
+        &mut self,
+        id: u64,
+        field: &str,
+        multiple: bool,
+        choice: Option<&[String]>,
+    ) -> Result<()> {
+        self.send(Message::result(id, choice_answer(field, multiple, choice)))
     }
 
     /// Ends the conversation: the input is closed, then the process is killed.

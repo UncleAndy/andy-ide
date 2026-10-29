@@ -346,6 +346,56 @@ fn main() {
                         chunk(&session, if allowed { "allowed" } else { "refused" });
                         turn_answer(id);
                     }
+                    "choose-many" => {
+                        next_id += 1;
+                        let asked = next_id;
+                        // The shape Hermes sends when several answers may be chosen: the
+                        // same strings, as the items of an array.
+                        request(
+                            asked,
+                            "elicitation/create",
+                            json!({
+                                "sessionId": session,
+                                "mode": "form",
+                                "message": "Which of these should I do?",
+                                "requestedSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "answer": {
+                                            "type": "array",
+                                            "items": {"type": "string", "enum": [
+                                                "Tests \u{2014} the whole suite",
+                                                "Docs \u{2014} the reference page",
+                                                "Release \u{2014} a version of its own"
+                                            ]}
+                                        }
+                                    },
+                                    "required": ["answer"]
+                                }
+                            }),
+                        );
+                        let picked = wait_for_answer(&mut input, asked)
+                            .and_then(|value| value.get("content").cloned())
+                            .and_then(|content| content.get("answer").cloned())
+                            .and_then(|answer| answer.as_array().cloned())
+                            .map(|answer| {
+                                answer
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "none".to_owned());
+                        chunk(
+                            &session,
+                            &if picked.is_empty() {
+                                "none".to_owned()
+                            } else {
+                                format!("chose: {picked}")
+                            },
+                        );
+                        turn_answer(id);
+                    }
                     "choose" => {
                         next_id += 1;
                         let asked = next_id;

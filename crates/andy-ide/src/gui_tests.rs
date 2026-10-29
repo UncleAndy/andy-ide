@@ -5526,6 +5526,75 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_question_with_several_answers_shows_them_and_sends_the_ones_picked() {
+        // Hermes asks for several answers by making the property an array of the same
+        // strings. A client that only knew the flat shape drew the question and none of its
+        // answers: a dialog with nothing to click. And one click cannot be the whole answer
+        // to such a question, so the answers are switches and the answer is sent when it is
+        // complete.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "choose-many".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the question", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+
+        let tests = "Tests \u{2014} the whole suite";
+        let docs = "Docs \u{2014} the reference page";
+        let release = "Release \u{2014} a version of its own";
+        for answer in [tests, docs, release] {
+            assert!(
+                gui.harness.query_by_label(answer).is_some(),
+                "an answer of a question of several is not on screen: {answer}"
+            );
+        }
+
+        // Two of them, and the question is still waiting: what goes back is the set.
+        gui.harness.get_by_label(tests).click();
+        gui.harness.step();
+        gui.harness.get_by_label(docs).click();
+        gui.harness.step();
+        assert!(
+            gui.app().state.agent.choice.is_some(),
+            "one click answered a question of several"
+        );
+        assert_eq!(
+            gui.app().state.agent.picked,
+            vec![tests.to_owned(), docs.to_owned()],
+            "the answers picked are not the ones switched on"
+        );
+        assert!(
+            gui.harness.query_by_label(release).is_some(),
+            "the answers went off screen while they were being chosen"
+        );
+
+        gui.harness.get_by_label("Answer").click();
+        wait(&mut gui, "the answers coming back", |gui| {
+            answer(gui).contains("chose:")
+        });
+        assert_eq!(
+            answer(&gui),
+            format!("chose: {tests}, {docs}"),
+            "the agent was not told both of the answers picked"
+        );
+        assert!(
+            gui.app().state.agent.choice.is_none(),
+            "the question stayed after it was answered"
+        );
+    }
+
+    #[test]
     fn a_variant_can_be_refused() {
         // A question the agent is waiting on has to have a way out: an agent that hears
         // nothing waits forever, and a person who wants none of the variants has to be

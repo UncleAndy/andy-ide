@@ -661,8 +661,9 @@ pub struct ChoiceOption {
 ///
 /// ACP's elicitation carries a flat JSON Schema. The editor draws a variant selection,
 /// so only the shape it can draw is accepted: one property whose values are an `enum` or
-/// a `oneOf`. An agent that asks for something else gets a refusal in the protocol's own
-/// words rather than a form nobody can fill in.
+/// a `oneOf` — or an array of those, when several may be chosen at once. An agent that asks
+/// for something else gets a refusal in the protocol's own words rather than a form nobody
+/// can fill in.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ChoiceRequest {
     /// The session it belongs to.
@@ -673,6 +674,9 @@ pub struct ChoiceRequest {
     pub field: String,
     /// The variants, in the agent's order.
     pub options: Vec<ChoiceOption>,
+    /// Whether several variants may be chosen at once. Hermes asks for several by making the
+    /// property an array of the same strings (`acp_adapter/elicitation.py`).
+    pub multiple: bool,
 }
 
 impl ChoiceRequest {
@@ -687,7 +691,7 @@ impl ChoiceRequest {
         let properties = schema
             .and_then(|schema| schema.get("properties"))
             .and_then(Value::as_object);
-        let (field, options) = properties
+        let (field, options, multiple) = properties
             .and_then(|properties| properties.iter().next())
             .map(|(field, property)| {
                 (
@@ -697,6 +701,7 @@ impl ChoiceRequest {
                         // property the editor cannot draw leaves only a refusal.
                         Vec::new()
                     }),
+                    property.get("type").and_then(Value::as_str) == Some("array"),
                 )
             })
             .unwrap_or_default();
@@ -709,6 +714,7 @@ impl ChoiceRequest {
             message,
             field,
             options,
+            multiple,
         }
     }
 
@@ -720,6 +726,11 @@ impl ChoiceRequest {
 
 /// The variants a property allows, as `(value, title)`.
 fn choice_options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
+    // Several answers to choose between are one level down: the same shape the single answer
+    // has, as the items of an array.
+    if property.get("type").and_then(Value::as_str) == Some("array") {
+        return property.get("items").and_then(choice_options_of);
+    }
     if let Some(values) = property.get("enum").and_then(Value::as_array) {
         return Some(
             values
@@ -751,13 +762,24 @@ fn choice_options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
     )
 }
 
-/// The answer to an elicitation: the chosen variant, or the person's refusal.
-pub fn choice_answer(field: &str, choice: Option<&str>) -> Value {
+/// The answer to an elicitation: the variant chosen, the variants when several could be, or
+/// the person's refusal.
+///
+/// When several may be chosen the answer is a list of them — a list of one is still a list,
+/// because the agent decided the shape of the question, not the editor.
+pub fn choice_answer(field: &str, multiple: bool, choice: Option<&[String]>) -> Value {
     match choice {
-        Some(value) => json!({
+        Some(values) if multiple => json!({
             "action": "accept",
-            "content": { field: value }
+            "content": { field: values }
         }),
+        Some(values) => match values.first() {
+            Some(value) => json!({
+                "action": "accept",
+                "content": { field: value }
+            }),
+            None => json!({"action": "decline"}),
+        },
         None => json!({"action": "decline"}),
     }
 }
@@ -991,10 +1013,64 @@ mod tests {
             ["compact", "readable", "fast"]
         );
         assert_eq!(
-            choice_answer("variant", Some("readable")),
+            choice_answer("variant", false, Some(&["readable".to_owned()])),
             json!({"action": "accept", "content": {"variant": "readable"}})
         );
-        assert_eq!(choice_answer("variant", None), json!({"action": "decline"}));
+        assert_eq!(
+            choice_answer("variant", false, None),
+            json!({"action": "decline"})
+        );
+    }
+
+    #[test]
+    fn a_choice_of_several_is_read_and_answered_as_a_list() {
+        // Hermes 0.22.5, `acp_adapter/elicitation.py::build_clarify_elicitation`: a question
+        // of several is the shape of a question of one, one level down — an array of the same
+        // strings. A client that only knew the flat shape saw the question and none of its
+        // answers, which is what a multi-select dialog looked like.
+        let params = json!({
+            "sessionId": "editor-session",
+            "mode": "form",
+            "message": "Which of these should I do?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["tests", "docs", "release"]}
+                    }
+                },
+                "required": ["answer"]
+            }
+        });
+        let request = ChoiceRequest::from_params(&params);
+        assert!(request.multiple, "a question of several was read as one");
+        assert_eq!(request.field, "answer");
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["tests", "docs", "release"]
+        );
+
+        // The answer goes back as a list, because the agent asked for a list. A refusal is
+        // `None` and is a different thing from an empty list.
+        let picked = vec!["tests".to_owned(), "docs".to_owned()];
+        assert_eq!(
+            choice_answer(&request.field, request.multiple, Some(&picked)),
+            json!({"action": "accept", "content": {"answer": ["tests", "docs"]}})
+        );
+        assert_eq!(
+            choice_answer(&request.field, request.multiple, None),
+            json!({"action": "decline"})
+        );
+        // One answer to a question of several is still a list of one.
+        assert_eq!(
+            choice_answer(&request.field, request.multiple, Some(&["docs".to_owned()])),
+            json!({"action": "accept", "content": {"answer": ["docs"]}})
+        );
     }
 
     #[test]
@@ -1029,7 +1105,7 @@ mod tests {
             ["short", "readable", "formal"]
         );
         assert_eq!(
-            choice_answer(&request.field, Some("readable")),
+            choice_answer(&request.field, false, Some(&["readable".to_owned()])),
             json!({"action": "accept", "content": {"answer": "readable"}})
         );
     }

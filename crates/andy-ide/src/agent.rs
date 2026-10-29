@@ -97,11 +97,13 @@ enum Command {
     Prompt(String),
     /// Answer the question the agent is waiting on.
     Permission { id: u64, option: Option<String> },
-    /// Answer a choice among variants: the one picked, or a refusal.
+    /// Answer a choice among variants: the one picked, or the ones picked when several could
+    /// be, or a refusal.
     Choice {
         id: u64,
         field: String,
-        value: Option<String>,
+        multiple: bool,
+        values: Option<Vec<String>>,
     },
     /// Switch models, and say so through the status line.
     Model(String),
@@ -147,6 +149,9 @@ pub struct AgentState {
     /// Where the question card was drawn, when one is up: the tests hold the panel to it,
     /// and nothing else may read it as a place to click.
     pub card_rect: Option<egui::Rect>,
+    /// The answers picked so far in a question that allows several. Kept here, beside the
+    /// question, because the card is drawn again every frame and a click is one of them.
+    pub picked: Vec<String>,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
     /// What the menu calls it: two agents from one binary with different arguments are
@@ -221,6 +226,7 @@ impl Default for AgentState {
             wants_focus: false,
             wants_copy: false,
             card_rect: None,
+            picked: Vec::new(),
             command: String::new(),
             name: String::new(),
             status: String::new(),
@@ -271,6 +277,7 @@ impl AgentState {
         self.transcript.clear();
         self.asking = None;
         self.choice = None;
+        self.picked.clear();
         self.busy = false;
         self.session = None;
         self.resume = None;
@@ -558,20 +565,22 @@ impl AgentState {
     ///
     /// `None` refuses: an agent must be able to hear that the person did not want any of
     /// the variants, or it waits forever for an answer that is not coming.
-    pub fn answer_choice(&mut self, value: Option<&str>) {
+    pub fn answer_choice(&mut self, values: Option<Vec<String>>) {
         let Some((id, request)) = self.choice.take() else {
             return;
         };
+        self.picked.clear();
         let Some(worker) = &self.worker else {
             return;
         };
         let _ = worker.commands.send(Command::Choice {
             id,
             field: request.field,
-            value: value.map(str::to_owned),
+            multiple: request.multiple,
+            values: values.clone(),
         });
-        self.status = match value {
-            Some(value) => format!("chose {value}"),
+        self.status = match values {
+            Some(values) => format!("chose {}", values.join(", ")),
             None => "declined the choice".to_owned(),
         };
     }
@@ -645,6 +654,7 @@ impl AgentState {
         self.usage = None;
         self.asking = None;
         self.choice = None;
+        self.picked.clear();
         self.busy = false;
         self.started = None;
         self.took = None;
@@ -754,6 +764,7 @@ impl AgentState {
         self.busy = false;
         self.asking = None;
         self.choice = None;
+        self.picked.clear();
         // Stopping is a decision: a process ended on purpose is not one to start again.
         self.retry_at = None;
         self.attempts = 0;
@@ -842,6 +853,9 @@ impl AgentState {
                 }
                 AgentEvent::Choice { id, request } => {
                     self.status = request.title().to_owned();
+                    // A new question starts with nothing picked: what was picked for the last
+                    // one is not an answer to this one.
+                    self.picked.clear();
                     self.choice = Some((id, request));
                 }
                 AgentEvent::Setup(state) => {
@@ -934,8 +948,13 @@ fn work(
             Ok(Command::Permission { id, option }) => {
                 let _ = session.answer_permission(id, option.as_deref());
             }
-            Ok(Command::Choice { id, field, value }) => {
-                let _ = session.answer_choice(id, &field, value.as_deref());
+            Ok(Command::Choice {
+                id,
+                field,
+                multiple,
+                values,
+            }) => {
+                let _ = session.answer_choice(id, &field, multiple, values.as_deref());
             }
             Ok(Command::Model(model)) => {
                 if let Err(error) = session.set_model(&model)
