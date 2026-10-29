@@ -149,11 +149,22 @@ directory, and the agent is told that directory the moment the session is opened
 A model is listed under the provider that serves it. An agent wired to several providers
 offers a flat list nobody can read, so the models are grouped by the part of their id before
 the first `/` or `:`, each group folding away — the provider is the first thing a person
-picks by. Next to the model is the level of thinking: `None`, `Low`, `Normal`, `High`,
-`Extra`. ACP carries levels and permissions on one channel (`session/set_mode`), so the panel
-splits what the agent offers in two: a level sits beside the model, and what the agent may do
-without asking sits to the right. A level the agent does not offer is shown greyed out rather
-than hidden — the menu says what is missing instead of pretending the choice does not exist.
+picks by, and the row under it names only the model.
+
+Next to the model is the level of thinking. ACP carries it as a *setting* of its own
+(`configOptions`, category `thought_level`), apart from the mode, which is what the agent may
+do without asking: the panel shows the levels the agent names — for Hermes, `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, `max` and `ultra` — and sends the pick back with
+`session/set_config_option`. An agent that offers no such setting gets a level button that
+says so rather than a menu it would refuse: over ACP that is Hermes 0.22.5, where the level
+belongs to the model in the Hermes profile
+(`agent.reasoning_overrides`, or `agent.reasoning_effort` for all of them), and is resolved
+again whenever a model is switched. The modes on the right are that other channel: `Default`,
+`Accept Edits`, `Don't Ask`.
+
+Changing the model, the level or the mode is written into the conversation as a service line
+once the agent confirms it — `model: …`, `thinking: …`, `mode: …` — because an answer written
+by a model a person did not ask for reads as a mistake.
 
 Selecting text in the conversation and pressing `Ctrl+C` or `Ctrl+Ins` copies it. egui makes a
 copy event out of `Ctrl+C` only, so the panel recognises both and re-issues the event after the

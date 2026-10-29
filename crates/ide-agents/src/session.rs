@@ -21,9 +21,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::protocol::{
-    ChoiceRequest, ClientCapabilities, FsCapabilities, Message, PermissionRequest, SessionState,
-    Update, Usage, choice_answer, initialize_params, load_session_params, new_session_params,
-    permission_answer, prompt_params, session_state, set_mode_params, set_model_params, usage_of,
+    ChoiceRequest, ClientCapabilities, ConfigOption, FsCapabilities, Message, PermissionRequest,
+    SessionState, Update, Usage, choice_answer, config_option_params, initialize_params,
+    load_session_params, new_session_params, options_of, permission_answer, prompt_params,
+    session_state, set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -389,6 +390,34 @@ impl Session {
         Ok(())
     }
 
+    /// Changes one of the settings the agent offers: how hard it thinks, in this panel.
+    ///
+    /// The reply carries the settings read back from the agent, so the panel shows what
+    /// the agent accepted rather than what was asked of it. An agent that answers without
+    /// the list took the choice, and the one that was asked for stands.
+    pub fn set_option(&mut self, config: &str, value: &str) -> Result<()> {
+        let id = self.session_id.clone();
+        let answer = self.ask(
+            "session/set_config_option",
+            config_option_params(&id, config, value),
+            ANSWER,
+        )?;
+        let options: Vec<ConfigOption> = options_of(&answer);
+        if options.is_empty() {
+            if let Some(option) = self
+                .state
+                .options
+                .iter_mut()
+                .find(|option| option.id == config)
+            {
+                option.current = Some(value.to_owned());
+            }
+            return Ok(());
+        }
+        self.state.options = options;
+        Ok(())
+    }
+
     /// Asks the agent to switch mode: how hard it thinks before it answers.
     pub fn set_mode(&mut self, mode: &str) -> Result<()> {
         let id = self.session_id.clone();
@@ -635,6 +664,13 @@ impl Session {
                         Some(Event::ToolCall { id, title, status })
                     }
                     Update::Plan(steps) => Some(Event::Plan(steps)),
+                    Update::Settings(options) => {
+                        self.state.options = options;
+                        // The panel hears about settings the way it heard about them when
+                        // the session opened: one message carrying all of them, so a
+                        // change it was not expecting is still a change it can show.
+                        Some(Event::Setup(self.state.clone()))
+                    }
                     Update::Other { kind, .. } => Some(Event::Other { kind }),
                 }
             }

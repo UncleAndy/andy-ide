@@ -4566,8 +4566,8 @@ mod the_agent_panel {
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
         gui.settle();
         gui.harness.get_by_label("Start").click();
-        wait(&mut gui, "the models and modes", |gui| {
-            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.modes.len() == 7
+        wait(&mut gui, "the models and settings", |gui| {
+            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.options.len() == 2
         });
         assert!(
             switches(&gui).is_empty(),
@@ -4587,20 +4587,89 @@ mod the_agent_panel {
             "the model switch was not said in the conversation"
         );
 
-        // The level, which ACP carries on the same channel as the rights.
-        gui.harness.get_by_label_contains("Normal ▾").click();
+        // The level of thinking: a setting of its own, with the levels the agent names.
+        gui.harness.get_by_label_contains("default ▾").click();
         gui.settle();
-        gui.harness.get_by_label("High").click();
+        gui.harness.get_by_label("high").click();
         wait(&mut gui, "the level changing", |gui| {
-            gui.app().state.agent.current_mode.as_deref() == Some("high")
+            gui.app()
+                .state
+                .agent
+                .options
+                .iter()
+                .find(|option| option.id == "reasoning_effort")
+                .and_then(|option| option.current.as_deref())
+                == Some("high")
         });
         assert_eq!(
             switches(&gui),
             vec![
                 "model: OpenAI \u{b7} GPT-5".to_owned(),
-                "thinking: High".to_owned()
+                "thinking: high".to_owned()
             ],
-            "the level was not said in the conversation, or was called a mode"
+            "the level was not said in the conversation"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_offers_no_level_says_so_instead_of_offering_one() {
+        // Hermes 0.22.5 offers the edit policy over ACP and nothing else: there the level
+        // belongs to the model in the Hermes profile. A panel that offered its own levels
+        // anyway would offer levels the agent has never heard of.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = [\"--no-levels\"]\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the models and the edit policy", |gui| {
+            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.options.len() == 1
+        });
+        assert!(
+            crate::agent::thought_level(&gui.app().state.agent.options).is_none(),
+            "a level of thinking was read out of an agent that offers none"
+        );
+
+        // The line is there, and it is not a menu: pressing it offers nothing, because
+        // there is nothing to offer.
+        gui.harness.get_by_label_contains("thinking —").click();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("high").is_none(),
+            "the panel offered levels the agent does not have"
+        );
+
+        // What the agent does offer is still a menu: the edit policy, which is a mode.
+        gui.harness.get_by_label_contains("Default ▾").click();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("Don't Ask").is_some(),
+            "the modes the agent offers are not offered"
         );
     }
 
@@ -4935,9 +5004,12 @@ mod the_agent_panel {
         wait(&mut gui, "the agent starting", |gui| {
             gui.app().state.agent.status.starts_with("ready")
         });
-        // What it offers arrived with the session, before anything was asked.
+        // What it offers arrived with the session, before anything was asked: the models,
+        // the edit modes, and the settings — of which the level of thinking is one.
         wait(&mut gui, "the models and modes", |gui| {
-            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.modes.len() == 7
+            gui.app().state.agent.models.len() == 4
+                && gui.app().state.agent.modes.len() == 3
+                && gui.app().state.agent.options.len() == 2
         });
         assert_eq!(
             gui.app()
@@ -4967,8 +5039,8 @@ mod the_agent_panel {
             "the model is not on the status line"
         );
         assert!(
-            gui.harness.query_by_label_contains("Normal").is_some(),
-            "the level is not on the status line"
+            gui.harness.query_by_label_contains("default").is_some(),
+            "the level of thinking is not on the status line"
         );
 
         // Choosing another model asks the agent, and the line follows the answer.
@@ -4986,7 +5058,8 @@ mod the_agent_panel {
         wait(&mut gui, "the answer and its figure", |gui| {
             gui.app().state.agent.usage.is_some()
         });
-        assert_eq!(answer(&gui), "large / normal", "the switch did not arrive");
+        // The mode the agent reports is its edit policy, which is what ACP modes carry.
+        assert_eq!(answer(&gui), "large / ask", "the switch did not arrive");
         assert!(
             gui.app().state.agent.elapsed().is_some(),
             "the turn left no time behind"

@@ -231,22 +231,70 @@ fn the_session_says_which_models_and_modes_it_offers() {
             .collect::<Vec<_>>(),
         vec!["small", "large", "nous", "openai"]
     );
-    assert_eq!(state.current_mode.as_deref(), Some("normal"));
+    // The mode is the edit policy and never a level of thinking: ACP carries the level as
+    // a setting of its own.
+    assert_eq!(state.current_mode.as_deref(), Some("default"));
     assert_eq!(
         state
             .modes
             .iter()
             .map(|mode| mode.name.as_str())
             .collect::<Vec<_>>(),
+        vec!["Default", "Accept Edits", "Don't Ask"]
+    );
+    let level = state
+        .thought_level()
+        .expect("the settings do not carry a level of thinking");
+    assert_eq!(level.id, "reasoning_effort");
+    assert_eq!(level.current.as_deref(), Some("default"));
+    assert_eq!(
+        level
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
         vec![
-            "None",
-            "Low",
-            "Normal",
-            "High",
-            "Extra",
-            "Read only",
-            "Full access"
+            "default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
         ]
+    );
+    // The other setting is the edit policy, which the panel must not mistake for a level.
+    assert!(
+        state
+            .options
+            .iter()
+            .any(|option| option.category.as_deref() == Some("mode")),
+        "the edit policy is not among the settings"
+    );
+}
+
+/// Changing a setting: the agent answers with the settings read back, and the one that was
+/// asked for is the one in force.
+#[test]
+fn a_setting_can_be_changed_and_is_read_back() {
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    session
+        .set_option("reasoning_effort", "high")
+        .expect("the agent would not change the level");
+    let level = session
+        .state()
+        .thought_level()
+        .expect("the level is gone after the change");
+    assert_eq!(level.current.as_deref(), Some("high"));
+
+    // A setting the agent does not know is accepted and ignored, as Hermes accepts an
+    // editor's own config writes: a client must not fail where nothing was changed.
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    session
+        .set_option("no_such_setting", "high")
+        .expect("an unknown setting was refused");
+    let level = session
+        .state()
+        .thought_level()
+        .expect("the level is gone after an unknown setting");
+    assert_eq!(
+        level.current.as_deref(),
+        Some("default"),
+        "an unknown setting changed the level"
     );
 }
 
@@ -254,9 +302,14 @@ fn the_session_says_which_models_and_modes_it_offers() {
 fn a_switch_of_model_and_mode_reaches_the_agent() {
     let (_dir, mut session) = start(PermissionPolicy::Deny);
     session.set_model("large").expect("the model was taken");
-    session.set_mode("deep").expect("the mode was taken");
+    session
+        .set_mode("accept_edits")
+        .expect("the mode was taken");
     assert_eq!(session.state().current_model.as_deref(), Some("large"));
-    assert_eq!(session.state().current_mode.as_deref(), Some("deep"));
+    assert_eq!(
+        session.state().current_mode.as_deref(),
+        Some("accept_edits")
+    );
 
     // And the agent itself agrees: this word is answered from its own state.
     session.start_turn("model").expect("the turn started");
@@ -267,7 +320,8 @@ fn a_switch_of_model_and_mode_reaches_the_agent() {
             Some(_) => {}
         }
     };
-    assert_eq!(said, "large / deep");
+    // The mode is the edit policy, and the agent names it the way Hermes does.
+    assert_eq!(said, "large / workspace_session");
 }
 
 #[test]

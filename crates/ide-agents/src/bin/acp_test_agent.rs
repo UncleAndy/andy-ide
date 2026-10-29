@@ -57,6 +57,71 @@ fn models_offered() -> Value {
     Value::Array(offered)
 }
 
+/// The levels Hermes offers for how hard a model thinks, in its own words.
+///
+/// ACP carries them as a *setting* (`thought_level`), not as a mode: the mode channel is the
+/// edit policy, which is why the two are separate lists here, as they are in Hermes.
+const EFFORTS: [&str; 9] = [
+    "default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// Whether the stand-in offers the level at all.
+///
+/// `--no-levels` makes it behave like Hermes 0.22.5 over ACP, which offers the edit policy
+/// and nothing else: a client has to say so rather than offer a menu the agent refuses.
+fn levels_offered() -> bool {
+    !std::env::args().any(|arg| arg == "--no-levels")
+}
+
+/// The mode ACP names for an edit policy: the two channels carry the same choice in
+/// Hermes, and the stand-in keeps them in step as Hermes does.
+fn policy_mode(policy: &str) -> &'static str {
+    match policy {
+        "workspace_session" => "accept_edits",
+        "session" => "dont_ask",
+        _ => "default",
+    }
+}
+
+/// The edit policy a mode stands for.
+fn mode_policy(mode: &str) -> &'static str {
+    match mode {
+        "accept_edits" => "workspace_session",
+        "dont_ask" => "session",
+        _ => "ask",
+    }
+}
+
+/// The settings on offer, as ACP's `configOptions`.
+fn settings(effort: &str, policy: &str) -> Value {
+    let mut options = vec![json!({
+        "id": "edit_approval_policy",
+        "name": "Edits",
+        "category": "mode",
+        "type": "select",
+        "currentValue": policy,
+        "options": [
+            {"value": "ask", "name": "Default"},
+            {"value": "workspace_session", "name": "Accept Edits"},
+            {"value": "session", "name": "Don't Ask"}
+        ]
+    })];
+    if levels_offered() {
+        options.push(json!({
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": effort,
+            "options": EFFORTS
+                .iter()
+                .map(|level| json!({"value": level, "name": level}))
+                .collect::<Vec<_>>()
+        }));
+    }
+    Value::Array(options)
+}
+
 fn main() {
     // One reader for the whole program: two `lines()` iterators over the same input
     // each keep a buffer of their own, and the answer to a request of ours can land in
@@ -66,7 +131,10 @@ fn main() {
     let mut next_id = 100;
     // What the conversation is set to, so a test can see a switch reach the agent.
     let mut model = "small".to_owned();
-    let mut mode = "normal".to_owned();
+    // The edit policy, which ACP calls the mode, and the level of thinking, which it calls
+    // a setting. Hermes' words for both.
+    let mut policy = "ask".to_owned();
+    let mut effort = "default".to_owned();
     // The directory the client handed over when it opened the session.
     let mut cwd = String::new();
     // What it claimed it would do for us, and what it said about files.
@@ -141,17 +209,14 @@ fn main() {
                             "availableModels": models_offered()
                         },
                         "modes": {
-                            "currentModeId": mode,
+                            "currentModeId": policy_mode(&policy),
                             "availableModes": [
-                                {"id": "none", "name": "None"},
-                                {"id": "low", "name": "Low"},
-                                {"id": "normal", "name": "Normal"},
-                                {"id": "high", "name": "High"},
-                                {"id": "extra", "name": "Extra"},
-                                {"id": "read-only", "name": "Read only"},
-                                {"id": "full", "name": "Full access"}
+                                {"id": "default", "name": "Default"},
+                                {"id": "accept_edits", "name": "Accept Edits"},
+                                {"id": "dont_ask", "name": "Don't Ask"}
                             ]
-                        }
+                        },
+                        "configOptions": settings(&effort, &policy)
                     }),
                 );
             }
@@ -178,19 +243,36 @@ fn main() {
                             "availableModels": models_offered()
                         },
                         "modes": {
-                            "currentModeId": mode,
+                            "currentModeId": policy_mode(&policy),
                             "availableModes": [
-                                {"id": "none", "name": "None"},
-                                {"id": "low", "name": "Low"},
-                                {"id": "normal", "name": "Normal"},
-                                {"id": "high", "name": "High"},
-                                {"id": "extra", "name": "Extra"},
-                                {"id": "read-only", "name": "Read only"},
-                                {"id": "full", "name": "Full access"}
+                                {"id": "default", "name": "Default"},
+                                {"id": "accept_edits", "name": "Accept Edits"},
+                                {"id": "dont_ask", "name": "Don't Ask"}
                             ]
-                        }
+                        },
+                        "configOptions": settings(&effort, &policy)
                     }),
                 );
+            }
+            // The settings the client offers to change. The reply carries the whole list
+            // read back, the way Hermes answers.
+            "session/set_config_option" => {
+                let params = message.get("params");
+                let config = params
+                    .and_then(|params| params.get("configId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let value = params
+                    .and_then(|params| params.get("value"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                match config {
+                    "reasoning_effort" => effort = value,
+                    "edit_approval_policy" => policy = value,
+                    _ => {}
+                }
+                answer(id, json!({"configOptions": settings(&effort, &policy)}));
             }
             "session/set_model" => {
                 if let Some(chosen) = message
@@ -208,7 +290,7 @@ fn main() {
                     .and_then(|params| params.get("modeId"))
                     .and_then(Value::as_str)
                 {
-                    mode = chosen.to_owned();
+                    policy = mode_policy(chosen).to_owned();
                 }
                 answer(id, json!({}));
             }
@@ -347,7 +429,7 @@ fn main() {
                         turn_answer(id);
                     }
                     "model" => {
-                        chunk(&session, &format!("{model} / {mode}"));
+                        chunk(&session, &format!("{model} / {policy}"));
                         turn_answer(id);
                     }
                     "slow" => {

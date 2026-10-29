@@ -217,54 +217,48 @@ fn status(ui: &mut Ui, state: &mut AppState) {
         }
         ui.separator();
 
-        // How hard the model thinks. The five levels are fixed because they are a
-        // decision about the answer, not a list the agent invents; an agent that does not
-        // offer a level has it greyed out rather than hidden, so the menu says what is
-        // missing instead of pretending the choice does not exist.
-        let level = state.agent.level();
-        let offered: Vec<String> = state
-            .agent
-            .modes
-            .iter()
-            .map(|mode| mode.id.clone())
-            .collect();
-        let shown = crate::agent::LEVELS
-            .iter()
-            .find(|(id, _)| Some(*id) == level.as_deref())
-            .map(|(_, name)| (*name).to_owned())
-            .unwrap_or_else(|| "thinking —".to_owned());
-        let mut asked = None;
-        ui.menu_button(format!("{shown} ▾"), |ui| {
-            for (id, name) in crate::agent::LEVELS {
-                let chosen = level.as_deref() == Some(id);
-                let has = offered.iter().any(|mode| mode == id);
-                if ui
-                    .add_enabled(has, egui::Button::selectable(chosen, name))
-                    .on_disabled_hover_text("this agent does not offer this level")
-                    .clicked()
-                    && !chosen
-                {
-                    asked = Some(id.to_owned());
-                    ui.close();
+        // How hard the model thinks. The agent names the levels it has — ACP carries them
+        // as a setting of its own, `thought_level`, and Hermes' are none, minimal, low,
+        // medium, high, xhigh, max and ultra. An agent that offers no such setting gets a
+        // button that says so rather than a menu of levels it would refuse: Hermes 0.22.5
+        // over ACP offers only the edit policy, and there the level belongs to the model
+        // in the Hermes profile.
+        match crate::agent::thought_level(&state.agent.options) {
+            Some(option) => {
+                let config = option.id.clone();
+                let current = option.current.clone();
+                let choices = option.choices.clone();
+                let shown = option.current_name().unwrap_or_else(|| option.name.clone());
+                let mut asked = None;
+                ui.menu_button(format!("{shown} ▾"), |ui| {
+                    for choice in &choices {
+                        let chosen = current.as_deref() == Some(choice.value.as_str());
+                        if ui.selectable_label(chosen, &choice.name).clicked() && !chosen {
+                            asked = Some(choice.value.clone());
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(format!("{}: what the agent offers here", option.name));
+                if let Some(asked) = asked {
+                    state.agent.set_setting(&config, &asked);
                 }
             }
-        });
-        if let Some(asked) = asked {
-            state.agent.set_mode(&asked);
+            None => {
+                ui.add_enabled(false, egui::Button::new("thinking —"))
+                    .on_disabled_hover_text(
+                        "this agent does not offer a level of thinking over ACP; Hermes sets it \
+                         for a model in its own profile (agent.reasoning_overrides)",
+                    );
+            }
         }
         ui.separator();
 
-        // What the agent may do without asking. Separate from the level because ACP
-        // carries both on one channel, and a menu that mixes "deep" with "read-only" is
-        // a menu nobody can read.
+        // What the agent may do without asking: ACP's modes, which are the edit policy and
+        // never a level of thinking.
         let mode = state.agent.current_mode.clone();
-        let permissions: Vec<_> = state
-            .agent
-            .modes
-            .iter()
-            .filter(|mode| !crate::agent::is_level(&mode.id))
-            .cloned()
-            .collect();
+        let permissions: Vec<_> = state.agent.modes.clone();
         if permissions.is_empty() {
             ui.weak("mode —");
         } else {

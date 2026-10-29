@@ -10,8 +10,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use ide_agents::{
-    ChoiceRequest, Event as AgentEvent, Mode, Model, PermissionPolicy, PermissionRequest, Registry,
-    Session, Usage,
+    ChoiceRequest, ConfigOption, Event as AgentEvent, Mode, Model, PermissionPolicy,
+    PermissionRequest, REASONING, Registry, Session, THOUGHT_LEVEL, Usage,
 };
 
 /// How long the worker waits for the next thing before checking whether it was told to go.
@@ -24,23 +24,16 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// A crash loop is not a conversation, and retrying it forever spends the person's time.
 const RECONNECT_ATTEMPTS: u32 = 5;
 
-/// The levels of thinking an agent may offer, in the order they are shown.
+/// The setting that carries how hard the model thinks, if the agent offers one.
 ///
-/// ACP has one channel for this — `session/set_mode` — and agents use it for two
-/// different things: how hard the model thinks, and what it is allowed to do without
-/// asking. The names below are the first kind, and an agent that offers them is offering
-/// a level rather than a permission.
-pub const LEVELS: [(&str, &str); 5] = [
-    ("none", "None"),
-    ("low", "Low"),
-    ("normal", "Normal"),
-    ("high", "High"),
-    ("extra", "Extra"),
-];
-
-/// Whether this mode id is a level of thinking rather than a permission.
-pub fn is_level(id: &str) -> bool {
-    LEVELS.iter().any(|(level, _)| *level == id)
+/// ACP keeps this apart from the mode, which is what the agent may do without asking, and
+/// the agent names its own levels: Hermes' are `none`, `minimal`, `low`, `medium`, `high`,
+/// `xhigh`, `max` and `ultra`, and a panel that offered a table of its own would offer
+/// levels the agent has never heard of.
+pub fn thought_level(options: &[ConfigOption]) -> Option<&ConfigOption> {
+    options
+        .iter()
+        .find(|option| option.category.as_deref() == Some(THOUGHT_LEVEL) || option.id == REASONING)
 }
 
 /// The provider a model id belongs to: the part before the first `/` or `:`.
@@ -112,8 +105,10 @@ enum Command {
     },
     /// Switch models, and say so through the status line.
     Model(String),
-    /// Switch mode: how hard the agent thinks.
+    /// Switch mode: what the agent may do without asking.
     Mode(String),
+    /// Change one of the settings the agent offers: the level of thinking, in this panel.
+    Setting { config: String, value: String },
 }
 
 /// What the worker tells the panel.
@@ -164,9 +159,13 @@ pub struct AgentState {
     pub models_open: bool,
     /// Where the model button was drawn, so the list can sit above it.
     pub model_button: Option<egui::Rect>,
-    /// The modes it offers — how hard it thinks — and the one in use.
+    /// The modes it offers — what it may do without asking — and the one in use.
     pub modes: Vec<Mode>,
     pub current_mode: Option<String>,
+    /// The other settings it offers, of which the level of thinking is the one this panel
+    /// shows. Read from the agent, never assumed: an agent that offers no such setting has
+    /// no level to change.
+    pub options: Vec<ConfigOption>,
     /// How much of the model's context is spent, when the agent says.
     pub usage: Option<Usage>,
     /// Where the panel was last drawn, for the tests that point at it.
@@ -227,6 +226,7 @@ impl Default for AgentState {
             model_button: None,
             modes: Vec::new(),
             current_mode: None,
+            options: Vec::new(),
             usage: None,
             shown_rect: None,
             started: None,
@@ -502,15 +502,6 @@ impl AgentState {
         self.started.map(|started| started.elapsed()).or(self.took)
     }
 
-    /// The level of thinking in use, when the agent's current mode is one.
-    ///
-    /// ACP has a single mode channel and agents spend it on either a level or a
-    /// permission, so the panel asks the current mode what it is rather than keeping a
-    /// second idea of the state that could disagree with the agent's.
-    pub fn level(&self) -> Option<String> {
-        self.current_mode.clone().filter(|mode| is_level(mode))
-    }
-
     /// Asks the agent to switch models; the choice shows up when it agrees.
     pub fn set_model(&mut self, model: &str) {
         let Some(worker) = &self.worker else {
@@ -526,7 +517,25 @@ impl AgentState {
         }
     }
 
-    /// Asks the agent to switch mode: how hard it thinks before it answers.
+    /// Asks the agent for one of the settings it offers: a level of thinking, in this panel.
+    pub fn set_setting(&mut self, config: &str, value: &str) {
+        let Some(worker) = &self.worker else {
+            self.status = "start the agent first".to_owned();
+            return;
+        };
+        if worker
+            .commands
+            .send(Command::Setting {
+                config: config.to_owned(),
+                value: value.to_owned(),
+            })
+            .is_err()
+        {
+            self.status = "the agent is gone".to_owned();
+        }
+    }
+
+    /// Asks the agent to switch mode: what it may do without asking.
     pub fn set_mode(&mut self, mode: &str) {
         let Some(worker) = &self.worker else {
             self.status = "start the agent first".to_owned();
@@ -563,6 +572,57 @@ impl AgentState {
         };
     }
 
+    /// Says in the conversation what a setup message changed.
+    ///
+    /// A switch is worth a line: it changes what answers and how hard it thinks, and a
+    /// conversation that changed silently reads as if nothing had. Only a value that was
+    /// already known can have changed — at the start of a session nothing has — so the
+    /// first setup of all says nothing.
+    fn note_switches(&mut self, state: &ide_agents::SessionState) {
+        if let (Some(before), Some(after)) = (
+            self.current_model.as_deref(),
+            state.current_model.as_deref(),
+        ) && before != after
+        {
+            let name = state
+                .models
+                .iter()
+                .find(|model| model.id == after)
+                .map(|model| model.name.clone())
+                .unwrap_or_else(|| after.to_owned());
+            self.transcript.push(Line::Note(format!("model: {name}")));
+        }
+        for before in &self.options {
+            let Some(after) = state.options.iter().find(|option| option.id == before.id) else {
+                continue;
+            };
+            if before.current == after.current {
+                continue;
+            }
+            // The agent names its own choices; the level of thinking is the one this panel
+            // has a word of its own for.
+            let name = after.current_name().unwrap_or_else(|| after.name.clone());
+            let what = if thought_level(std::slice::from_ref(after)).is_some() {
+                "thinking".to_owned()
+            } else {
+                after.name.clone()
+            };
+            self.transcript.push(Line::Note(format!("{what}: {name}")));
+        }
+        if let (Some(before), Some(after)) =
+            (self.current_mode.as_deref(), state.current_mode.as_deref())
+            && before != after
+        {
+            let name = state
+                .modes
+                .iter()
+                .find(|mode| mode.id == after)
+                .map(|mode| mode.name.clone())
+                .unwrap_or_else(|| after.to_owned());
+            self.transcript.push(Line::Note(format!("mode: {name}")));
+        }
+    }
+
     /// Empties what the panel shows, keeping the conversation's id for the restart.
     ///
     /// A restored session replays its history through the agent's own events. Keeping
@@ -577,6 +637,7 @@ impl AgentState {
         self.model_button = None;
         self.modes.clear();
         self.current_mode = None;
+        self.options.clear();
         self.usage = None;
         self.asking = None;
         self.choice = None;
@@ -780,45 +841,12 @@ impl AgentState {
                     self.choice = Some((id, request));
                 }
                 AgentEvent::Setup(state) => {
-                    // A switch is worth a line in the conversation: it changes what
-                    // answers and how hard it thinks, and a conversation whose model
-                    // changed silently reads as if nothing had.
-                    if let (Some(before), Some(after)) = (
-                        self.current_model.as_deref(),
-                        state.current_model.as_deref(),
-                    ) && before != after
-                    {
-                        let name = state
-                            .models
-                            .iter()
-                            .find(|model| model.id == after)
-                            .map(|model| model.name.clone())
-                            .unwrap_or_else(|| after.to_owned());
-                        self.transcript.push(Line::Note(format!("model: {name}")));
-                    }
-                    if let (Some(before), Some(after)) =
-                        (self.current_mode.as_deref(), state.current_mode.as_deref())
-                        && before != after
-                    {
-                        let name = state
-                            .modes
-                            .iter()
-                            .find(|mode| mode.id == after)
-                            .map(|mode| mode.name.clone())
-                            .unwrap_or_else(|| after.to_owned());
-                        // ACP carries the level and the rights on one channel; the line
-                        // says which of the two was moved.
-                        let what = if LEVELS.iter().any(|(level, _)| *level == after) {
-                            "thinking"
-                        } else {
-                            "mode"
-                        };
-                        self.transcript.push(Line::Note(format!("{what}: {name}")));
-                    }
+                    self.note_switches(&state);
                     self.models = state.models;
                     self.current_model = state.current_model;
                     self.modes = state.modes;
                     self.current_mode = state.current_mode;
+                    self.options = state.options;
                 }
                 AgentEvent::Usage(usage) => {
                     self.usage = Some(usage);
@@ -917,6 +945,18 @@ fn work(
                 }
                 let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
+            Ok(Command::Setting { config, value }) => {
+                if let Err(error) = session.set_option(&config, &value)
+                    && replies
+                        .send(Reply::Event(AgentEvent::Failed(format!(
+                            "the agent would not change {config}: {error}"
+                        ))))
+                        .is_err()
+                {
+                    return;
+                }
+                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+            }
             Ok(Command::Mode(mode)) => {
                 if let Err(error) = session.set_mode(&mode)
                     && replies
@@ -952,6 +992,16 @@ fn work(
 #[cfg(test)]
 mod grouping_tests {
     use super::*;
+
+    fn setting(id: &str, name: &str, category: Option<&str>, current: &str) -> ConfigOption {
+        ConfigOption {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            category: category.map(str::to_owned),
+            current: Some(current.to_owned()),
+            choices: Vec::new(),
+        }
+    }
 
     fn model(id: &str, name: &str) -> Model {
         Model {
@@ -1029,14 +1079,22 @@ mod grouping_tests {
     }
 
     #[test]
-    fn only_the_five_agreed_names_are_levels_of_thinking() {
-        for (id, _) in LEVELS {
-            assert!(is_level(id), "{id} was not recognised as a level");
-        }
-        assert!(
-            !is_level("read-only"),
-            "a permission was taken for a level of thinking"
+    fn the_level_of_thinking_is_the_setting_that_carries_it() {
+        let settings = vec![
+            setting("edit_approval_policy", "Edits", Some("mode"), "ask"),
+            setting(
+                "reasoning_effort",
+                "Reasoning effort",
+                Some("thought_level"),
+                "medium",
+            ),
+        ];
+        let level = thought_level(&settings).expect("the level is not among the settings");
+        assert_eq!(level.id, "reasoning_effort");
+        assert_eq!(
+            thought_level(&settings[..1]),
+            None,
+            "the edit policy was taken for a level"
         );
-        assert!(!is_level("Full access"));
     }
 }

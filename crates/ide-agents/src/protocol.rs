@@ -229,6 +229,68 @@ pub struct Model {
     pub name: String,
 }
 
+/// Reads the settings an agent offers out of a session answer, or out of the reply to a
+/// change: ACP puts the whole list in `configOptions` either way.
+pub fn options_of(answer: &Value) -> Vec<ConfigOption> {
+    answer
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(option_of).collect())
+        .unwrap_or_default()
+}
+
+/// One setting. A setting without an id is not one a client could change, so it is dropped.
+///
+/// A boolean setting — ACP allows them — carries no choices and no category this panel
+/// knows; it is read as a setting with nothing to pick, which is what it is.
+fn option_of(option: &Value) -> Option<ConfigOption> {
+    let id = option.get("id").and_then(Value::as_str)?;
+    Some(ConfigOption {
+        id: id.to_owned(),
+        name: option
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .to_owned(),
+        category: option
+            .get("category")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        current: option
+            .get("currentValue")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        choices: option
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|choice| {
+                        let value = choice.get("value").and_then(Value::as_str)?;
+                        Some(ConfigChoice {
+                            value: value.to_owned(),
+                            name: choice
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(value)
+                                .to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// The `session/set_config_option` parameters: the setting, and the choice picked.
+pub fn config_option_params(session: &str, config: &str, value: &str) -> Value {
+    json!({
+        "sessionId": session,
+        "configId": config,
+        "value": value,
+    })
+}
+
 /// One mode the agent offers: in practice, how hard it should think.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mode {
@@ -236,6 +298,57 @@ pub struct Mode {
     pub id: String,
     /// What to show a person.
     pub name: String,
+}
+
+/// The category ACP gives the setting for how hard a model thinks.
+pub const THOUGHT_LEVEL: &str = "thought_level";
+
+/// What Hermes calls that setting when it names one itself. A client goes by the category
+/// and falls back to this id for an agent that sends none.
+pub const REASONING: &str = "reasoning_effort";
+
+/// One choice inside a setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigChoice {
+    /// What goes back to the agent when this one is picked.
+    pub value: String,
+    /// What to call it.
+    pub name: String,
+}
+
+/// A setting the agent offers to change: ACP's config option.
+///
+/// It carries what a person may pick for a session and what is neither the model nor the
+/// mode — in Hermes, how hard the model thinks. The agent names the choices, so a panel
+/// shows what it is given instead of a table of its own: a level the agent has never heard
+/// of comes back as an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigOption {
+    /// What to send back in `session/set_config_option`.
+    pub id: String,
+    /// What to call the setting.
+    pub name: String,
+    /// What kind of setting it is — `thought_level`, `mode`, `model` — when it says.
+    pub category: Option<String>,
+    /// The choice in force, by its value.
+    pub current: Option<String>,
+    /// The choices on offer, in the agent's own order.
+    pub choices: Vec<ConfigChoice>,
+}
+
+impl ConfigOption {
+    /// What to show for the setting: the name of the choice in force, or its value when
+    /// the agent gave the choices no names of their own.
+    pub fn current_name(&self) -> Option<String> {
+        let current = self.current.as_deref()?;
+        Some(
+            self.choices
+                .iter()
+                .find(|choice| choice.value == current)
+                .map(|choice| choice.name.clone())
+                .unwrap_or_else(|| current.to_owned()),
+        )
+    }
 }
 
 /// How much of the model's context the conversation is using, when the agent says.
@@ -261,6 +374,20 @@ pub struct SessionState {
     pub modes: Vec<Mode>,
     /// The one in use.
     pub current_mode: Option<String>,
+    /// The other settings it offers: ACP's config options, of which the level of
+    /// thinking is the one this panel shows.
+    pub options: Vec<ConfigOption>,
+}
+
+impl SessionState {
+    /// The setting for how hard the model thinks, if the agent offers one.
+    ///
+    /// ACP names it by category; the id is the fallback, and Hermes' id is its own.
+    pub fn thought_level(&self) -> Option<&ConfigOption> {
+        self.options.iter().find(|option| {
+            option.category.as_deref() == Some(THOUGHT_LEVEL) || option.id == REASONING
+        })
+    }
 }
 
 /// Reads `models` and `modes` out of a `session/new` answer.
@@ -291,6 +418,7 @@ pub fn session_state(answer: &Value) -> SessionState {
             })
             .unwrap_or_default();
     }
+    state.options = options_of(answer);
     if let Some(modes) = answer.get("modes") {
         state.current_mode = modes
             .get("currentModeId")
@@ -364,6 +492,8 @@ pub enum Update {
     },
     /// The plan the agent is following, as a list of steps.
     Plan(Vec<String>),
+    /// The settings on offer, whole, after one of them changed.
+    Settings(Vec<ConfigOption>),
     /// Anything this version does not show yet.
     Other {
         /// The tag, for the record.
@@ -432,6 +562,7 @@ impl Update {
                     .unwrap_or_default();
                 Update::Plan(steps)
             }
+            "config_option_update" => Update::Settings(options_of(update)),
             _ => Update::Other {
                 kind: kind.to_owned(),
                 body: update.clone(),
@@ -561,7 +692,7 @@ impl ChoiceRequest {
             .map(|(field, property)| {
                 (
                     field.clone(),
-                    options_of(property).unwrap_or_else(|| {
+                    choice_options_of(property).unwrap_or_else(|| {
                         // A single string with an enum is the common shape; a bare
                         // property the editor cannot draw leaves only a refusal.
                         Vec::new()
@@ -588,7 +719,7 @@ impl ChoiceRequest {
 }
 
 /// The variants a property allows, as `(value, title)`.
-fn options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
+fn choice_options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
     if let Some(values) = property.get("enum").and_then(Value::as_array) {
         return Some(
             values
@@ -634,6 +765,106 @@ pub fn choice_answer(field: &str, choice: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_settings_are_read_the_way_hermes_sends_them() {
+        // The shape Hermes puts on the wire (acp_adapter/gateway_session_meta.py): the
+        // edit policy and the level of thinking, both as selects.
+        let answer = json!({
+            "configOptions": [
+                {
+                    "id": "edit_approval_policy",
+                    "name": "Edits",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "ask",
+                    "options": [
+                        {"value": "ask", "name": "Default"},
+                        {"value": "session", "name": "Don't Ask"}
+                    ]
+                },
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "low"},
+                        {"value": "medium", "name": "medium"}
+                    ]
+                }
+            ]
+        });
+        let options = options_of(&answer);
+        assert_eq!(options.len(), 2, "the settings were not read: {options:?}");
+        let level = options
+            .iter()
+            .find(|option| option.category.as_deref() == Some(THOUGHT_LEVEL))
+            .expect("the level of thinking is not among the settings");
+        assert_eq!(level.id, "reasoning_effort");
+        assert_eq!(
+            level.current_name().as_deref(),
+            Some("medium"),
+            "the choice in force is not named"
+        );
+        assert_eq!(
+            options[0].current_name().as_deref(),
+            Some("Default"),
+            "the name the agent gave the choice was not used"
+        );
+    }
+
+    #[test]
+    fn a_session_answer_carries_the_settings_into_its_state() {
+        let answer = json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "reasoning_effort",
+                "name": "Reasoning effort",
+                "category": "thought_level",
+                "currentValue": "high",
+                "options": [{"value": "high", "name": "high"}]
+            }]
+        });
+        let state = session_state(&answer);
+        let level = state
+            .thought_level()
+            .expect("the level is not in the state the session was opened with");
+        assert_eq!(level.current.as_deref(), Some("high"));
+        // An agent that offers no such setting offers no level: the state says so by
+        // having nothing to find.
+        assert!(session_state(&json!({})).thought_level().is_none());
+    }
+
+    #[test]
+    fn changing_a_setting_names_the_setting_and_the_choice() {
+        assert_eq!(
+            config_option_params("s1", "reasoning_effort", "high"),
+            json!({"sessionId": "s1", "configId": "reasoning_effort", "value": "high"})
+        );
+    }
+
+    #[test]
+    fn a_setting_that_changed_arrives_as_the_whole_list() {
+        let update = json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "reasoning_effort",
+                "name": "Reasoning effort",
+                "category": "thought_level",
+                "currentValue": "xhigh",
+                "options": [{"value": "xhigh", "name": "xhigh"}]
+            }]
+        });
+        match Update::from_value(&update) {
+            Update::Settings(options) => {
+                assert_eq!(options.len(), 1);
+                assert_eq!(options[0].current.as_deref(), Some("xhigh"));
+            }
+            other => panic!("a change of settings was read as {other:?}"),
+        }
+    }
 
     #[test]
     fn a_request_is_read_from_the_line_it_arrived_on() {
