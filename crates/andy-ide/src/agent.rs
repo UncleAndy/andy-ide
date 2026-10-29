@@ -150,6 +150,8 @@ pub struct AgentState {
     /// Whether the model list is on screen. The panel owns this flag instead of the menu
     /// watching clicks, so that folding a provider group does not dismiss the list.
     pub models_open: bool,
+    /// Where the model button was drawn, so the list can sit above it.
+    pub model_button: Option<egui::Rect>,
     /// The modes it offers — how hard it thinks — and the one in use.
     pub modes: Vec<Mode>,
     pub current_mode: Option<String>,
@@ -210,6 +212,7 @@ impl Default for AgentState {
             models: Vec::new(),
             current_model: None,
             models_open: false,
+            model_button: None,
             modes: Vec::new(),
             current_mode: None,
             usage: None,
@@ -352,13 +355,20 @@ impl AgentState {
             self.status = "no project: an agent has nowhere to work".to_owned();
             return;
         };
-        let spec = match ide_agents::parse_named(&self.name, &self.command) {
+        let mut spec = match ide_agents::parse_named(&self.name, &self.command) {
             Ok(spec) => spec,
             Err(error) => {
                 self.status = format!("{error}");
                 return;
             }
         };
+        // The extra environment belongs to the entry in `agents.toml`, not to the command
+        // line: the field says how the process is started, the file says what it is started
+        // with. The command is re-read on every start, so without this the `[agent.env]`
+        // table the file supports would never reach a process.
+        if let Some(known) = self.registry.get(&spec.name) {
+            spec.env = known.env.clone();
+        }
 
         let name = spec.name.clone();
         // The conversation kept by the project, but only for the agent that kept it.
@@ -552,6 +562,7 @@ impl AgentState {
         self.models.clear();
         self.current_model = None;
         self.models_open = false;
+        self.model_button = None;
         self.modes.clear();
         self.current_mode = None;
         self.usage = None;

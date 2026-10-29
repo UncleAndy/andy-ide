@@ -34,6 +34,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     choice(ui, state);
     input(ui, state);
     status(ui, state);
+    models(ui, state);
 }
 
 /// The variants the agent offers, when it is waiting for one to be picked.
@@ -62,6 +63,103 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
             state.agent.answer_choice(value.as_deref());
         }
     });
+}
+
+/// The models on offer, folded by provider, in a layer above the button that opened it.
+///
+/// It is its own area rather than a menu popup: a popup is laid out inside the rect it
+/// measured on an earlier frame, and a scroll area that shrinks to that rect clips its own
+/// last row — an entry that is on screen and yet takes no click. An area whose rectangle is
+/// its content's own grows upward from the button and is drawn in full.
+///
+/// The rectangle is capped by `limit` and the rest scrolls, which is the whole point: an
+/// agent wired to several providers offers more models than a panel can show.
+fn models(ui: &mut Ui, state: &mut AppState) {
+    let Some(anchor) = state.agent.model_button else {
+        return;
+    };
+    if !state.agent.models_open || state.agent.models.is_empty() {
+        return;
+    }
+    let choices = crate::agent::grouped(&state.agent.models);
+    let mut asked = None;
+    let mut chosen = false;
+    // Never more than part of the window: a list that grew to fill it would cover the
+    // conversation it belongs to.
+    let limit = (ui.ctx().content_rect().height() * 0.4).max(120.0);
+    // The box is given its height instead of asking for one. A scroll area reports the
+    // height it was given, so a layer that sized itself from its content would shrink by
+    // a row on every frame until its last entry fell outside — visible, and unclickable.
+    // Counting the rows once settles it: the box is as tall as the rows are, up to the
+    // cap, and only what is past the cap scrolls.
+    let rows = choices
+        .iter()
+        .map(|(provider, group)| group.len() + usize::from(provider.is_some()))
+        .sum::<usize>();
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let margins = ui.spacing().menu_margin.sum().y;
+    let height = (rows as f32 * row + margins).min(limit);
+    let area = egui::Area::new(egui::Id::new("agent-model-list"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(egui::pos2(anchor.left(), anchor.top() - 4.0))
+        .default_size(egui::vec2(240.0, height))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(220.0);
+                ui.set_min_height(height);
+                egui::ScrollArea::vertical()
+                    .id_salt("model-list")
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        for (provider, group) in &choices {
+                            if let Some(provider) = provider {
+                                egui::CollapsingHeader::new(provider)
+                                    .id_salt(("provider", provider))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        for option in group {
+                                            if pick(
+                                                ui,
+                                                option,
+                                                state.agent.current_model.as_deref(),
+                                                &mut asked,
+                                            ) {
+                                                chosen = true;
+                                            }
+                                        }
+                                    });
+                            } else {
+                                for option in group {
+                                    if pick(
+                                        ui,
+                                        option,
+                                        state.agent.current_model.as_deref(),
+                                        &mut asked,
+                                    ) {
+                                        chosen = true;
+                                    }
+                                }
+                            }
+                        }
+                    });
+            });
+        });
+    // Choosing ends the visit, and so does a click anywhere else or Escape — the way a
+    // menu behaves, without a menu's sizing.
+    // The click that opened the list is on the button, not "somewhere else": without
+    // saying so, the list would shut on the very frame it opened.
+    let clicked_outside = ui.input(|input| input.pointer.any_click())
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|pos| !area.response.rect.contains(pos) && !anchor.contains(pos));
+    if chosen || clicked_outside || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        state.agent.models_open = false;
+    }
+    if let Some(asked) = asked {
+        state.agent.set_model(&asked);
+    }
 }
 
 /// The line under the conversation: how long the turn takes, which model answers, how
@@ -105,55 +203,16 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                         .map(|model| model.name.clone())
                 })
                 .unwrap_or_else(|| "model —".to_owned());
-            // A menu button rather than a combo box: the name of the model is then part of
-            // the button's own text, so it is on screen and readable, not only inside a
-            // popup that has to be opened to find out what is answering.
-            // Grouped by provider, each group collapsible: an agent wired to several
-            // providers offers a list that is unreadable flat, and the provider is the
-            // first thing a person picks by.
-            let choices = crate::agent::grouped(&state.agent.models);
-            let mut asked = None;
-            let response = ui.button(format!("{shown} ▾"));
-            // The list owns its open flag instead of letting egui's menu watch clicks:
-            // folding a provider group away is how a person looks past it at another one,
-            // and a menu that closes on any click inside itself makes that impossible.
-            // With the flag here, only a chosen model (or a click outside) ends the visit.
-            let mut open = state.agent.models_open;
-            if response.clicked() {
-                open = !open;
-            }
-            let mut chosen = false;
-            egui::Popup::menu(&response)
-                .open_bool(&mut open)
-                .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    for (provider, group) in &choices {
-                        if let Some(provider) = provider {
-                            egui::CollapsingHeader::new(provider)
-                                .id_salt(("provider", provider))
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    for option in group {
-                                        if pick(ui, option, model.as_deref(), &mut asked) {
-                                            chosen = true;
-                                        }
-                                    }
-                                });
-                        } else {
-                            for option in group {
-                                if pick(ui, option, model.as_deref(), &mut asked) {
-                                    chosen = true;
-                                }
-                            }
-                        }
-                    }
-                });
-            if chosen {
-                open = false;
-            }
-            state.agent.models_open = open;
-            if let Some(asked) = asked {
-                state.agent.set_model(&asked);
+            // A button rather than a combo box: the name of the model is then part of the
+            // button's own text, so it is on screen and readable, not only inside a list
+            // that has to be opened to find out what is answering. The list itself is
+            // drawn by `models`, above this line.
+            let button = ui
+                .button(format!("{shown} ▾"))
+                .on_hover_text("Choose the model that answers");
+            state.agent.model_button = Some(button.rect);
+            if button.clicked() {
+                state.agent.models_open = !state.agent.models_open;
             }
         }
         ui.separator();

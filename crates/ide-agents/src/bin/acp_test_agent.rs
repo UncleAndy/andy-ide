@@ -28,6 +28,35 @@ fn turn_answer(id: Option<u64>) {
     );
 }
 
+/// The models the stand-in offers.
+///
+/// Four of them, spread over three providers, so a test can see the grouping. With
+/// `ACP_TEST_MANY_MODELS` in its environment it offers a list far longer than a window,
+/// which is what a test of scrolling needs.
+fn models_offered() -> Value {
+    if std::env::var_os("ACP_TEST_MANY_MODELS").is_none() {
+        return json!([
+            {"modelId": "small", "name": "Small"},
+            {"modelId": "large", "name": "Large"},
+            {"modelId": "nous/hermes-4", "name": "Hermes 4"},
+            {"modelId": "openai/gpt-5", "name": "GPT-5"}
+        ]);
+    }
+    let mut offered = vec![
+        json!({"modelId": "small", "name": "Small"}),
+        json!({"modelId": "large", "name": "Large"}),
+    ];
+    for index in 0..14 {
+        offered.push(
+            json!({"modelId": format!("nous/model-{index}"), "name": format!("Nous {index}")}),
+        );
+        offered.push(
+            json!({"modelId": format!("openai/model-{index}"), "name": format!("OpenAI {index}")}),
+        );
+    }
+    Value::Array(offered)
+}
+
 fn main() {
     // One reader for the whole program: two `lines()` iterators over the same input
     // each keep a buffer of their own, and the answer to a request of ours can land in
@@ -109,12 +138,7 @@ fn main() {
                         "sessionId": session_name,
                         "models": {
                             "currentModelId": model,
-                            "availableModels": [
-                                {"modelId": "small", "name": "Small"},
-                                {"modelId": "large", "name": "Large"},
-                                {"modelId": "nous/hermes-4", "name": "Hermes 4"},
-                                {"modelId": "openai/gpt-5", "name": "GPT-5"}
-                            ]
+                            "availableModels": models_offered()
                         },
                         "modes": {
                             "currentModeId": mode,
@@ -151,12 +175,7 @@ fn main() {
                         "sessionId": session_name,
                         "models": {
                             "currentModelId": model,
-                            "availableModels": [
-                                {"modelId": "small", "name": "Small"},
-                                {"modelId": "large", "name": "Large"},
-                                {"modelId": "nous/hermes-4", "name": "Hermes 4"},
-                                {"modelId": "openai/gpt-5", "name": "GPT-5"}
-                            ]
+                            "availableModels": models_offered()
                         },
                         "modes": {
                             "currentModeId": mode,

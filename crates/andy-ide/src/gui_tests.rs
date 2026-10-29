@@ -4448,6 +4448,85 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_model_list_scrolls_when_it_is_longer_than_the_window() {
+        // A long list is why the grouping exists at all, and a list that cannot be
+        // scrolled leaves the providers at the bottom unreachable.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        // The stand-in offers thirty models when it is told to, which is longer than the
+        // box the panel gives the list.
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n\n\
+                 [agent.env]\nACP_TEST_MANY_MODELS = \"1\"\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the long list of models", |gui| {
+            gui.app().state.agent.models.len() == 30
+        });
+
+        gui.harness.get_by_label_contains("Small ▾").click();
+        gui.settle();
+        let before = gui
+            .harness
+            .query_by_label_contains("Large")
+            .expect("the list did not open")
+            .rect()
+            .min
+            .y;
+
+        // The pointer has to be over the list: egui only sends the wheel to what is
+        // under it.
+        gui.harness.get_by_label("Nous 1").hover();
+        gui.harness.step();
+        for _ in 0..6 {
+            gui.harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -60.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            gui.harness.step();
+        }
+
+        // The entries moved up — or the first ones went out of view entirely, which is the
+        // same thing said by a list that scrolled.
+        let moved = match gui.harness.query_by_label_contains("Large") {
+            Some(node) => node.rect().min.y < before,
+            None => true,
+        };
+        assert!(moved, "the wheel did not move the model list");
+        assert!(
+            gui.app().state.agent.models_open,
+            "the list closed while it was scrolled"
+        );
+    }
+
+    #[test]
     fn alt_0_shows_the_panel_with_the_agents_from_the_file() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
