@@ -2480,6 +2480,16 @@ pub(crate) static REAL_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// It needs `rust-analyzer` installed and a minute of patience on a cold start;
 /// without the server the check says so and passes, because the editor must not
 /// depend on one.
+/// How long a real language server is given to answer, in a test.
+///
+/// These tests start a real server — `rust-analyzer`, `pylsp` — and wait for it. Alone, the
+/// answer takes a fraction of a second; in a full run, with every core of the machine busy
+/// starting other servers, the same server can take two minutes to come up at all. The wall
+/// is generous because these tests are not about speed, and a wall that is too tight reports
+/// the load of the machine as a fault in the code — which is what one of them did.
+#[cfg(test)]
+const LSP_ANSWER: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[cfg(test)]
 mod real_navigation_tests {
     use super::*;
@@ -2533,7 +2543,7 @@ mod real_navigation_tests {
 
         // A cold server may answer nothing at first; the worker retries by itself,
         // but the editor also has to be patient here.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         loop {
             app.state.poll_lsp();
             let at_definition = app
@@ -2755,7 +2765,7 @@ mod real_reference_tests {
         app.state.find_references();
         assert!(app.state.lsp.is_some(), "the server started");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         while !app.state.results.open && std::time::Instant::now() < deadline {
             app.state.poll_lsp();
             if !app.state.status.contains("looking for") && !app.state.results.open {
@@ -3039,7 +3049,7 @@ mod real_symbol_tests {
     /// Polls until the list has something in it, asking again if the server was
     /// still indexing.
     fn wait_for_list(app: &mut App, ask: fn(&mut AppState)) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         loop {
             app.state.poll_lsp();
             if app.state.results.open {
@@ -3113,7 +3123,7 @@ mod real_symbol_tests {
         app.state.symbols.query = "make".to_owned();
 
         // Frames drive the debounce and the answer, exactly as the window does.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         let mut now = 0.0;
         loop {
             now += 0.1;
@@ -3203,7 +3213,7 @@ mod real_hover_tests {
 
         let start = std::time::Instant::now();
         let mut now = 0.0;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         while std::time::Instant::now() < deadline {
             now += 0.1;
             app.state.poll_lsp();
@@ -3367,7 +3377,7 @@ mod real_highlight_tests {
         // A deadline of its own for each wait: the two are independent, and one clock
         // running for both made the second phase inherit whatever the first spent —
         // which is how a server that did answer was reported as never answering.
-        let answering = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let answering = std::time::Instant::now() + LSP_ANSWER;
         while std::time::Instant::now() < answering && !app.state.results.open {
             app.state.poll_lsp();
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3386,7 +3396,7 @@ mod real_highlight_tests {
             .set_caret_byte(declaration);
 
         let mut now = 0.0;
-        let highlight_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let highlight_deadline = std::time::Instant::now() + LSP_ANSWER;
         while std::time::Instant::now() < highlight_deadline {
             now += 0.1;
             app.state.poll_lsp();
@@ -3664,7 +3674,7 @@ mod real_rename_tests {
         app.state.rename.name = "beta".to_owned();
         app.state.submit_rename();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + LSP_ANSWER;
         while std::time::Instant::now() < deadline && !app.state.rename.preview {
             app.state.poll_lsp();
             std::thread::sleep(std::time::Duration::from_millis(50));
