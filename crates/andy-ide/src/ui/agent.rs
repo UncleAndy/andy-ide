@@ -295,6 +295,13 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             }
         }
         if ui
+            .button("New session")
+            .on_hover_text("Forget the conversation this project kept and start a fresh one")
+            .clicked()
+        {
+            state.agent.new_session();
+        }
+        if ui
             .add_enabled(!running, egui::Button::new("Remember"))
             .on_hover_text("Write this command into agents.toml")
             .clicked()

@@ -666,6 +666,31 @@ impl AgentState {
         self.attempts = 0;
     }
 
+    /// Forgets the conversation the project kept, so the next start is a new one.
+    ///
+    /// The id is written into the project (`.andy-ide/agent-session.json`) and outlives
+    /// the window. Forgetting it only in memory would bring the same conversation back
+    /// on the next launch — which is not what a person asking for a new session wants.
+    pub fn forget_session(&mut self) {
+        if let Some(root) = self.root.clone() {
+            let _ = std::fs::remove_file(Self::session_file(&root));
+        }
+        self.session = None;
+        self.resume = None;
+        self.resumed_from = None;
+    }
+
+    /// Ends this conversation and begins a clean one.
+    ///
+    /// The running process is stopped rather than left behind: two agents on one project
+    /// would each keep their own idea of what was said.
+    pub fn new_session(&mut self) {
+        self.stop();
+        self.forget_session();
+        self.clear_panel();
+        self.start();
+    }
+
     /// Files one reply from the worker.
     fn take(&mut self, reply: Reply) {
         match reply {

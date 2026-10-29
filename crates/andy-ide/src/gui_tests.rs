@@ -4306,6 +4306,89 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_new_session_does_not_pick_up_the_conversation_the_project_kept() {
+        // `Start` resumes what the project saved. "New session" must end that, including
+        // the copy on disk: otherwise the next launch brings the old conversation back.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // A conversation an earlier run left behind.
+        std::fs::write(
+            place.join("agent-session.json"),
+            "{\"agent\":\"stand-in\",\"session\":\"kept-42\"}\n",
+        )
+        .unwrap();
+
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the kept conversation coming back", |gui| {
+            gui.app().state.agent.status.contains("resumed")
+        });
+        gui.app_mut().state.agent.input = "session".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer about the session", |gui| {
+            answer(gui).contains("loaded")
+        });
+        assert_eq!(answer(&gui), "kept-42 loaded");
+
+        gui.harness.get_by_label("New session").click();
+        wait(&mut gui, "the new conversation", |gui| {
+            gui.app()
+                .state
+                .agent
+                .status
+                .contains("ready, session stand-in-session")
+        });
+        assert!(
+            !gui.app().state.agent.status.contains("resumed"),
+            "the fresh session was announced as a resumed one: {}",
+            gui.app().state.agent.status
+        );
+
+        gui.app_mut().state.agent.input = "session".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer about the new session", |gui| {
+            answer(gui).contains("new")
+        });
+        assert_eq!(answer(&gui), "stand-in-session new");
+
+        let kept = std::fs::read_to_string(place.join("agent-session.json"))
+            .expect("the project kept no conversation");
+        assert!(
+            kept.contains("stand-in-session") && !kept.contains("kept-42"),
+            "the old conversation is still the one on disk: {kept}"
+        );
+    }
+
+    #[test]
     fn alt_0_shows_the_panel_with_the_agents_from_the_file() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
