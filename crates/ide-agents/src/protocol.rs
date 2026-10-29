@@ -167,6 +167,127 @@ pub fn prompt_params(session: &str, text: &str) -> Value {
     })
 }
 
+/// One model the agent offers, as `session/new` describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Model {
+    /// What to send back in `session/set_model`.
+    pub id: String,
+    /// What to show a person.
+    pub name: String,
+}
+
+/// One mode the agent offers: in practice, how hard it should think.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mode {
+    /// What to send back in `session/set_mode`.
+    pub id: String,
+    /// What to show a person.
+    pub name: String,
+}
+
+/// How much of the model's context the conversation is using, when the agent says.
+///
+/// ACP does not standardise this, so it is read from `_meta` and every field is optional:
+/// a panel that invents a context window is a panel that lies about how much room is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// Tokens spent so far.
+    pub used: u64,
+    /// The window they are spent from, if the agent names one.
+    pub window: Option<u64>,
+}
+
+/// The state of a conversation the agent described when it opened it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionState {
+    /// The models it offers, in its own order.
+    pub models: Vec<Model>,
+    /// The one in use.
+    pub current_model: Option<String>,
+    /// The modes it offers.
+    pub modes: Vec<Mode>,
+    /// The one in use.
+    pub current_mode: Option<String>,
+}
+
+/// Reads `models` and `modes` out of a `session/new` answer.
+pub fn session_state(answer: &Value) -> SessionState {
+    let mut state = SessionState::default();
+    if let Some(models) = answer.get("models") {
+        state.current_model = models
+            .get("currentModelId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        state.models = models
+            .get("availableModels")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|model| {
+                        let id = model.get("modelId").and_then(Value::as_str)?;
+                        Some(Model {
+                            id: id.to_owned(),
+                            name: model
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(id)
+                                .to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    if let Some(modes) = answer.get("modes") {
+        state.current_mode = modes
+            .get("currentModeId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        state.modes = modes
+            .get("availableModes")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|mode| {
+                        let id = mode.get("id").and_then(Value::as_str)?;
+                        Some(Mode {
+                            id: id.to_owned(),
+                            name: mode
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(id)
+                                .to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    state
+}
+
+/// Reads `_meta.usage` from anything that can carry it: a prompt's answer, an update.
+pub fn usage_of(value: &Value) -> Option<Usage> {
+    let usage = value.get("_meta")?.get("usage")?;
+    let used = ["used", "totalTokens", "inputTokens"]
+        .iter()
+        .find_map(|key| usage.get(*key).and_then(Value::as_u64))?;
+    let window = ["window", "contextWindow", "maxTokens"]
+        .iter()
+        .find_map(|key| usage.get(*key).and_then(Value::as_u64));
+    Some(Usage { used, window })
+}
+
+/// The request that changes the model mid-conversation.
+pub fn set_model_params(session: &str, model: &str) -> Value {
+    json!({"sessionId": session, "modelId": model})
+}
+
+/// The request that changes the mode — how hard the agent thinks — mid-conversation.
+pub fn set_mode_params(session: &str, mode: &str) -> Value {
+    json!({"sessionId": session, "modeId": mode})
+}
+
 /// One thing the agent wants the editor to know during a turn.
 ///
 /// `session/update` carries a tagged union whose tag is `sessionUpdate`, and the variants

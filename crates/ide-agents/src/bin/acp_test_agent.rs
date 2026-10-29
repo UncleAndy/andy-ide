@@ -18,6 +18,15 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
+/// Ends a turn, saying how much of the window it used: ACP has no field for this, so the
+/// figure rides in `_meta`, the way a real agent would send it.
+fn turn_answer(id: Option<u64>) {
+    answer(
+        id,
+        json!({"stopReason": "end_turn", "_meta": {"usage": {"used": 42000, "window": 100000}}}),
+    );
+}
+
 fn main() {
     // One reader for the whole program: two `lines()` iterators over the same input
     // each keep a buffer of their own, and the answer to a request of ours can land in
@@ -25,6 +34,11 @@ fn main() {
     let stdin = std::io::stdin();
     let mut input = stdin.lock().lines();
     let mut next_id = 100;
+    // What the conversation is set to, so a test can see a switch reach the agent.
+    let mut model = "small".to_owned();
+    let mut mode = "quick".to_owned();
+    // The directory the client handed over when it opened the session.
+    let mut cwd = String::new();
     while let Some(Ok(line)) = input.next() {
         if line.trim().is_empty() {
             continue;
@@ -44,7 +58,54 @@ fn main() {
                 answer(id, json!({"protocolVersion": 1, "agentCapabilities": {}}));
             }
             "session/new" => {
-                answer(id, json!({"sessionId": "stand-in-session"}));
+                cwd = message
+                    .get("params")
+                    .and_then(|params| params.get("cwd"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                // A real agent offers choices here; the stand-in offers two of each so a
+                // test can see both menus and watch a switch reach the agent.
+                answer(
+                    id,
+                    json!({
+                        "sessionId": "stand-in-session",
+                        "models": {
+                            "currentModelId": model,
+                            "availableModels": [
+                                {"modelId": "small", "name": "Small"},
+                                {"modelId": "large", "name": "Large"}
+                            ]
+                        },
+                        "modes": {
+                            "currentModeId": mode,
+                            "availableModes": [
+                                {"id": "quick", "name": "Quick"},
+                                {"id": "deep", "name": "Deep"}
+                            ]
+                        }
+                    }),
+                );
+            }
+            "session/set_model" => {
+                if let Some(chosen) = message
+                    .get("params")
+                    .and_then(|params| params.get("modelId"))
+                    .and_then(Value::as_str)
+                {
+                    model = chosen.to_owned();
+                }
+                answer(id, json!({}));
+            }
+            "session/set_mode" => {
+                if let Some(chosen) = message
+                    .get("params")
+                    .and_then(|params| params.get("modeId"))
+                    .and_then(Value::as_str)
+                {
+                    mode = chosen.to_owned();
+                }
+                answer(id, json!({}));
             }
             "session/prompt" => {
                 let text = message
@@ -67,11 +128,11 @@ fn main() {
                         thought(&session, "pondering the greeting");
                         chunk(&session, "Hel");
                         chunk(&session, "lo");
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                     "markdown" => {
                         chunk(&session, "**bold** and `code`");
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                     "ask" => {
                         next_id += 1;
@@ -96,7 +157,7 @@ fn main() {
                             .map(|option| option == "yes")
                             .unwrap_or(false);
                         chunk(&session, if allowed { "allowed" } else { "refused" });
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                     "read" => {
                         next_id += 1;
@@ -111,7 +172,7 @@ fn main() {
                             .and_then(|content| content.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "nothing".to_owned());
                         chunk(&session, &content);
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                     "write" => {
                         next_id += 1;
@@ -129,18 +190,28 @@ fn main() {
                             .map(|value| !value.is_null())
                             .unwrap_or(false);
                         chunk(&session, if written { "written" } else { "write refused" });
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
+                    }
+                    // The directory the client opened the session in, and what it is set to:
+                    // so a test can see the hand-over and the switches arrive.
+                    "where" => {
+                        chunk(&session, &cwd);
+                        turn_answer(id);
+                    }
+                    "model" => {
+                        chunk(&session, &format!("{model} / {mode}"));
+                        turn_answer(id);
                     }
                     "slow" => {
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                     "die" => {
                         std::process::exit(3);
                     }
                     other => {
                         chunk(&session, other);
-                        answer(id, json!({"stopReason": "end_turn"}));
+                        turn_answer(id);
                     }
                 }
             }

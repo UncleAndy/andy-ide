@@ -33,8 +33,17 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts `program` with `args` on a fresh pseudo-terminal.
-    pub fn spawn(program: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
+    /// Starts `program` with `args` on a fresh pseudo-terminal, in `cwd`.
+    ///
+    /// The directory is not decoration: a terminal that opens in the editor's own working
+    /// directory makes every `ls` and every `git status` answer about the wrong project.
+    pub fn spawn_in(
+        program: &str,
+        args: &[String],
+        cwd: Option<&std::path::Path>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Self> {
         let size = PtySize {
             rows: rows.max(1),
             cols: cols.max(1),
@@ -47,6 +56,9 @@ impl Session {
 
         let mut command = CommandBuilder::new(program);
         command.args(args);
+        if let Some(cwd) = cwd {
+            command.cwd(cwd);
+        }
         command.env("TERM", "xterm-256color");
         // A shell that thinks it is in a login session on an unknown host prints a
         // banner per tab; the editor is the terminal here.
@@ -107,8 +119,13 @@ impl Session {
         })
     }
 
-    /// Starts the user's shell, or a sensible one when `SHELL` is unset.
-    pub fn shell(cols: u16, rows: u16) -> Result<Self> {
+    /// Starts `program` on a fresh pseudo-terminal, in the editor's own directory.
+    pub fn spawn(program: &str, args: &[String], cols: u16, rows: u16) -> Result<Self> {
+        Self::spawn_in(program, args, None, cols, rows)
+    }
+
+    /// Starts the user's shell in `cwd`, or a sensible shell when `SHELL` is unset.
+    pub fn shell_in(cols: u16, rows: u16, cwd: Option<&std::path::Path>) -> Result<Self> {
         // The sandbox this was written in has no `/bin/sh` at all, so the shell is looked
         // for rather than assumed; a bare name goes through `PATH`.
         let shell = std::env::var("SHELL").unwrap_or_else(|_| {
@@ -125,10 +142,15 @@ impl Session {
             }
             "sh".to_owned()
         });
-        let mut session = Self::spawn(&shell, &[], cols, rows)?;
+        let mut session = Self::spawn_in(&shell, &[], cwd, cols, rows)?;
         // Interactive and colourful, the way a person expects a terminal tab to open.
         session.write(b"")?;
         Ok(session)
+    }
+
+    /// Starts the user's shell where the editor itself was started.
+    pub fn shell(cols: u16, rows: u16) -> Result<Self> {
+        Self::shell_in(cols, rows, None)
     }
 
     /// Sends bytes as if typed.

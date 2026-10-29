@@ -252,6 +252,9 @@ impl AppState {
         match Project::open(root) {
             Ok(project) => {
                 let canonical = project.root().to_path_buf();
+                // A shell opened from here belongs to this project: the terminal runs
+                // `ls`, `git status` and builds, all of which answer about a directory.
+                self.terminal.cwd = Some(canonical.clone());
                 self.project = Some(project);
                 self.workspace = Workspace::open(&canonical).ok();
                 self.index = None;

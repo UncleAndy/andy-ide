@@ -4189,6 +4189,81 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_status_line_names_the_model_the_level_and_the_context() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        // What it offers arrived with the session, before anything was asked.
+        wait(&mut gui, "the models and modes", |gui| {
+            gui.app().state.agent.models.len() == 2 && gui.app().state.agent.modes.len() == 2
+        });
+        assert_eq!(
+            gui.app()
+                .state
+                .agent
+                .models
+                .iter()
+                .map(|model| model.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Small", "Large"]
+        );
+        assert_eq!(
+            gui.app().state.agent.current_model.as_deref(),
+            Some("small")
+        );
+        assert!(
+            gui.harness.query_by_label_contains("⏱").is_some(),
+            "the status line is not drawn at all"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("Small").is_some(),
+            "the model is not on the status line"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("Quick").is_some(),
+            "the level is not on the status line"
+        );
+
+        // Choosing another model asks the agent, and the line follows the answer.
+        gui.harness.get_by_label_contains("Small ▾").click();
+        gui.settle();
+        gui.harness.get_by_label_contains("Large").click();
+        wait(&mut gui, "the model switching", |gui| {
+            gui.app().state.agent.current_model.as_deref() == Some("large")
+        });
+
+        // A turn: the timer runs, and the context figure arrives with the answer.
+        gui.app_mut().state.agent.input = "model".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer and its figure", |gui| {
+            gui.app().state.agent.usage.is_some()
+        });
+        assert_eq!(answer(&gui), "large / quick", "the switch did not arrive");
+        assert!(
+            gui.app().state.agent.elapsed().is_some(),
+            "the turn left no time behind"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("42% of 100k").is_some(),
+            "the context figure is not on the status line: {:?}",
+            gui.app().state.agent.usage
+        );
+        assert!(
+            gui.harness.query_by_label_contains("⏱").is_some(),
+            "the timer is not on the status line"
+        );
+    }
+
+    #[test]
     fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
@@ -4224,5 +4299,80 @@ mod the_agent_panel {
             gui.app().state.agent.asking.is_none(),
             "the question stayed after it was answered"
         );
+    }
+}
+
+/// The directory a shell opens in, and the line the agent panel keeps under the
+/// conversation.
+#[cfg(test)]
+mod the_project_directory {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if check(gui) {
+                return;
+            }
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!("{what} did not happen");
+    }
+
+    #[test]
+    fn a_terminal_opens_in_the_project_and_not_where_the_editor_was_started() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.txt"), "one\n").unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let dir = project.path().to_path_buf();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(&dir, config.path(), &[("a.txt", "one\n")], Some("a.txt")),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.cwd.as_deref(),
+            Some(root.as_path()),
+            "the terminal was told nothing about the project: {:?}",
+            gui.app()
+                .state
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf())
+        );
+
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        let rect = gui
+            .app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was drawn");
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+        gui.harness.event(egui::Event::Text("pwd\n".to_owned()));
+        gui.settle();
+
+        let expected = root.to_string_lossy().into_owned();
+        wait_until(&mut gui, "the shell to say where it is", |gui| {
+            gui.app().state.terminal.contents().contains(&expected)
+        });
     }
 }

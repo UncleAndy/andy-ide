@@ -21,8 +21,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::protocol::{
-    ClientCapabilities, FsCapabilities, Message, PermissionRequest, Update, initialize_params,
-    new_session_params, permission_answer, prompt_params,
+    ClientCapabilities, FsCapabilities, Message, PermissionRequest, SessionState, Update, Usage,
+    initialize_params, new_session_params, permission_answer, prompt_params, session_state,
+    set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -95,6 +96,11 @@ pub enum Event {
         /// What is being asked.
         request: PermissionRequest,
     },
+    /// The conversation the agent opened: the models and modes it offers, and which of
+    /// each is in use. Sent once, as soon as the session exists.
+    Setup(SessionState),
+    /// How much of the context the conversation is using, when the agent says.
+    Usage(Usage),
     /// The turn ended, in the agent's own word: `end_turn`, `refusal`, `cancelled`.
     Finished(String),
     /// The agent closed its output: the process is gone.
@@ -131,6 +137,10 @@ pub struct Session {
     closed: bool,
     /// The request id of the turn in flight, so its answer can end the turn.
     turn: Option<u64>,
+    /// The models and modes this agent offered, and which are in use.
+    state: SessionState,
+    /// The last context figure the agent gave, if it gives any.
+    usage: Option<Usage>,
 }
 
 impl Session {
@@ -240,6 +250,8 @@ impl Session {
             stderr: kept,
             closed: false,
             turn: None,
+            state: SessionState::default(),
+            usage: None,
         };
 
         session.hello()?;
@@ -280,6 +292,39 @@ impl Session {
             .and_then(Value::as_str)
             .context("the agent opened no session")?;
         self.session_id = id.to_owned();
+        // What it offers to choose from, and what it chose: the panel shows this line
+        // under the conversation, and a client that ignores it leaves the person with
+        // whatever model they were given.
+        self.state = session_state(&answer);
+        self.usage = usage_of(&answer);
+        Ok(())
+    }
+
+    /// The models and modes this conversation has, and which are in use.
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    /// The last context figure the agent gave.
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+
+    /// Asks the agent to switch models. It may refuse; the refusal is the caller's to show.
+    pub fn set_model(&mut self, model: &str) -> Result<()> {
+        let id = self.session_id.clone();
+        self.ask("session/set_model", set_model_params(&id, model), ANSWER)?;
+        // Only after the agent agreed: a panel that shows a model the agent never took
+        // is a panel that lies about which one is answering.
+        self.state.current_model = Some(model.to_owned());
+        Ok(())
+    }
+
+    /// Asks the agent to switch mode: how hard it thinks before it answers.
+    pub fn set_mode(&mut self, mode: &str) -> Result<()> {
+        let id = self.session_id.clone();
+        self.ask("session/set_mode", set_mode_params(&id, mode), ANSWER)?;
+        self.state.current_mode = Some(mode.to_owned());
         Ok(())
     }
 
@@ -532,13 +577,22 @@ impl Session {
                         "the agent refused the turn: {}",
                         error.message
                     ))),
-                    (Some(result), None) => Some(Event::Finished(
-                        result
-                            .get("stopReason")
-                            .and_then(Value::as_str)
-                            .unwrap_or("end_turn")
-                            .to_owned(),
-                    )),
+                    (Some(result), None) => {
+                        // The turn's answer is the one place an agent usually says how
+                        // much of its window it has spent; the figure goes to the panel
+                        // before the turn ends, so the line under it is up to date.
+                        if let Some(usage) = usage_of(&result) {
+                            self.usage = Some(usage);
+                            self.waiting.push_back(Event::Usage(usage));
+                        }
+                        Some(Event::Finished(
+                            result
+                                .get("stopReason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("end_turn")
+                                .to_owned(),
+                        ))
+                    }
                     (None, None) => Some(Event::Finished("end_turn".to_owned())),
                 }
             }

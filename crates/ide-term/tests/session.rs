@@ -79,3 +79,42 @@ fn a_program_that_does_not_exist_is_an_error_not_a_panic() {
     let session = Session::spawn("/definitely/not/here", &[], 80, 24);
     assert!(session.is_err(), "a missing program started a session");
 }
+
+#[test]
+fn a_shell_starts_in_the_directory_it_was_given() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let mut session = Session::shell_in(80, 24, Some(dir.path())).expect("a shell starts");
+    session.write(b"pwd\n").expect("the write goes through");
+    let expected = dir
+        .path()
+        .canonicalize()
+        .expect("the directory has a canonical name");
+    assert!(
+        wait_for(&session, &expected.to_string_lossy()),
+        "the shell is not in {expected:?}: {:?}",
+        session.contents()
+    );
+    session.kill();
+}
+
+#[test]
+fn a_program_starts_in_the_directory_it_was_given() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let session = Session::spawn_in(
+        "bash",
+        &["-c".to_owned(), "pwd".to_owned()],
+        Some(dir.path()),
+        80,
+        24,
+    )
+    .expect("a session starts");
+    let expected = dir
+        .path()
+        .canonicalize()
+        .expect("the directory has a canonical name");
+    assert!(
+        wait_for(&session, &expected.to_string_lossy()),
+        "the program is not in {expected:?}: {:?}",
+        session.contents()
+    );
+}

@@ -1,5 +1,7 @@
 //! The conversation panel: who is talking, what was said, and the question on screen.
 
+use std::time::Duration;
+
 use egui::Ui;
 
 use crate::agent::Line;
@@ -14,6 +16,132 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
     question(ui, state);
     input(ui, state);
+    status(ui, state);
+}
+
+/// The line under the conversation: how long the turn takes, which model answers, how
+/// hard it is thinking, and how much of its window is spent.
+///
+/// Everything here is read from the agent and never guessed: an agent that says nothing
+/// about its context window gets a dash, not an invented number. The two choices are
+/// menus rather than labels because a model or a level that cannot be changed is a fact
+/// about the agent, and one that can is a decision about the answer being written.
+fn status(ui: &mut Ui, state: &mut AppState) {
+    // Wrapped, not one line: a narrow panel would push the model and the context figure
+    // past its right edge, and a fact that is off-screen is a fact nobody has.
+    ui.horizontal_wrapped(|ui| {
+        match state.agent.elapsed() {
+            Some(took) => {
+                ui.label(format!("⏱ {:.1} s", took.as_secs_f64()));
+            }
+            None => {
+                ui.weak("⏱ —");
+            }
+        }
+        if state.agent.busy {
+            // A running timer has to be repainted to move, and the panel is otherwise
+            // idle while an answer is coming.
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+        ui.separator();
+
+        let model = state.agent.current_model.clone();
+        if state.agent.models.is_empty() {
+            ui.weak("model —");
+        } else {
+            let shown = model
+                .as_deref()
+                .and_then(|id| {
+                    state
+                        .agent
+                        .models
+                        .iter()
+                        .find(|model| model.id == id)
+                        .map(|model| model.name.clone())
+                })
+                .unwrap_or_else(|| "model —".to_owned());
+            // A menu button rather than a combo box: the name of the model is then part of
+            // the button's own text, so it is on screen and readable, not only inside a
+            // popup that has to be opened to find out what is answering.
+            let choices = state.agent.models.clone();
+            let mut asked = None;
+            ui.menu_button(format!("{shown} ▾"), |ui| {
+                for option in &choices {
+                    let chosen = model.as_deref() == Some(option.id.as_str());
+                    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
+                        asked = Some(option.id.clone());
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(asked) = asked {
+                state.agent.set_model(&asked);
+            }
+        }
+        ui.separator();
+
+        let mode = state.agent.current_mode.clone();
+        if state.agent.modes.is_empty() {
+            ui.weak("thinking —");
+        } else {
+            let shown = mode
+                .as_deref()
+                .and_then(|id| {
+                    state
+                        .agent
+                        .modes
+                        .iter()
+                        .find(|mode| mode.id == id)
+                        .map(|mode| mode.name.clone())
+                })
+                .unwrap_or_else(|| "thinking —".to_owned());
+            let choices = state.agent.modes.clone();
+            let mut asked = None;
+            ui.menu_button(format!("{shown} ▾"), |ui| {
+                for option in &choices {
+                    let chosen = mode.as_deref() == Some(option.id.as_str());
+                    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
+                        asked = Some(option.id.clone());
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(asked) = asked {
+                state.agent.set_mode(&asked);
+            }
+        }
+        ui.separator();
+
+        match state.agent.usage {
+            Some(usage) => {
+                let text = match usage.window {
+                    // A percentage of nothing is not a number; without a window only the
+                    // count is shown.
+                    Some(window) if window > 0 => format!(
+                        "ctx {}% of {}",
+                        (usage.used.saturating_mul(100) / window).min(100),
+                        short_tokens(window)
+                    ),
+                    _ => format!("ctx {} tokens", short_tokens(usage.used)),
+                };
+                ui.label(text);
+            }
+            None => {
+                ui.weak("ctx —");
+            }
+        }
+    });
+}
+
+/// Tokens, small enough to read at a glance: `4200`, `42k`, `1.2M`.
+fn short_tokens(tokens: u64) -> String {
+    if tokens < 10_000 {
+        tokens.to_string()
+    } else if tokens < 1_000_000 {
+        format!("{}k", tokens / 1000)
+    } else {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    }
 }
 
 /// The command that starts the agent, the menu that fills it in, and the buttons.

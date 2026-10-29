@@ -111,6 +111,12 @@ escapes, and run without a shell in between, so `;` and `` stay characters of a 
 name rather than becoming a second command. `Remember` writes it into `agents.toml`. The
 session lives on a worker thread — the panel posts what was typed, the
 worker pumps what the agent says — so an answer is drawn while it is still being written.
+A status line under the conversation says how long the turn is taking, which model is
+answering, how hard it is thinking and how much of its context window is spent — both
+choices are menus, and both are answered by the agent, not by us. Anything the agent does
+not report is a dash rather than a guess. The shell opens in the project's own directory,
+and the agent is told that directory the moment the session is opened.
+
 Sending a message does not move the keyboard: the field keeps it, and a message typed while
 the answer is still coming is queued and goes out when the turn ends. Clicking into the
 editor does move it, and keeps it there. The answer is read as Markdown as it arrives, and

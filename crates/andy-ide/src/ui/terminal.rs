@@ -53,6 +53,10 @@ pub struct Terminal {
     pub error: Option<String>,
     cols: u16,
     rows: u16,
+    /// Where new shells start: the project's own root, not wherever the editor was
+    /// started from. Set by the application, which is the only thing that knows which
+    /// project is open.
+    pub cwd: Option<std::path::PathBuf>,
     /// Whether keys typed in this frame belong to the terminal.
     pub focused: bool,
     /// Whether the panel was drawn at all in the last frame.
@@ -115,6 +119,7 @@ impl Terminal {
             error: None,
             cols: 80,
             rows: 24,
+            cwd: None,
             focused: false,
             shown: false,
             shown_rect: None,
@@ -146,7 +151,7 @@ impl Terminal {
     /// A second shell is a second `Session`, not a second view of the first: it has
     /// its own process, its own screen and its own selection.
     pub fn new_pane(&mut self) {
-        match Session::shell(self.cols, self.rows) {
+        match Session::shell_in(self.cols, self.rows, self.cwd.as_deref()) {
             Ok(session) => {
                 // Numbered from the start: the dock tab is called `Terminal`, and two
                 // things with one name cannot be told apart by the tests or the eye.

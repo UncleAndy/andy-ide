@@ -7,8 +7,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
 
-use ide_agents::{Event as AgentEvent, PermissionPolicy, PermissionRequest, Registry, Session};
+use ide_agents::{
+    Event as AgentEvent, Mode, Model, PermissionPolicy, PermissionRequest, Registry, Session, Usage,
+};
 
 /// How long the worker waits for the next thing before checking whether it was told to go.
 const PUMP: std::time::Duration = std::time::Duration::from_millis(20);
@@ -34,6 +37,10 @@ enum Command {
     Prompt(String),
     /// Answer the question the agent is waiting on.
     Permission { id: u64, option: Option<String> },
+    /// Switch models, and say so through the status line.
+    Model(String),
+    /// Switch mode: how hard the agent thinks.
+    Mode(String),
 }
 
 /// What the worker tells the panel.
@@ -71,6 +78,17 @@ pub struct AgentState {
     pub command: String,
     /// What the panel is doing, in one line.
     pub status: String,
+    /// The models the agent offers, and the one in use.
+    pub models: Vec<Model>,
+    pub current_model: Option<String>,
+    /// The modes it offers — how hard it thinks — and the one in use.
+    pub modes: Vec<Mode>,
+    pub current_mode: Option<String>,
+    /// How much of the model's context is spent, when the agent says.
+    pub usage: Option<Usage>,
+    /// When the turn in flight began, and how long the last one took.
+    started: Option<Instant>,
+    pub took: Option<Duration>,
     /// Set while a turn is in flight: the panel disables the input rather than queueing.
     pub busy: bool,
     /// The question waiting for a person's answer.
@@ -213,7 +231,47 @@ impl AgentState {
         self.transcript.push(Line::You(text));
         self.input.clear();
         self.busy = true;
+        self.started = Some(Instant::now());
+        self.took = None;
         self.status = "answering…".to_owned();
+    }
+
+    /// How long the turn in flight has been running, or how long the last one took.
+    ///
+    /// One number for both states, because it is one question: how long does this agent
+    /// take? A timer that vanished between turns would answer it only half the time.
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.started.map(|started| started.elapsed()).or(self.took)
+    }
+
+    /// Asks the agent to switch models; the choice shows up when it agrees.
+    pub fn set_model(&mut self, model: &str) {
+        let Some(worker) = &self.worker else {
+            self.status = "start the agent first".to_owned();
+            return;
+        };
+        if worker
+            .commands
+            .send(Command::Model(model.to_owned()))
+            .is_err()
+        {
+            self.status = "the agent is gone".to_owned();
+        }
+    }
+
+    /// Asks the agent to switch mode: how hard it thinks before it answers.
+    pub fn set_mode(&mut self, mode: &str) {
+        let Some(worker) = &self.worker else {
+            self.status = "start the agent first".to_owned();
+            return;
+        };
+        if worker
+            .commands
+            .send(Command::Mode(mode.to_owned()))
+            .is_err()
+        {
+            self.status = "the agent is gone".to_owned();
+        }
     }
 
     /// Answers the question the agent is waiting on.
@@ -308,7 +366,19 @@ impl AgentState {
                     self.status = request.title();
                     self.asking = Some((id, request));
                 }
+                AgentEvent::Setup(state) => {
+                    self.models = state.models;
+                    self.current_model = state.current_model;
+                    self.modes = state.modes;
+                    self.current_mode = state.current_mode;
+                }
+                AgentEvent::Usage(usage) => {
+                    self.usage = Some(usage);
+                }
                 AgentEvent::Finished(reason) => {
+                    // The timer stops with the turn and keeps its figure: a spinner that
+                    // resets to zero tells nobody how long the last answer took.
+                    self.took = self.started.take().map(|started| started.elapsed());
                     self.busy = false;
                     self.status = reason.clone();
                     if let Some(queued) = self.queued.take() {
@@ -317,11 +387,13 @@ impl AgentState {
                     }
                 }
                 AgentEvent::Closed => {
+                    self.took = self.started.take().map(|started| started.elapsed());
                     self.busy = false;
                     self.worker = None;
                     self.status = "the agent closed its output".to_owned();
                 }
                 AgentEvent::Failed(error) => {
+                    self.took = self.started.take().map(|started| started.elapsed());
                     self.transcript.push(Line::Note(error.clone()));
                     self.busy = false;
                     self.status = error;
@@ -350,6 +422,13 @@ fn work(
     if replies.send(Reply::Ready(session.id().to_owned())).is_err() {
         return;
     }
+    // What it offers to choose from, before anything is asked of it.
+    if replies
+        .send(Reply::Event(AgentEvent::Setup(session.state().clone())))
+        .is_err()
+    {
+        return;
+    }
 
     loop {
         match commands.recv_timeout(PUMP) {
@@ -362,6 +441,30 @@ fn work(
             }
             Ok(Command::Permission { id, option }) => {
                 let _ = session.answer_permission(id, option.as_deref());
+            }
+            Ok(Command::Model(model)) => {
+                if let Err(error) = session.set_model(&model)
+                    && replies
+                        .send(Reply::Event(AgentEvent::Failed(format!(
+                            "the agent would not switch model: {error}"
+                        ))))
+                        .is_err()
+                {
+                    return;
+                }
+                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+            }
+            Ok(Command::Mode(mode)) => {
+                if let Err(error) = session.set_mode(&mode)
+                    && replies
+                        .send(Reply::Event(AgentEvent::Failed(format!(
+                            "the agent would not switch mode: {error}"
+                        ))))
+                        .is_err()
+                {
+                    return;
+                }
+                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,

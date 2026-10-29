@@ -201,3 +201,90 @@ fn an_agent_that_says_nothing_is_given_up_on() {
         "the deadline was not the one asked for"
     );
 }
+
+#[test]
+fn the_session_says_which_models_and_modes_it_offers() {
+    let (_dir, session) = start(PermissionPolicy::Deny);
+    let state = session.state();
+    assert_eq!(state.current_model.as_deref(), Some("small"));
+    assert_eq!(
+        state
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Small", "Large"]
+    );
+    assert_eq!(state.current_mode.as_deref(), Some("quick"));
+    assert_eq!(
+        state
+            .modes
+            .iter()
+            .map(|mode| mode.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Quick", "Deep"]
+    );
+}
+
+#[test]
+fn a_switch_of_model_and_mode_reaches_the_agent() {
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    session.set_model("large").expect("the model was taken");
+    session.set_mode("deep").expect("the mode was taken");
+    assert_eq!(session.state().current_model.as_deref(), Some("large"));
+    assert_eq!(session.state().current_mode.as_deref(), Some("deep"));
+
+    // And the agent itself agrees: this word is answered from its own state.
+    session.start_turn("model").expect("the turn started");
+    let said = loop {
+        match session.next_event(Duration::from_secs(10)) {
+            Some(Event::Text(text)) => break text,
+            Some(Event::Finished(_)) | None => break String::new(),
+            Some(_) => {}
+        }
+    };
+    assert_eq!(said, "large / deep");
+}
+
+#[test]
+fn the_agent_is_told_which_directory_the_project_is_in() {
+    let (dir, mut session) = start(PermissionPolicy::Deny);
+    session.start_turn("where").expect("the turn started");
+    let said = loop {
+        match session.next_event(Duration::from_secs(10)) {
+            Some(Event::Text(text)) => break text,
+            Some(Event::Finished(_)) | None => break String::new(),
+            Some(_) => {}
+        }
+    };
+    assert_eq!(said, dir.path().canonicalize().unwrap().to_string_lossy());
+}
+
+#[test]
+fn how_much_of_the_window_is_used_arrives_with_the_turn() {
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    assert!(session.usage().is_none(), "a figure appeared from nowhere");
+    session.start_turn("hello").expect("the turn started");
+    let events = loop {
+        let events = drain(&mut session);
+        if events
+            .iter()
+            .any(|event| matches!(event, Event::Finished(_)))
+        {
+            break events;
+        }
+        if events.is_empty() {
+            break Vec::new();
+        }
+    };
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .expect("the figure did not arrive");
+    assert_eq!(usage.used, 42_000);
+    assert_eq!(usage.window, Some(100_000));
+    assert_eq!(session.usage(), Some(usage));
+}
