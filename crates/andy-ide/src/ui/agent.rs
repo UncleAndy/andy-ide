@@ -113,28 +113,45 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // first thing a person picks by.
             let choices = crate::agent::grouped(&state.agent.models);
             let mut asked = None;
-            ui.menu_button(format!("{shown} ▾"), |ui| {
-                for (provider, group) in &choices {
-                    if let Some(provider) = provider {
-                        egui::CollapsingHeader::new(provider)
-                            .id_salt(("provider", provider))
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                for option in group {
-                                    if pick(ui, option, model.as_deref(), &mut asked) {
-                                        ui.close();
+            let response = ui.button(format!("{shown} ▾"));
+            // The list owns its open flag instead of letting egui's menu watch clicks:
+            // folding a provider group away is how a person looks past it at another one,
+            // and a menu that closes on any click inside itself makes that impossible.
+            // With the flag here, only a chosen model (or a click outside) ends the visit.
+            let mut open = state.agent.models_open;
+            if response.clicked() {
+                open = !open;
+            }
+            let mut chosen = false;
+            egui::Popup::menu(&response)
+                .open_bool(&mut open)
+                .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    for (provider, group) in &choices {
+                        if let Some(provider) = provider {
+                            egui::CollapsingHeader::new(provider)
+                                .id_salt(("provider", provider))
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    for option in group {
+                                        if pick(ui, option, model.as_deref(), &mut asked) {
+                                            chosen = true;
+                                        }
                                     }
+                                });
+                        } else {
+                            for option in group {
+                                if pick(ui, option, model.as_deref(), &mut asked) {
+                                    chosen = true;
                                 }
-                            });
-                    } else {
-                        for option in group {
-                            if pick(ui, option, model.as_deref(), &mut asked) {
-                                ui.close();
                             }
                         }
                     }
-                }
-            });
+                });
+            if chosen {
+                open = false;
+            }
+            state.agent.models_open = open;
             if let Some(asked) = asked {
                 state.agent.set_model(&asked);
             }

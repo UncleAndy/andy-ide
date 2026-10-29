@@ -147,6 +147,9 @@ pub struct AgentState {
     /// The models the agent offers, and the one in use.
     pub models: Vec<Model>,
     pub current_model: Option<String>,
+    /// Whether the model list is on screen. The panel owns this flag instead of the menu
+    /// watching clicks, so that folding a provider group does not dismiss the list.
+    pub models_open: bool,
     /// The modes it offers — how hard it thinks — and the one in use.
     pub modes: Vec<Mode>,
     pub current_mode: Option<String>,
@@ -206,6 +209,7 @@ impl Default for AgentState {
             status: String::new(),
             models: Vec::new(),
             current_model: None,
+            models_open: false,
             modes: Vec::new(),
             current_mode: None,
             usage: None,
@@ -547,6 +551,7 @@ impl AgentState {
         self.transcript.clear();
         self.models.clear();
         self.current_model = None;
+        self.models_open = false;
         self.modes.clear();
         self.current_mode = None;
         self.usage = None;

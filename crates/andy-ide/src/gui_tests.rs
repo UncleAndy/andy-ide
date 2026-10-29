@@ -4389,6 +4389,65 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn folding_a_provider_does_not_dismiss_the_model_list() {
+        // The list is grouped by provider, and each group folds. Folding one is how a
+        // person looks past it at another, so a click on a group's own header must leave
+        // the menu open — egui closes a menu on any click inside it by default.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the models", |gui| {
+            gui.app().state.agent.models.len() == 4
+        });
+
+        gui.harness.get_by_label_contains("Small ▾").click();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("Hermes 4").is_some(),
+            "the list did not open"
+        );
+
+        // Fold the "nous" group: its model goes, the list and the other provider stay.
+        gui.harness.get_by_label("nous").click();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("Hermes 4").is_none(),
+            "the group did not fold"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("GPT-5").is_some(),
+            "the list closed when a provider group was folded"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("Large").is_some(),
+            "the list closed when a provider group was folded"
+        );
+
+        // Unfolding is the same click, and it must not dismiss the list either.
+        gui.harness.get_by_label("nous").click();
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("Hermes 4").is_some(),
+            "the group did not unfold, or the list closed"
+        );
+
+        // And a model that is actually chosen still ends the visit.
+        gui.harness.get_by_label_contains("GPT-5").click();
+        wait(&mut gui, "the model switching", |gui| {
+            gui.app().state.agent.current_model.as_deref() == Some("openai/gpt-5")
+        });
+        assert!(
+            gui.harness.query_by_label_contains("Hermes 4").is_none(),
+            "the list stayed open after a model was chosen"
+        );
+    }
+
+    #[test]
     fn alt_0_shows_the_panel_with_the_agents_from_the_file() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
