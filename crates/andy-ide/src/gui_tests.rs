@@ -1533,6 +1533,30 @@ mod the_hint {
     }
 
     #[test]
+    fn the_hint_reads_its_prose_as_markdown() {
+        // Servers document in Markdown. A hint that shows `**bold**` shows the source of
+        // the documentation instead of the documentation.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+
+        answer(
+            &mut gui,
+            "```text\nalpha\n```\n---\n\nSome **bold** and `tick` text.",
+        );
+
+        assert!(
+            gui.harness.query_by_label_contains("bold").is_some(),
+            "the prose is not on screen"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("**").is_none(),
+            "the Markdown is on screen as source"
+        );
+        assert!(hint_on_screen(&gui, "alpha"), "the signature is gone");
+    }
+
+    #[test]
     fn the_hint_goes_away_when_the_pointer_leaves() {
         let mut gui = window();
         rest_on_text(&mut gui);

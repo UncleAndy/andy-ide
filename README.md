@@ -121,7 +121,9 @@ directory named there.
 The hint about the symbol under the pointer belongs to the visible text and nothing else.
 The editor allocates a rect the size of the whole document, so "the pointer is inside the
 editor's rect" was true over every panel below it; the place is published only when the
-pointer is over the part of the text that was actually drawn.
+pointer is over the part of the text that was actually drawn. Its prose is read as Markdown —
+servers document in Markdown, and a hint that shows the asterisks shows the source, not the
+documentation — while the signature keeps its monospace face.
 
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both

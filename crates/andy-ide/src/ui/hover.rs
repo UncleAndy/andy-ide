@@ -48,6 +48,9 @@ pub struct Hover {
     /// When the pointer arrived at `current`.
     arrived: f64,
     text: Option<String>,
+    /// The shaped Markdown of the last answer drawn: re-shaping it every frame of a
+    /// sitting pointer would be work thrown away sixty times a second.
+    markdown: egui_commonmark::CommonMarkCache,
 }
 
 impl Hover {
@@ -176,14 +179,19 @@ impl Hover {
     }
 
     /// Draws the hint beside the pointer; returns whether it drew anything.
-    pub fn show(&self, ctx: &egui::Context) -> bool {
-        let Some(text) = self.text() else {
+    ///
+    /// Servers write their documentation in Markdown — `**bold**`, `- lists`, `` `code` ``
+    /// and tables — and a tooltip that shows the punctuation shows the source, not the
+    /// documentation. The signature keeps its monospace face (it is code, and its
+    /// indentation carries meaning), the prose is read as Markdown while it is drawn.
+    pub fn show(&mut self, ctx: &egui::Context) -> bool {
+        let Some(text) = self.text().map(str::to_owned) else {
             return false;
         };
         let Some(spot) = self.current.as_ref() else {
             return false;
         };
-        let (signature, prose) = split_hover(text);
+        let (signature, prose) = split_hover(&text);
         let anchor = spot.screen + egui::vec2(14.0, 20.0);
         egui::Area::new(Id::new("hover_hint"))
             .order(Order::Tooltip)
@@ -199,7 +207,11 @@ impl Hover {
                         if signature.is_some() {
                             ui.separator();
                         }
-                        ui.label(prose);
+                        egui_commonmark::CommonMarkViewer::new().show(
+                            ui,
+                            &mut self.markdown,
+                            &prose,
+                        );
                     }
                 });
             });
