@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 
 use crate::protocol::{
     ClientCapabilities, FsCapabilities, Message, PermissionRequest, SessionState, Update, Usage,
-    initialize_params, new_session_params, permission_answer, prompt_params, session_state,
-    set_mode_params, set_model_params, usage_of,
+    initialize_params, load_session_params, new_session_params, permission_answer, prompt_params,
+    session_state, set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -130,6 +130,9 @@ pub struct Session {
     waiting: std::collections::VecDeque<Event>,
     next_id: u64,
     session_id: String,
+    /// Whether this conversation was picked up from an earlier run rather than opened
+    /// fresh: the panel says which, so nobody wonders why the agent remembers.
+    resumed: bool,
     policy: PermissionPolicy,
     root: PathBuf,
     allow_writes: bool,
@@ -149,6 +152,21 @@ impl Session {
     /// `initialize` and `session/new` are done here, so a `Session` that exists is a
     /// session that has answered: every failure to start is a failure to build one.
     pub fn start(spec: &AgentSpec, root: &Path, policy: PermissionPolicy) -> Result<Self> {
+        Self::start_with(spec, root, policy, None)
+    }
+
+    /// Starts an agent and asks it to pick up `resume`, if it has such a conversation.
+    ///
+    /// A conversation is worth keeping: an agent that has read the project once knows it,
+    /// and starting from nothing every launch throws that away. The id is the agent's to
+    /// keep; an agent that does not know it — or does not offer `loadSession` — is asked
+    /// to open a new one instead, and nobody is told about a failure that was expected.
+    pub fn start_with(
+        spec: &AgentSpec,
+        root: &Path,
+        policy: PermissionPolicy,
+        resume: Option<String>,
+    ) -> Result<Self> {
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
@@ -244,6 +262,7 @@ impl Session {
             waiting: std::collections::VecDeque::new(),
             next_id: 1,
             session_id: String::new(),
+            resumed: false,
             policy,
             root: root.to_path_buf(),
             allow_writes: false,
@@ -254,13 +273,18 @@ impl Session {
             usage: None,
         };
 
-        session.hello()?;
+        session.hello(resume)?;
         Ok(session)
     }
 
     /// The id ACP gave this conversation.
     pub fn id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Whether the conversation was resumed from an id kept by the project.
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     /// Allows `fs/write_text_file` to be served.
@@ -271,8 +295,8 @@ impl Session {
         self.allow_writes = allow;
     }
 
-    /// `initialize`, then `session/new` — the two requests that make a conversation.
-    fn hello(&mut self) -> Result<()> {
+    /// `initialize`, then a conversation either resumed or new.
+    fn hello(&mut self, resume: Option<String>) -> Result<()> {
         // Nothing claimed on the agent's behalf: it has a terminal of its own, the one it
         // was configured with, and files are reached through it. Offering `fs/*` here
         // would invite it to read and write *this* machine's copies of the project, and
@@ -289,13 +313,42 @@ impl Session {
             .get("protocolVersion")
             .cloned()
             .unwrap_or(Value::Null);
+        // Offering to load a conversation is the agent's promise, not ours: a client
+        // that sends `session/load` to an agent that never said it could is a client
+        // that gets an error where a new session would have been fine.
+        let can_load = answer
+            .get("agentCapabilities")
+            .and_then(|capabilities| capabilities.get("loadSession"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
-        let answer = self.ask("session/new", new_session_params(&self.root), HELLO)?;
+        let answer = match resume.clone().filter(|_| can_load) {
+            Some(session) => {
+                match self.ask(
+                    "session/load",
+                    load_session_params(&self.root, &session),
+                    HELLO,
+                ) {
+                    Ok(answer) => {
+                        // The agent may answer with the id it kept, or with nothing but
+                        // the models: either way the conversation is the one we asked for.
+                        self.resumed = true;
+                        answer
+                    }
+                    // A conversation the agent no longer has is not an error worth
+                    // showing: the new session is what the person wanted anyway.
+                    Err(_) => self.ask("session/new", new_session_params(&self.root), HELLO)?,
+                }
+            }
+            None => self.ask("session/new", new_session_params(&self.root), HELLO)?,
+        };
         let id = answer
             .get("sessionId")
             .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| resume.clone())
             .context("the agent opened no session")?;
-        self.session_id = id.to_owned();
+        self.session_id = id;
         // What it offers to choose from, and what it chose: the panel shows this line
         // under the conversation, and a client that ignores it leaves the person with
         // whatever model they were given.

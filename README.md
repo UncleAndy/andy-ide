@@ -132,6 +132,14 @@ happens when the window is smaller than the answer, not a habit. While the point
 the hint nothing is asked about the code behind it — the hint floats over the text, and the
 symbol under a window is not a symbol the person is pointing at.
 
+A conversation outlives the window. The project keeps the agent's session id in
+`.andy-ide/agent-session.json`, beside the layout, and the next launch asks the agent to
+pick that conversation up — `session/load` when the agent says it can, a new session when
+it does not remember, and nothing said about the difference an agent's memory cannot
+account for. The id is written the moment the agent names it rather than on the way out: a
+crash is the case where a conversation is most wanted back. It is kept per agent, since an
+id offered to a different agent asks a stranger to remember somebody else's afternoon.
+
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both
 choices are menus, and both are answered by the agent, not by us. Anything the agent does

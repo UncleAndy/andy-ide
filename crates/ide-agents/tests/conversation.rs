@@ -319,3 +319,47 @@ fn the_client_asks_nothing_of_itself_and_says_files_go_through_the_terminal() {
         "the agent was not told to use its terminal: {said}"
     );
 }
+
+/// A session that was told to pick up `id`.
+fn start_resumed(policy: PermissionPolicy, id: &str) -> (tempfile::TempDir, Session) {
+    let dir = project();
+    let session = Session::start_with(&stand_in(), dir.path(), policy, Some(id.to_owned()))
+        .expect("the agent started");
+    (dir, session)
+}
+
+/// What the agent says about the conversation it is in, after one turn.
+fn conversation(session: &mut Session) -> String {
+    session.start_turn("session").expect("the turn started");
+    let mut said = String::new();
+    while let Some(event) = session.next_event(Duration::from_secs(5)) {
+        match event {
+            Event::Text(text) => said.push_str(&text),
+            Event::Finished(_) | Event::Closed => break,
+            _ => {}
+        }
+    }
+    said
+}
+
+#[test]
+fn a_kept_conversation_is_picked_up_by_its_id() {
+    let (_dir, mut session) = start_resumed(PermissionPolicy::Deny, "kept-42");
+    assert_eq!(session.id(), "kept-42");
+    assert!(session.resumed(), "the session was opened anew");
+    assert_eq!(conversation(&mut session), "kept-42 loaded");
+}
+
+#[test]
+fn a_conversation_the_agent_forgot_is_opened_anew() {
+    // The project has an id the agent no longer knows — it was wiped, or the agent is a
+    // different one. That is not a failure to report: a new conversation is what the
+    // person wanted, and the panel is not the place for a rumour about an old one.
+    let (_dir, mut session) = start_resumed(PermissionPolicy::Deny, "forgotten-7");
+    assert!(
+        !session.resumed(),
+        "a forgotten session was reported as resumed"
+    );
+    assert_ne!(session.id(), "forgotten-7");
+    assert_eq!(conversation(&mut session), "stand-in-session new");
+}

@@ -150,6 +150,19 @@ pub fn initialize_params(capabilities: &ClientCapabilities) -> Value {
     })
 }
 
+/// The `session/load` parameters: the conversation, and where it lives.
+///
+/// ACP asks for the same three things as `session/new`, because an agent that kept a
+/// session kept it against a directory: the same id in another project is not the same
+/// conversation.
+pub fn load_session_params(cwd: &std::path::Path, session: &str) -> Value {
+    json!({
+        "sessionId": session,
+        "cwd": cwd.to_string_lossy(),
+        "mcpServers": Vec::<Value>::new(),
+    })
+}
+
 /// The `session/new` parameters. `mcpServers` is empty: the editor brings no servers of
 /// its own, and an agent that wants one can start it itself.
 ///

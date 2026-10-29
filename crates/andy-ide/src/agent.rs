@@ -45,8 +45,8 @@ enum Command {
 
 /// What the worker tells the panel.
 enum Reply {
-    /// The session is up, with this id.
-    Ready(String),
+    /// The session is up: its id, and whether it was picked up from an earlier run.
+    Ready { session: String, resumed: bool },
     /// Something the agent said.
     Event(AgentEvent),
     /// The session could not be started, or the worker gave up.
@@ -102,6 +102,13 @@ pub struct AgentState {
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
     place: Option<PathBuf>,
+    /// The id of the conversation in use, once the agent has named it.
+    pub session: Option<String>,
+    /// An id the project kept from the last run, and the agent it belongs to: a
+    /// conversation is a conversation with *that* agent, and naming it to another one
+    /// would be asking a stranger to remember somebody else's afternoon.
+    resume: Option<String>,
+    resumed_from: Option<String>,
 }
 
 impl AgentState {
@@ -120,6 +127,9 @@ impl AgentState {
         self.transcript.clear();
         self.asking = None;
         self.busy = false;
+        self.session = None;
+        self.resume = None;
+        self.resumed_from = None;
         let Some(root) = self.root.clone() else {
             self.registry = Registry::defaults();
             self.status = "no project: an agent has nowhere to work".to_owned();
@@ -149,6 +159,46 @@ impl AgentState {
                 self.status = format!("{error}");
             }
         }
+        self.read_session(&root);
+    }
+
+    /// Where the project keeps the conversation: `.andy-ide/agent-session.json`.
+    ///
+    /// Beside `workspace.json`, because it is the same kind of thing — what this project
+    /// was doing last time — and not a setting of the editor.
+    pub(crate) fn session_file(root: &Path) -> PathBuf {
+        root.join(".andy-ide").join("agent-session.json")
+    }
+
+    /// Reads the id the project kept, if it kept one.
+    fn read_session(&mut self, root: &Path) {
+        let Ok(text) = std::fs::read_to_string(Self::session_file(root)) else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        let session = saved.get("session").and_then(|id| id.as_str());
+        let agent = saved.get("agent").and_then(|name| name.as_str());
+        if let (Some(session), Some(agent)) = (session, agent) {
+            self.resume = Some(session.to_owned());
+            self.resumed_from = Some(agent.to_owned());
+        }
+    }
+
+    /// Writes the id down, with the agent it belongs to.
+    fn remember_session(&mut self, session: &str) {
+        let (Some(root), Some(agent)) = (self.root.clone(), self.chosen.clone()) else {
+            return;
+        };
+        let file = Self::session_file(&root);
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let saved = serde_json::json!({ "agent": agent, "session": session });
+        let _ = std::fs::write(file, format!("{saved:#}\n"));
+        self.resumed_from = Some(agent);
+        self.resume = Some(session.to_owned());
     }
 
     /// Starts what the command field says, exactly as it is written there.
@@ -176,11 +226,16 @@ impl AgentState {
         };
 
         let name = spec.name.clone();
+        // The conversation kept by the project, but only for the agent that kept it.
+        let resume = self
+            .resume
+            .clone()
+            .filter(|_| self.resumed_from.as_deref() == Some(name.as_str()));
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
-            .spawn(move || work(spec, root, jobs, answers));
+            .spawn(move || work(spec, root, resume, jobs, answers));
         match started {
             Ok(_) => {
                 self.worker = Some(Worker { commands, replies });
@@ -333,8 +388,17 @@ impl AgentState {
     /// Files one reply from the worker.
     fn take(&mut self, reply: Reply) {
         match reply {
-            Reply::Ready(id) => {
-                self.status = format!("ready, session {id}");
+            Reply::Ready { session, resumed } => {
+                // The conversation's id is written down the moment it is known, not at
+                // exit: a crash is exactly the case where a person would like their
+                // conversation back, and a file written on the way out is not written.
+                self.remember_session(&session);
+                self.session = Some(session.clone());
+                self.status = if resumed {
+                    format!("ready, session {session} resumed")
+                } else {
+                    format!("ready, session {session}")
+                };
             }
             Reply::Failed(error) => {
                 self.transcript.push(Line::Note(error.clone()));
@@ -416,19 +480,26 @@ impl AgentState {
 fn work(
     spec: ide_agents::AgentSpec,
     root: PathBuf,
+    resume: Option<String>,
     commands: Receiver<Command>,
     replies: Sender<Reply>,
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
-    let mut session = match Session::start(&spec, &root, PermissionPolicy::Ask) {
+    let mut session = match Session::start_with(&spec, &root, PermissionPolicy::Ask, resume) {
         Ok(session) => session,
         Err(error) => {
             let _ = replies.send(Reply::Failed(format!("{error}")));
             return;
         }
     };
-    if replies.send(Reply::Ready(session.id().to_owned())).is_err() {
+    if replies
+        .send(Reply::Ready {
+            session: session.id().to_owned(),
+            resumed: session.resumed(),
+        })
+        .is_err()
+    {
         return;
     }
     // What it offers to choose from, before anything is asked of it.

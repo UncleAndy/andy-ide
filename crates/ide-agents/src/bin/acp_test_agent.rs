@@ -41,6 +41,9 @@ fn main() {
     let mut cwd = String::new();
     // What it claimed it would do for us, and what it said about files.
     let mut caps = String::new();
+    // The conversation it is in, and whether it was resumed rather than started.
+    let mut session_name = "stand-in-session".to_owned();
+    let mut resumed = false;
     while let Some(Ok(line)) = input.next() {
         if line.trim().is_empty() {
             continue;
@@ -62,9 +65,67 @@ fn main() {
                     .and_then(|params| params.get("clientCapabilities"))
                     .map(|capabilities| capabilities.to_string())
                     .unwrap_or_default();
-                answer(id, json!({"protocolVersion": 1, "agentCapabilities": {}}));
+                // An agent that can be asked to pick up a conversation it kept: without this
+                // the client has no business sending `session/load`.
+                answer(
+                    id,
+                    json!({
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": true}
+                    }),
+                );
+            }
+            // A conversation kept from an earlier run: the client names it, the agent picks
+            // it up. A name it does not know is refused, and the client falls back.
+            "session/load" => {
+                let wanted = message
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                cwd = message
+                    .get("params")
+                    .and_then(|params| params.get("cwd"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if wanted.starts_with("forgotten") {
+                    if let Some(id) = id {
+                        send(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32602, "message": "no such session"}
+                        }));
+                    }
+                    continue;
+                }
+                session_name = wanted;
+                resumed = true;
+                answer(
+                    id,
+                    json!({
+                        "sessionId": session_name,
+                        "models": {
+                            "currentModelId": model,
+                            "availableModels": [
+                                {"modelId": "small", "name": "Small"},
+                                {"modelId": "large", "name": "Large"}
+                            ]
+                        },
+                        "modes": {
+                            "currentModeId": mode,
+                            "availableModes": [
+                                {"id": "quick", "name": "Quick"},
+                                {"id": "deep", "name": "Deep"}
+                            ]
+                        }
+                    }),
+                );
             }
             "session/new" => {
+                resumed = false;
+                session_name = "stand-in-session".to_owned();
                 cwd = message
                     .get("params")
                     .and_then(|params| params.get("cwd"))
@@ -79,7 +140,7 @@ fn main() {
                 answer(
                     id,
                     json!({
-                        "sessionId": "stand-in-session",
+                        "sessionId": session_name,
                         "models": {
                             "currentModelId": model,
                             "availableModels": [
@@ -212,6 +273,13 @@ fn main() {
                     // session: an agent that is not told works on the wrong machine.
                     "caps" => {
                         chunk(&session, &caps);
+                        turn_answer(id);
+                    }
+                    // Which conversation this is, and how it was opened: a test can tell a
+                    // resumed session from a fresh one without reading the agent's mind.
+                    "session" => {
+                        let how = if resumed { "loaded" } else { "new" };
+                        chunk(&session, &format!("{session_name} {how}"));
                         turn_answer(id);
                     }
                     "model" => {
