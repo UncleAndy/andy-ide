@@ -678,6 +678,10 @@ impl Session {
                         // change it was not expecting is still a change it can show.
                         Some(Event::Setup(self.state.clone()))
                     }
+                    Update::Usage(usage) => {
+                        self.usage = Some(usage);
+                        Some(Event::Usage(usage))
+                    }
                     Update::Other { kind, .. } => Some(Event::Other { kind }),
                 }
             }

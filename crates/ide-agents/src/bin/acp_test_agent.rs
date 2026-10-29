@@ -21,11 +21,20 @@ use serde_json::{Value, json};
 
 /// Ends a turn, saying how much of the window it used: ACP has no field for this, so the
 /// figure rides in `_meta`, the way a real agent would send it.
-fn turn_answer(id: Option<u64>) {
-    answer(
-        id,
-        json!({"stopReason": "end_turn", "_meta": {"usage": {"used": 42000, "window": 100000}}}),
-    );
+fn turn_answer(session: &str, id: Option<u64>) {
+    // The context figure the way Hermes sends it at the end of a turn: a `usage_update`
+    // notification, `size` the window and `used` what is spent from it
+    // (`acp_adapter/server.py::_build_usage_update`). Not in the answer's `_meta` — that
+    // is a shape no agent on the wire has been seen to use.
+    send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session,
+            "update": {"sessionUpdate": "usage_update", "used": 42000, "size": 100000}
+        }
+    }));
+    answer(id, json!({"stopReason": "end_turn"}));
 }
 
 /// The models the stand-in offers.
@@ -315,11 +324,11 @@ fn main() {
                         thought(&session, "pondering the greeting");
                         chunk(&session, "Hel");
                         chunk(&session, "lo");
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "markdown" => {
                         chunk(&session, "**bold** and `code`");
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "ask" => {
                         next_id += 1;
@@ -344,7 +353,7 @@ fn main() {
                             .map(|option| option == "yes")
                             .unwrap_or(false);
                         chunk(&session, if allowed { "allowed" } else { "refused" });
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "choose-many" => {
                         next_id += 1;
@@ -394,7 +403,7 @@ fn main() {
                                 format!("chose: {picked}")
                             },
                         );
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "choose" => {
                         next_id += 1;
@@ -442,7 +451,7 @@ fn main() {
                             .and_then(|variant| variant.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "none".to_owned());
                         chunk(&session, &chosen);
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "read" => {
                         next_id += 1;
@@ -457,7 +466,7 @@ fn main() {
                             .and_then(|content| content.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "nothing".to_owned());
                         chunk(&session, &content);
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "write" => {
                         next_id += 1;
@@ -475,41 +484,41 @@ fn main() {
                             .map(|value| !value.is_null())
                             .unwrap_or(false);
                         chunk(&session, if written { "written" } else { "write refused" });
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     // The directory the client opened the session in, and what it is set to:
                     // so a test can see the hand-over and the switches arrive.
                     "where" => {
                         chunk(&session, &cwd);
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     // What the client said about files and terminals when it opened the
                     // session: an agent that is not told works on the wrong machine.
                     "caps" => {
                         chunk(&session, &caps);
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     // Which conversation this is, and how it was opened: a test can tell a
                     // resumed session from a fresh one without reading the agent's mind.
                     "session" => {
                         let how = if resumed { "loaded" } else { "new" };
                         chunk(&session, &format!("{session_name} {how}"));
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "model" => {
                         chunk(&session, &format!("{model} / {policy}"));
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "slow" => {
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                     "die" => {
                         std::process::exit(3);
                     }
                     other => {
                         chunk(&session, other);
-                        turn_answer(id);
+                        turn_answer(&session, id);
                     }
                 }
             }

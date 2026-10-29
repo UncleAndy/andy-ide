@@ -447,7 +447,25 @@ pub fn session_state(answer: &Value) -> SessionState {
     state
 }
 
+/// Reads the `usage_update` a `session/update` carries: Hermes sends it at the end of a turn
+/// (`acp_adapter/server.py::_build_usage_update`), with `size` the context window and `used`
+/// what has been spent from it. Before this was read, the panel showed no context figure at
+/// all with a real agent — the figure was there, under a name we did not look for.
+pub fn usage_update_of(update: &Value) -> Option<Usage> {
+    let used = ["used", "totalTokens", "input_tokens"]
+        .iter()
+        .find_map(|key| update.get(*key).and_then(Value::as_u64))?;
+    let window = ["size", "window", "contextWindow"]
+        .iter()
+        .find_map(|key| update.get(*key).and_then(Value::as_u64));
+    Some(Usage { used, window })
+}
+
 /// Reads `_meta.usage` from anything that can carry it: a prompt's answer, an update.
+///
+/// This is the shape an agent may put beside an answer. Hermes does not: it sends a
+/// `usage_update` of its own, which [`usage_update_of`] reads — `used` and `size`, the
+/// window and what is spent from it.
 pub fn usage_of(value: &Value) -> Option<Usage> {
     let usage = value.get("_meta")?.get("usage")?;
     let used = ["used", "totalTokens", "inputTokens"]
@@ -494,6 +512,8 @@ pub enum Update {
     Plan(Vec<String>),
     /// The settings on offer, whole, after one of them changed.
     Settings(Vec<ConfigOption>),
+    /// How much of its window the agent has spent: the figure a context indicator shows.
+    Usage(Usage),
     /// Anything this version does not show yet.
     Other {
         /// The tag, for the record.
@@ -563,6 +583,13 @@ impl Update {
                 Update::Plan(steps)
             }
             "config_option_update" => Update::Settings(options_of(update)),
+            "usage_update" => match usage_update_of(update) {
+                Some(usage) => Update::Usage(usage),
+                None => Update::Other {
+                    kind: kind.to_owned(),
+                    body: update.clone(),
+                },
+            },
             _ => Update::Other {
                 kind: kind.to_owned(),
                 body: update.clone(),
@@ -946,6 +973,38 @@ mod tests {
             Update::from_value(&update),
             Update::Text("Hello".to_owned())
         );
+    }
+
+    #[test]
+    fn the_context_figure_is_read_the_way_hermes_sends_it() {
+        // Hermes 0.22.5, `acp_adapter/server.py::_build_usage_update`: a `usage_update` with
+        // `size` the context window and `used` what is spent from it. Not `_meta.usage`,
+        // which is where this client used to look — and so it showed no figure at all with a
+        // real agent.
+        let update = json!({"sessionUpdate": "usage_update", "size": 100000, "used": 42000});
+        match Update::from_value(&update) {
+            Update::Usage(usage) => assert_eq!(
+                usage,
+                Usage {
+                    used: 42000,
+                    window: Some(100000)
+                }
+            ),
+            other => panic!("the context figure was not read: {other:?}"),
+        }
+
+        // An agent that does not name a window is read as far as it goes.
+        match Update::from_value(&json!({"sessionUpdate": "usage_update", "used": 42000})) {
+            Update::Usage(usage) => assert_eq!(usage.window, None),
+            other => panic!("the figure was dropped for want of a window: {other:?}"),
+        }
+
+        // An update with no figure in it stays what it is: something this version does not
+        // show, kept whole.
+        assert!(matches!(
+            Update::from_value(&json!({"sessionUpdate": "usage_update", "note": "no figures"})),
+            Update::Other { .. }
+        ));
     }
 
     #[test]
