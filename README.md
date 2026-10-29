@@ -118,6 +118,11 @@ no `terminal/*` in `initialize`, and `session/new` carries `_meta.fileAccess = "
 with a note that every file operation should go through the agent's own terminal, in the
 directory named there.
 
+The hint about the symbol under the pointer belongs to the visible text and nothing else.
+The editor allocates a rect the size of the whole document, so "the pointer is inside the
+editor's rect" was true over every panel below it; the place is published only when the
+pointer is over the part of the text that was actually drawn.
+
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both
 choices are menus, and both are answered by the agent, not by us. Anything the agent does

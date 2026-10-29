@@ -242,9 +242,18 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             // A pointer that rests on the text asks what is under it. Published
             // every frame rather than as an event, so a pointer that leaves the
             // text (or the window) leaves nothing behind.
+            //
+            // `rect` is as tall as the whole document and as wide as the longest
+            // line: a pointer over the panel *below* the code is, geometrically,
+            // inside it, and the text under it was a symbol from a line that was
+            // not even on screen — the hint about a `use` fifty lines down,
+            // following the pointer across the agent panel. The text the pointer
+            // can be over is the part that was drawn: the allocated rect cut
+            // down by what the scroll area actually shows.
+            let shown = rect.intersect(ui.clip_rect());
             buffer.hover = ui
                 .input(|input| input.pointer.hover_pos())
-                .filter(|pos| rect.contains(*pos) && !response.dragged())
+                .filter(|pos| shown.contains(*pos) && !response.dragged())
                 .map(|pos| {
                     let (line, col) =
                         position_to_line_col(buffer, &layouts, text_origin, pos, row_h);

@@ -245,6 +245,34 @@ fn a_problem_line_is_clickable_and_leads_to_its_file() {
 }
 
 #[test]
+fn the_hint_stays_in_the_text_and_never_over_the_panel_below() {
+    // The editor allocates a rect as tall as the whole document, so a pointer over the
+    // agent panel below is, geometrically, "inside" the editor's rect — and asking about
+    // the text there returned a symbol from a line that is not even on screen. The hint
+    // belongs to the visible text: below the code there is no code.
+    let text: String = (0..400).map(|line| format!("use thing{line};\n")).collect();
+    let mut gui = Gui::new(&[("a.rs", &text)], Some("a.rs"));
+    gui.settle();
+    assert!(
+        gui.app().state.editor_drawn,
+        "the editor is not on screen: the check would pass for the wrong reason"
+    );
+
+    let window = gui.harness.ctx.viewport_rect();
+    let over_panel = egui::pos2(window.center().x, window.top() + window.height() * 0.9);
+    gui.harness.event(egui::Event::PointerMoved(over_panel));
+    gui.settle();
+
+    let spot = gui.app().state.hover_spot();
+    assert!(
+        spot.is_none(),
+        "the pointer is over the panel below, not over the code, but the hint is about \
+         {:?}",
+        spot.map(|spot| (spot.line, spot.character))
+    );
+}
+
+#[test]
 fn a_click_in_the_editor_puts_the_caret_there() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\nthree\n")], Some("a.rs"));
     gui.settle();
