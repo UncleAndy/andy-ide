@@ -556,7 +556,10 @@ fn input(ui: &mut Ui, state: &mut AppState) {
 /// One model in the menu. True when it has just been chosen.
 fn pick(ui: &mut Ui, option: &Model, current: Option<&str>, asked: &mut Option<String>) -> bool {
     let chosen = current == Some(option.id.as_str());
-    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
+    // The list is grouped by provider, so the row says only the model: the provider is
+    // on the group's own line above it.
+    let label = crate::agent::listed_name(&option.name);
+    if ui.selectable_label(chosen, label).clicked() && !chosen {
         *asked = Some(option.id.clone());
         return true;
     }

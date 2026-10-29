@@ -71,6 +71,18 @@ pub fn grouped(models: &[Model]) -> Vec<(Option<String>, Vec<&Model>)> {
     groups
 }
 
+/// What to call a model where the provider is already on screen.
+///
+/// Hermes labels its rows `Provider · model` (its inventory builds them that way), and a
+/// list grouped by provider would then print the same word on every line. The label
+/// itself is left alone: the status line has no group to lean on.
+pub fn listed_name(name: &str) -> &str {
+    match name.split_once(" · ") {
+        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => model,
+        _ => name,
+    }
+}
+
 /// One line of the transcript.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Line {
@@ -768,6 +780,41 @@ impl AgentState {
                     self.choice = Some((id, request));
                 }
                 AgentEvent::Setup(state) => {
+                    // A switch is worth a line in the conversation: it changes what
+                    // answers and how hard it thinks, and a conversation whose model
+                    // changed silently reads as if nothing had.
+                    if let (Some(before), Some(after)) = (
+                        self.current_model.as_deref(),
+                        state.current_model.as_deref(),
+                    ) && before != after
+                    {
+                        let name = state
+                            .models
+                            .iter()
+                            .find(|model| model.id == after)
+                            .map(|model| model.name.clone())
+                            .unwrap_or_else(|| after.to_owned());
+                        self.transcript.push(Line::Note(format!("model: {name}")));
+                    }
+                    if let (Some(before), Some(after)) =
+                        (self.current_mode.as_deref(), state.current_mode.as_deref())
+                        && before != after
+                    {
+                        let name = state
+                            .modes
+                            .iter()
+                            .find(|mode| mode.id == after)
+                            .map(|mode| mode.name.clone())
+                            .unwrap_or_else(|| after.to_owned());
+                        // ACP carries the level and the rights on one channel; the line
+                        // says which of the two was moved.
+                        let what = if LEVELS.iter().any(|(level, _)| *level == after) {
+                            "thinking"
+                        } else {
+                            "mode"
+                        };
+                        self.transcript.push(Line::Note(format!("{what}: {name}")));
+                    }
                     self.models = state.models;
                     self.current_model = state.current_model;
                     self.modes = state.modes;
@@ -957,6 +1004,28 @@ mod grouping_tests {
         );
         assert_eq!(groups[1].0.as_deref(), Some("nous"));
         assert_eq!(groups[2].0.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn a_model_is_named_without_repeating_its_provider() {
+        // Hermes names its rows "Provider · model"; the group header above them already
+        // says the provider.
+        assert_eq!(listed_name("Nous \u{b7} Hermes 4"), "Hermes 4");
+        assert_eq!(
+            listed_name("OpenRouter \u{b7} anthropic/claude"),
+            "anthropic/claude",
+            "only the provider label goes"
+        );
+        assert_eq!(
+            listed_name("Hermes 4"),
+            "Hermes 4",
+            "a name with no provider was changed"
+        );
+        assert_eq!(
+            listed_name("\u{b7} leading"),
+            "\u{b7} leading",
+            "an empty provider is not a provider"
+        );
     }
 
     #[test]

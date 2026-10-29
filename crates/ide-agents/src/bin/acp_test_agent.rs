@@ -38,8 +38,8 @@ fn models_offered() -> Value {
         return json!([
             {"modelId": "small", "name": "Small"},
             {"modelId": "large", "name": "Large"},
-            {"modelId": "nous/hermes-4", "name": "Hermes 4"},
-            {"modelId": "openai/gpt-5", "name": "GPT-5"}
+            {"modelId": "nous/hermes-4", "name": "Nous \u{b7} Hermes 4"},
+            {"modelId": "openai/gpt-5", "name": "OpenAI \u{b7} GPT-5"}
         ]);
     }
     let mut offered = vec![

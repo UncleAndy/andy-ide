@@ -213,7 +213,12 @@ fn the_session_says_which_models_and_modes_it_offers() {
             .iter()
             .map(|model| model.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["Small", "Large", "Hermes 4", "GPT-5"]
+        vec![
+            "Small",
+            "Large",
+            "Nous \u{b7} Hermes 4",
+            "OpenAI \u{b7} GPT-5"
+        ]
     );
     // The first two ids name no provider; the other two name one before the slash, which
     // is what the panel groups by. The grouping itself is the panel's business and is

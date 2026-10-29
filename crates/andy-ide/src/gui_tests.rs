@@ -4211,6 +4211,24 @@ mod the_agent_panel {
             .collect()
     }
 
+    /// What the panel said about a switch of model or level, in the order it said it.
+    fn switches(gui: &Gui) -> Vec<String> {
+        gui.app()
+            .state
+            .agent
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                crate::agent::Line::Note(text)
+                    if text.starts_with("model: ") || text.starts_with("thinking: ") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn the_project_keeps_the_conversation_and_picks_it_up_next_time() {
         // A conversation is worth keeping: an agent that has read the project once knows
@@ -4411,6 +4429,15 @@ mod the_agent_panel {
             gui.harness.query_by_label_contains("Hermes 4").is_some(),
             "the list did not open"
         );
+        // The provider is on the group's own line, not on every row under it.
+        assert!(
+            gui.harness.query_by_label("Hermes 4").is_some(),
+            "the model row is not named by the model alone"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("Nous \u{b7}").is_none(),
+            "the provider is repeated on every model row"
+        );
 
         // Fold the "nous" group: its model goes, the list and the other provider stay.
         gui.harness.get_by_label("nous").click();
@@ -4523,6 +4550,57 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.models_open,
             "the list closed while it was scrolled"
+        );
+    }
+
+    #[test]
+    fn a_change_of_model_or_thinking_is_said_in_the_conversation() {
+        // A switch changes what answers and how hard it thinks. Nothing else in the panel
+        // says so in the conversation, and an answer written by a model a person did not
+        // ask for reads as a mistake.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the models and modes", |gui| {
+            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.modes.len() == 7
+        });
+        assert!(
+            switches(&gui).is_empty(),
+            "a switch was announced before one happened: {:?}",
+            switches(&gui)
+        );
+
+        gui.harness.get_by_label_contains("Small ▾").click();
+        gui.settle();
+        gui.harness.get_by_label_contains("GPT-5").click();
+        wait(&mut gui, "the model switching", |gui| {
+            gui.app().state.agent.current_model.as_deref() == Some("openai/gpt-5")
+        });
+        assert_eq!(
+            switches(&gui),
+            vec!["model: OpenAI \u{b7} GPT-5".to_owned()],
+            "the model switch was not said in the conversation"
+        );
+
+        // The level, which ACP carries on the same channel as the rights.
+        gui.harness.get_by_label_contains("Normal ▾").click();
+        gui.settle();
+        gui.harness.get_by_label("High").click();
+        wait(&mut gui, "the level changing", |gui| {
+            gui.app().state.agent.current_mode.as_deref() == Some("high")
+        });
+        assert_eq!(
+            switches(&gui),
+            vec![
+                "model: OpenAI \u{b7} GPT-5".to_owned(),
+                "thinking: High".to_owned()
+            ],
+            "the level was not said in the conversation, or was called a mode"
         );
     }
 
@@ -4869,7 +4947,12 @@ mod the_agent_panel {
                 .iter()
                 .map(|model| model.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Small", "Large", "Hermes 4", "GPT-5"]
+            vec![
+                "Small",
+                "Large",
+                "Nous \u{b7} Hermes 4",
+                "OpenAI \u{b7} GPT-5"
+            ]
         );
         assert_eq!(
             gui.app().state.agent.current_model.as_deref(),
