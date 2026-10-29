@@ -14,6 +14,19 @@ use egui::{Id, Order, Pos2};
 /// How long the pointer has to rest on a symbol before the server is asked.
 pub const HOVER_DELAY: f64 = 0.45;
 
+/// How long a hint stays after the pointer has left the symbol.
+///
+/// A hint vanishes the instant the pointer leaves the symbol it is about, and the
+/// pointer is usually on its way into the hint — to read it, to scroll it, to copy a
+/// line out of it. The delay is the time it takes to cross that gap: without it the
+/// hint is gone before the hand has moved, which makes a big answer unreadable past
+/// its first line.
+pub const HOVER_LINGER: f64 = 0.35;
+
+/// The widest a hint gets, in points: a long paragraph of documentation is easier to
+/// read in a column than across the window.
+pub const HINT_WIDTH: f32 = 560.0;
+
 /// A place in a file the pointer rests on, and where to draw the answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spot {
@@ -48,9 +61,25 @@ pub struct Hover {
     /// When the pointer arrived at `current`.
     arrived: f64,
     text: Option<String>,
+    /// What is on screen, which outlives the pointer being on the symbol: the hint is
+    /// shown from here, so it can stay while the pointer crosses the gap into it.
+    shown: Option<Hint>,
+    /// When the pointer left the symbol the hint is about, and the clock started.
+    leaving: Option<f64>,
+    /// Whether the pointer was over the hint itself last frame.
+    over: bool,
+    /// Where the hint was drawn last frame, for the pointer test and for the tests.
+    rect: Option<egui::Rect>,
     /// The shaped Markdown of the last answer drawn: re-shaping it every frame of a
     /// sitting pointer would be work thrown away sixty times a second.
     markdown: egui_commonmark::CommonMarkCache,
+}
+
+/// A hint on screen: what it says and where it is anchored.
+#[derive(Debug, Clone)]
+struct Hint {
+    spot: Spot,
+    text: String,
 }
 
 impl Hover {
@@ -150,6 +179,57 @@ impl Hover {
         }
     }
 
+    /// Decides what is on screen this frame, and whether the clock is running.
+    ///
+    /// Called once per frame, after the pointer has been looked at and before the hint
+    /// is drawn. An answer that has just arrived is what is shown; when the pointer has
+    /// left the symbol, the hint stays for the length of the linger, and while the
+    /// pointer is on the hint itself it does not go away at all — that is what makes it
+    /// possible to scroll a long answer, select a line out of it and follow a link.
+    pub fn settle(&mut self, now: f64) {
+        if let Some(text) = self.text().map(str::to_owned)
+            && let Some(spot) = self.current.clone()
+        {
+            self.shown = Some(Hint { spot, text });
+            self.leaving = None;
+            return;
+        }
+        if self.shown.is_none() {
+            self.leaving = None;
+            return;
+        }
+        // On the hint: the clock does not run, and a pointer that comes back to the
+        // symbol starts the next frame as if it had never left.
+        if self.over {
+            self.leaving = None;
+            return;
+        }
+        match self.leaving {
+            None => self.leaving = Some(now),
+            Some(since) if now - since >= HOVER_LINGER => {
+                self.shown = None;
+                self.leaving = None;
+                self.rect = None;
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// How long the hint has left, for a window that would otherwise sleep through the
+    /// moment it disappears.
+    pub fn leaving_in(&self, now: f64) -> Option<Duration> {
+        let since = self.leaving?;
+        let left = (HOVER_LINGER - (now - since)).max(0.0);
+        Some(Duration::from_secs_f64(left))
+    }
+
+    /// Where the hint was drawn, if it is on screen: where the pointer has to be for
+    /// the hint to stay, and where a test looks for it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn shown_rect(&self) -> Option<egui::Rect> {
+        self.rect
+    }
+
     /// Forgets everything: a modal, a tab switch or a closed file makes any hint
     /// on screen a lie.
     pub fn forget(&mut self) {
@@ -158,6 +238,10 @@ impl Hover {
         self.asked = None;
         self.nothing = None;
         self.text = None;
+        self.shown = None;
+        self.leaving = None;
+        self.rect = None;
+        self.over = false;
     }
 
     /// Forgets everything while a modal covers the editor: the pointer is over
@@ -178,43 +262,77 @@ impl Hover {
         self.text.as_deref()
     }
 
-    /// Draws the hint beside the pointer; returns whether it drew anything.
+    /// Draws the hint; returns whether it drew anything.
     ///
     /// Servers write their documentation in Markdown — `**bold**`, `- lists`, `` `code` ``
     /// and tables — and a tooltip that shows the punctuation shows the source, not the
     /// documentation. The signature keeps its monospace face (it is code, and its
     /// indentation carries meaning), the prose is read as Markdown while it is drawn.
+    ///
+    /// The hint is a window, not a picture of one: the pointer can move into it without
+    /// it vanishing, the wheel scrolls an answer that does not fit, and the text can be
+    /// selected and copied. It is kept inside the window, and never grows taller than the
+    /// window can show — a scroll bar appears instead of the answer running off the
+    /// bottom of the screen.
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
-        let Some(text) = self.text().map(str::to_owned) else {
+        let Some(showing) = self.shown.clone() else {
+            self.over = false;
+            self.rect = None;
             return false;
         };
-        let Some(spot) = self.current.as_ref() else {
-            return false;
-        };
-        let (signature, prose) = split_hover(&text);
-        let anchor = spot.screen + egui::vec2(14.0, 20.0);
-        egui::Area::new(Id::new("hover_hint"))
+        let (signature, prose) = split_hover(&showing.text);
+        let viewport = ctx.viewport_rect();
+        let margin = 12.0;
+        let max_width = HINT_WIDTH.min(viewport.width() - 2.0 * margin);
+        // The height the window can spare: an answer of forty lines is read by
+        // scrolling the hint, not by scrolling the window.
+        let max_height = (viewport.height() - 2.0 * margin - 24.0).max(120.0);
+
+        // Beside the pointer, but never off the window.
+        let wanted = showing.spot.screen + egui::vec2(14.0, 20.0);
+        let anchor = egui::pos2(
+            wanted
+                .x
+                .min(viewport.right() - margin - 40.0)
+                .max(viewport.left() + margin),
+            wanted
+                .y
+                .min(viewport.bottom() - margin - 40.0)
+                .max(viewport.top() + margin),
+        );
+
+        let drawn = egui::Area::new(Id::new("hover_hint"))
             .order(Order::Tooltip)
             .fixed_pos(anchor)
-            .interactable(false)
+            .interactable(true)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(560.0);
-                    if let Some(signature) = &signature {
-                        ui.label(egui::RichText::new(signature).monospace());
-                    }
-                    if !prose.is_empty() {
-                        if signature.is_some() {
-                            ui.separator();
-                        }
-                        egui_commonmark::CommonMarkViewer::new().show(
-                            ui,
-                            &mut self.markdown,
-                            &prose,
-                        );
-                    }
+                    ui.set_max_width(max_width);
+                    egui::ScrollArea::vertical()
+                        .id_salt("hover_hint_scroll")
+                        .max_height(max_height)
+                        .show(ui, |ui| {
+                            if let Some(signature) = &signature {
+                                ui.label(egui::RichText::new(signature).monospace());
+                            }
+                            if !prose.is_empty() {
+                                if signature.is_some() {
+                                    ui.separator();
+                                }
+                                egui_commonmark::CommonMarkViewer::new().show(
+                                    ui,
+                                    &mut self.markdown,
+                                    &prose,
+                                );
+                            }
+                        });
                 });
             });
+
+        self.rect = Some(drawn.response.rect);
+        self.over = ctx
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| drawn.response.rect.contains(pos));
         true
     }
 }

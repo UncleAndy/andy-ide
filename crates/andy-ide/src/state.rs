@@ -458,9 +458,12 @@ impl AppState {
         let spot = self.hover_spot();
         self.hover.look_at(spot, now);
         self.hover.forget_if_modal(self.modal_open());
+        // What is on screen is decided here, before it is drawn: a hint that the pointer
+        // has left stays for the linger, and stays for good while the pointer is on it.
+        self.hover.settle(now);
 
         let Some(spot) = self.hover.due(now) else {
-            return self.hover.wait();
+            return self.hover.wait().or_else(|| self.hover.leaving_in(now));
         };
         if !self.start_server_for(&spot.path) {
             // Without a server there is nothing to ask; the spot is remembered as

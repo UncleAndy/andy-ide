@@ -123,7 +123,10 @@ The editor allocates a rect the size of the whole document, so "the pointer is i
 editor's rect" was true over every panel below it; the place is published only when the
 pointer is over the part of the text that was actually drawn. Its prose is read as Markdown —
 servers document in Markdown, and a hint that shows the asterisks shows the source, not the
-documentation — while the signature keeps its monospace face.
+documentation — while the signature keeps its monospace face. It is a window rather than a
+picture of one: it stays for a moment after the pointer leaves the symbol, so the hand can
+reach it, and while the pointer is on it it does not go away at all — the wheel scrolls an
+answer too tall for the screen, the text can be selected and copied, links can be followed.
 
 A status line under the conversation says how long the turn is taking, which model is
 answering, how hard it is thinking and how much of its context window is spent — both

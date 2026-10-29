@@ -1460,7 +1460,7 @@ mod the_maximized_window {
 mod the_hint {
     use super::*;
     use crate::lsp::Outcome;
-    use crate::ui::hover::HOVER_DELAY;
+    use crate::ui::hover::{HOVER_DELAY, HOVER_LINGER};
 
     /// A window with a plain-text file: no language server is registered for it,
     /// so the test drives the answer itself instead of waiting for rust-analyzer.
@@ -1557,7 +1557,7 @@ mod the_hint {
     }
 
     #[test]
-    fn the_hint_goes_away_when_the_pointer_leaves() {
+    fn the_hint_waits_a_moment_before_it_goes_away() {
         let mut gui = window();
         rest_on_text(&mut gui);
         run_for(&mut gui, HOVER_DELAY + 0.1);
@@ -1565,11 +1565,109 @@ mod the_hint {
         assert!(hint_on_screen(&gui, "alpha"));
 
         gui.harness.remove_cursor();
+        // A frame in, the pointer has left and the hint is still there: the hand needs
+        // the time to cross the gap into it.
         gui.harness.step();
+        assert!(
+            hint_on_screen(&gui, "alpha"),
+            "the hint vanished the instant the pointer left"
+        );
 
+        run_for(&mut gui, HOVER_LINGER + 0.2);
         assert!(
             !hint_on_screen(&gui, "alpha"),
-            "the hint stayed after the pointer left"
+            "the hint stayed after the pointer left for good"
+        );
+    }
+
+    #[test]
+    fn the_hint_stays_while_the_pointer_is_on_it() {
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```");
+        assert!(hint_on_screen(&gui, "alpha"));
+
+        let rect = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+
+        // Into the hint — past it, past the linger, and it is still there to be used.
+        gui.harness.hover_at(rect.center());
+        run_for(&mut gui, HOVER_LINGER * 4.0);
+        assert!(
+            hint_on_screen(&gui, "alpha"),
+            "the hint went away while the pointer was on it"
+        );
+
+        // Out of it, and the clock that was stopped starts again.
+        gui.harness.remove_cursor();
+        run_for(&mut gui, HOVER_LINGER + 0.2);
+        assert!(
+            !hint_on_screen(&gui, "alpha"),
+            "the hint stayed after the pointer left it"
+        );
+    }
+
+    #[test]
+    fn a_hint_too_tall_for_the_window_is_scrolled() {
+        // Forty lines of documentation do not fit beside the pointer: the hint is cut
+        // to the window and scrolled, not left hanging off the bottom of the screen.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        let body: String = (0..80)
+            .map(|line| format!("- line {line} of the documentation\n"))
+            .collect();
+        answer(&mut gui, &format!("```text\nalpha\n```\n---\n\n{body}"));
+
+        let hint = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        let window = gui.harness.ctx.viewport_rect();
+        assert!(
+            hint.height() < window.height() - 20.0,
+            "the hint is as tall as the window: {hint:?} in {window:?}"
+        );
+        assert!(
+            hint.bottom() <= window.bottom(),
+            "the hint runs off the bottom of the window: {hint:?} in {window:?}"
+        );
+
+        // The wheel over it scrolls what the answer hides.
+        let first = gui
+            .harness
+            .query_by_label_contains("line 1 of")
+            .expect("the first line is not there")
+            .rect();
+        gui.harness.hover_at(hint.center());
+        gui.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.step();
+        gui.harness.step();
+
+        let after = gui
+            .harness
+            .query_by_label_contains("line 1 of")
+            .expect("the first line is gone")
+            .rect();
+        assert!(
+            after.top() < first.top(),
+            "the wheel did not scroll the hint: {first:?} then {after:?}"
+        );
+        assert!(
+            hint_on_screen(&gui, "alpha"),
+            "the hint closed when it was scrolled"
         );
     }
 
