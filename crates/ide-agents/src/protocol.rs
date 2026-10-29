@@ -120,7 +120,35 @@ pub struct ClientCapabilities {
     pub fs: FsCapabilities,
     /// Whether `terminal/*` will be answered. Not yet, and saying so is the point.
     pub terminal: bool,
+    /// Whether `elicitation/create` will be answered: the agent may ask the person to
+    /// pick one of several variants, and the panel draws the choices.
+    pub elicitation: ElicitationCapabilities,
 }
+
+/// The kinds of user interaction the client can present.
+///
+/// ACP requires each supported mode to be named explicitly: a present but empty object
+/// advertises nothing. Only form mode is offered — a URL would send the person out of the
+/// editor, and a variant to choose from is a form.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationCapabilities {
+    /// Present when `elicitation/create` in form mode will be answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form: Option<FormCapabilities>,
+}
+
+impl Default for ElicitationCapabilities {
+    fn default() -> Self {
+        Self {
+            form: Some(FormCapabilities::default()),
+        }
+    }
+}
+
+/// Form mode, which takes no settings of its own: its presence is the promise.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct FormCapabilities {}
 
 /// What the client will do with the file system.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -489,6 +517,120 @@ pub fn permission_answer(option: Option<&str>) -> Value {
     }
 }
 
+/// One variant the agent offers in an elicitation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChoiceOption {
+    /// What goes back to the agent when this variant is chosen.
+    pub value: String,
+    /// What the panel shows for it.
+    pub title: String,
+}
+
+/// A question the agent asks the person, with variants to choose from.
+///
+/// ACP's elicitation carries a flat JSON Schema. The editor draws a variant selection,
+/// so only the shape it can draw is accepted: one property whose values are an `enum` or
+/// a `oneOf`. An agent that asks for something else gets a refusal in the protocol's own
+/// words rather than a form nobody can fill in.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ChoiceRequest {
+    /// The session it belongs to.
+    pub session: String,
+    /// What the agent is asking, in its own words.
+    pub message: String,
+    /// The name of the property the answer goes back under.
+    pub field: String,
+    /// The variants, in the agent's order.
+    pub options: Vec<ChoiceOption>,
+}
+
+impl ChoiceRequest {
+    /// Reads an `elicitation/create` request in form mode.
+    pub fn from_params(params: &Value) -> Self {
+        let message = params
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("the agent asks you to choose")
+            .to_owned();
+        let schema = params.get("requestedSchema");
+        let properties = schema
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object);
+        let (field, options) = properties
+            .and_then(|properties| properties.iter().next())
+            .map(|(field, property)| {
+                (
+                    field.clone(),
+                    options_of(property).unwrap_or_else(|| {
+                        // A single string with an enum is the common shape; a bare
+                        // property the editor cannot draw leaves only a refusal.
+                        Vec::new()
+                    }),
+                )
+            })
+            .unwrap_or_default();
+        Self {
+            session: params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            message,
+            field,
+            options,
+        }
+    }
+
+    /// A title for the question.
+    pub fn title(&self) -> &str {
+        &self.message
+    }
+}
+
+/// The variants a property allows, as `(value, title)`.
+fn options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
+    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+        return Some(
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| ChoiceOption {
+                    value: value.to_owned(),
+                    title: value.to_owned(),
+                })
+                .collect(),
+        );
+    }
+    let options = property.get("oneOf").and_then(Value::as_array)?;
+    Some(
+        options
+            .iter()
+            .filter_map(|option| {
+                let value = option.get("const").and_then(Value::as_str)?;
+                Some(ChoiceOption {
+                    value: value.to_owned(),
+                    title: option
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or(value)
+                        .to_owned(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The answer to an elicitation: the chosen variant, or the person's refusal.
+pub fn choice_answer(field: &str, choice: Option<&str>) -> Value {
+    match choice {
+        Some(value) => json!({
+            "action": "accept",
+            "content": { field: value }
+        }),
+        None => json!({"action": "decline"}),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +728,76 @@ mod tests {
         assert_eq!(
             permission_answer(None),
             json!({"outcome": {"outcome": "cancelled"}})
+        );
+    }
+
+    #[test]
+    fn an_elicitation_offers_its_variants() {
+        let params = json!({
+            "sessionId": "s1",
+            "mode": "form",
+            "message": "Which variant should I write?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "variant": {
+                        "type": "string",
+                        "enum": ["compact", "readable", "fast"]
+                    }
+                },
+                "required": ["variant"]
+            }
+        });
+        let request = ChoiceRequest::from_params(&params);
+        assert_eq!(request.title(), "Which variant should I write?");
+        assert_eq!(request.field, "variant");
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["compact", "readable", "fast"]
+        );
+        assert_eq!(
+            choice_answer("variant", Some("readable")),
+            json!({"action": "accept", "content": {"variant": "readable"}})
+        );
+        assert_eq!(choice_answer("variant", None), json!({"action": "decline"}));
+    }
+
+    #[test]
+    fn a_choice_can_be_named_with_titles() {
+        let params = json!({
+            "mode": "form",
+            "message": "Pick one",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "variant": {
+                        "type": "string",
+                        "oneOf": [
+                            {"const": "a", "title": "The first way"},
+                            {"const": "b", "title": "The second way"}
+                        ]
+                    }
+                }
+            }
+        });
+        let request = ChoiceRequest::from_params(&params);
+        assert_eq!(request.options[0].value, "a");
+        assert_eq!(request.options[0].title, "The first way");
+        assert_eq!(request.options[1].title, "The second way");
+    }
+
+    #[test]
+    fn the_client_says_it_can_ask_the_person() {
+        let capabilities = ClientCapabilities::default();
+        let params = initialize_params(&capabilities);
+        assert_eq!(
+            params["clientCapabilities"]["elicitation"],
+            json!({"form": {}}),
+            "elicitation form mode was not advertised: {params}"
         );
     }
 }

@@ -4177,6 +4177,27 @@ mod the_agent_panel {
         );
     }
 
+    /// Waits while the panel itself keeps asking for frames.
+    ///
+    /// `settle` runs until nothing more asks to be drawn, and a panel waiting to
+    /// reconnect asks on a timer: once the timer is due the request is immediate and
+    /// `settle` never finishes. Here one frame is drawn at a time instead.
+    fn wait_stepping(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            gui.harness.step();
+            if check(gui) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "{what} did not happen; the panel says {:?} with {:?}",
+            gui.app().state.agent.status,
+            gui.app().state.agent.transcript
+        );
+    }
+
     fn answer(gui: &Gui) -> String {
         gui.app()
             .state
@@ -4617,7 +4638,7 @@ mod the_agent_panel {
         });
         // What it offers arrived with the session, before anything was asked.
         wait(&mut gui, "the models and modes", |gui| {
-            gui.app().state.agent.models.len() == 2 && gui.app().state.agent.modes.len() == 2
+            gui.app().state.agent.models.len() == 4 && gui.app().state.agent.modes.len() == 7
         });
         assert_eq!(
             gui.app()
@@ -4627,7 +4648,7 @@ mod the_agent_panel {
                 .iter()
                 .map(|model| model.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Small", "Large"]
+            vec!["Small", "Large", "Hermes 4", "GPT-5"]
         );
         assert_eq!(
             gui.app().state.agent.current_model.as_deref(),
@@ -4642,7 +4663,7 @@ mod the_agent_panel {
             "the model is not on the status line"
         );
         assert!(
-            gui.harness.query_by_label_contains("Quick").is_some(),
+            gui.harness.query_by_label_contains("Normal").is_some(),
             "the level is not on the status line"
         );
 
@@ -4661,7 +4682,7 @@ mod the_agent_panel {
         wait(&mut gui, "the answer and its figure", |gui| {
             gui.app().state.agent.usage.is_some()
         });
-        assert_eq!(answer(&gui), "large / quick", "the switch did not arrive");
+        assert_eq!(answer(&gui), "large / normal", "the switch did not arrive");
         assert!(
             gui.app().state.agent.elapsed().is_some(),
             "the turn left no time behind"
@@ -4745,6 +4766,82 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_selection_in_the_panel_is_copied_with_ctrl_insert() {
+        // egui copies a label selection only when a copy *event* arrives, and the keyboard
+        // backend makes one out of Ctrl+C alone. The editor holds the keyboard when
+        // nothing else does, so the shortcut has to be recognised for the panel first.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer", |gui| !answer(gui).is_empty());
+        gui.settle();
+
+        // Select the words the agent said, the way a hand does: press, drag, release.
+        let label = gui
+            .harness
+            .query_by_label_contains("Hello")
+            .expect("the answer is not on screen")
+            .rect();
+        let from = egui::pos2(label.left() + 1.0, label.center().y);
+        let to = egui::pos2(label.right() - 1.0, label.center().y);
+        gui.harness.event(egui::Event::PointerMoved(from));
+        gui.harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.step();
+        gui.harness.event(egui::Event::PointerMoved(to));
+        gui.harness.step();
+        gui.harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.step();
+
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
+        gui.harness.event(egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness.step();
+        let output = gui.harness.output().clone();
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+
+        let copied = output.platform_output.commands.iter().find_map(|command| {
+            if let egui::OutputCommand::CopyText(text) = command {
+                Some(text.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            copied.as_deref(),
+            Some("Hello"),
+            "Ctrl+Insert copied {copied:?} instead of the selected words"
+        );
+    }
+
+    #[test]
     fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
@@ -4779,6 +4876,98 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.asking.is_none(),
             "the question stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn the_agent_can_ask_the_person_to_choose_a_variant() {
+        // ACP's elicitation: the agent cannot decide which way to go, offers variants,
+        // and waits. The panel draws them as buttons and sends back the value, not the
+        // title — the title is for the person, the value is for the agent.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the variants", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+        let (_, request) = gui.app().state.agent.choice.clone().expect("a choice");
+        assert_eq!(request.title(), "Which variant should I write?");
+        assert!(
+            gui.harness.query_by_label("readable").is_some(),
+            "the variants are not on screen"
+        );
+
+        gui.harness.get_by_label("readable").click();
+        wait(&mut gui, "the chosen variant coming back", |gui| {
+            answer(gui).contains("readable")
+        });
+        assert_eq!(answer(&gui), "readable");
+        assert!(
+            gui.app().state.agent.choice.is_none(),
+            "the choice stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn a_crashed_agent_is_started_again_with_an_empty_panel() {
+        // A process dying is not the conversation ending. The panel starts another one,
+        // asks for the same session, and clears what was on screen first: the restored
+        // agent replays its history, and keeping the old lines would draw them twice.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let session = gui.app().state.agent.session.clone().expect("a session");
+
+        // A short wait so the test can see the panel waiting, and not just the restart.
+        gui.app_mut().state.agent.reconnect_delay = Duration::from_millis(300);
+        gui.app_mut().state.agent.input = "die".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait_stepping(&mut gui, "the crash being noticed", |gui| {
+            gui.app().state.agent.waiting_to_reconnect()
+        });
+        assert!(
+            !gui.app().state.agent.running(),
+            "the panel still believes the dead agent is running"
+        );
+
+        wait_stepping(&mut gui, "the agent coming back", |gui| {
+            gui.app().state.agent.running() && gui.app().state.agent.status.starts_with("ready")
+        });
+        assert_eq!(
+            gui.app().state.agent.session.as_deref(),
+            Some(session.as_str()),
+            "the restarted agent was not asked for the same conversation"
+        );
+        assert!(
+            gui.app().state.agent.transcript.is_empty(),
+            "the panel kept its lines while the session was restored: {:?}",
+            gui.app().state.agent.transcript
+        );
+        assert!(
+            gui.app().state.agent.status.contains("resumed"),
+            "the restarted agent did not pick the conversation up: {:?}",
+            gui.app().state.agent.status
         );
     }
 }

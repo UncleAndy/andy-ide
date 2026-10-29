@@ -21,7 +21,10 @@ pub mod registry;
 pub mod session;
 
 pub use command::{parse as parse_command, parse_named, quote as quote_command};
-pub use protocol::{Mode, Model, PermissionOption, PermissionRequest, SessionState, Update, Usage};
+pub use protocol::{
+    ChoiceOption, ChoiceRequest, Mode, Model, PermissionOption, PermissionRequest, SessionState,
+    Update, Usage,
+};
 pub use registry::Registry;
 pub use session::{AgentSpec, Event, PermissionPolicy, Session};
 

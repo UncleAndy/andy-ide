@@ -8,6 +8,7 @@
 //! - `hello` — two chunks, then `end_turn`.
 //! - `ask` — asks permission (with `allow_once` and `reject_once`), then says whether it
 //!   was allowed.
+//! - `choose` — offers three variants and says which one the person picked.
 //! - `read` — asks the client for `a.txt`, and answers with what it was given.
 //! - `write` — asks the client to write `written.txt`, and says whether it could.
 //! - `slow` — waits five seconds before answering.
@@ -36,7 +37,7 @@ fn main() {
     let mut next_id = 100;
     // What the conversation is set to, so a test can see a switch reach the agent.
     let mut model = "small".to_owned();
-    let mut mode = "quick".to_owned();
+    let mut mode = "normal".to_owned();
     // The directory the client handed over when it opened the session.
     let mut cwd = String::new();
     // What it claimed it would do for us, and what it said about files.
@@ -110,14 +111,21 @@ fn main() {
                             "currentModelId": model,
                             "availableModels": [
                                 {"modelId": "small", "name": "Small"},
-                                {"modelId": "large", "name": "Large"}
+                                {"modelId": "large", "name": "Large"},
+                                {"modelId": "nous/hermes-4", "name": "Hermes 4"},
+                                {"modelId": "openai/gpt-5", "name": "GPT-5"}
                             ]
                         },
                         "modes": {
                             "currentModeId": mode,
                             "availableModes": [
-                                {"id": "quick", "name": "Quick"},
-                                {"id": "deep", "name": "Deep"}
+                                {"id": "none", "name": "None"},
+                                {"id": "low", "name": "Low"},
+                                {"id": "normal", "name": "Normal"},
+                                {"id": "high", "name": "High"},
+                                {"id": "extra", "name": "Extra"},
+                                {"id": "read-only", "name": "Read only"},
+                                {"id": "full", "name": "Full access"}
                             ]
                         }
                     }),
@@ -145,14 +153,21 @@ fn main() {
                             "currentModelId": model,
                             "availableModels": [
                                 {"modelId": "small", "name": "Small"},
-                                {"modelId": "large", "name": "Large"}
+                                {"modelId": "large", "name": "Large"},
+                                {"modelId": "nous/hermes-4", "name": "Hermes 4"},
+                                {"modelId": "openai/gpt-5", "name": "GPT-5"}
                             ]
                         },
                         "modes": {
                             "currentModeId": mode,
                             "availableModes": [
-                                {"id": "quick", "name": "Quick"},
-                                {"id": "deep", "name": "Deep"}
+                                {"id": "none", "name": "None"},
+                                {"id": "low", "name": "Low"},
+                                {"id": "normal", "name": "Normal"},
+                                {"id": "high", "name": "High"},
+                                {"id": "extra", "name": "Extra"},
+                                {"id": "read-only", "name": "Read only"},
+                                {"id": "full", "name": "Full access"}
                             ]
                         }
                     }),
@@ -228,6 +243,36 @@ fn main() {
                             .map(|option| option == "yes")
                             .unwrap_or(false);
                         chunk(&session, if allowed { "allowed" } else { "refused" });
+                        turn_answer(id);
+                    }
+                    "choose" => {
+                        next_id += 1;
+                        let asked = next_id;
+                        request(
+                            asked,
+                            "elicitation/create",
+                            json!({
+                                "sessionId": session,
+                                "mode": "form",
+                                "message": "Which variant should I write?",
+                                "requestedSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "variant": {
+                                            "type": "string",
+                                            "enum": ["compact", "readable", "fast"]
+                                        }
+                                    },
+                                    "required": ["variant"]
+                                }
+                            }),
+                        );
+                        let chosen = wait_for_answer(&mut input, asked)
+                            .and_then(|value| value.get("content").cloned())
+                            .and_then(|content| content.get("variant").cloned())
+                            .and_then(|variant| variant.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "none".to_owned());
+                        chunk(&session, &chosen);
                         turn_answer(id);
                     }
                     "read" => {

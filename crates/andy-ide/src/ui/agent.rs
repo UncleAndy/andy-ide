@@ -6,19 +6,62 @@ use egui::Ui;
 
 use crate::agent::Line;
 use crate::state::AppState;
+use ide_agents::Model;
 
 /// The panel.
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // Where the panel was drawn, for the tests that point at it.
     state.agent.shown_rect = Some(ui.max_rect());
     state.agent.pump();
+    // The copy shortcut was taken before the editor drew, so that it did not copy a line
+    // of code instead; here it becomes the event egui's text selection listens for, while
+    // the words are being drawn.
+    if state.agent.wants_copy {
+        state.agent.wants_copy = false;
+        ui.ctx()
+            .input_mut(|input| input.events.push(egui::Event::Copy));
+    }
+    // A restart that is due has to be looked at again: the panel is otherwise idle
+    // between frames, and a timer nobody repaints for never fires.
+    if state.agent.waiting_to_reconnect() {
+        ui.ctx().request_repaint_after(Duration::from_millis(200));
+    }
     header(ui, state);
     ui.separator();
     transcript(ui, state);
     ui.separator();
     question(ui, state);
+    choice(ui, state);
     input(ui, state);
     status(ui, state);
+}
+
+/// The variants the agent offers, when it is waiting for one to be picked.
+///
+/// ACP calls this an elicitation: the agent cannot decide which way to go and asks the
+/// person. It is drawn next to the permission question because both are the agent
+/// waiting on a person, and a panel that hid one would leave the agent waiting forever.
+fn choice(ui: &mut Ui, state: &mut AppState) {
+    let Some((_, request)) = &state.agent.choice else {
+        return;
+    };
+    let title = request.title().to_owned();
+    let options = request.options.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(egui::Color32::from_rgb(140, 190, 220), title);
+        let mut chosen: Option<Option<String>> = None;
+        for option in options {
+            if ui.button(option.title).clicked() {
+                chosen = Some(Some(option.value));
+            }
+        }
+        if ui.button("Refuse").clicked() {
+            chosen = Some(None);
+        }
+        if let Some(value) = chosen {
+            state.agent.answer_choice(value.as_deref());
+        }
+    });
 }
 
 /// The line under the conversation: how long the turn takes, which model answers, how
@@ -65,14 +108,30 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // A menu button rather than a combo box: the name of the model is then part of
             // the button's own text, so it is on screen and readable, not only inside a
             // popup that has to be opened to find out what is answering.
-            let choices = state.agent.models.clone();
+            // Grouped by provider, each group collapsible: an agent wired to several
+            // providers offers a list that is unreadable flat, and the provider is the
+            // first thing a person picks by.
+            let choices = crate::agent::grouped(&state.agent.models);
             let mut asked = None;
             ui.menu_button(format!("{shown} ▾"), |ui| {
-                for option in &choices {
-                    let chosen = model.as_deref() == Some(option.id.as_str());
-                    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
-                        asked = Some(option.id.clone());
-                        ui.close();
+                for (provider, group) in &choices {
+                    if let Some(provider) = provider {
+                        egui::CollapsingHeader::new(provider)
+                            .id_salt(("provider", provider))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for option in group {
+                                    if pick(ui, option, model.as_deref(), &mut asked) {
+                                        ui.close();
+                                    }
+                                }
+                            });
+                    } else {
+                        for option in group {
+                            if pick(ui, option, model.as_deref(), &mut asked) {
+                                ui.close();
+                            }
+                        }
                     }
                 }
             });
@@ -82,22 +141,67 @@ fn status(ui: &mut Ui, state: &mut AppState) {
         }
         ui.separator();
 
+        // How hard the model thinks. The five levels are fixed because they are a
+        // decision about the answer, not a list the agent invents; an agent that does not
+        // offer a level has it greyed out rather than hidden, so the menu says what is
+        // missing instead of pretending the choice does not exist.
+        let level = state.agent.level();
+        let offered: Vec<String> = state
+            .agent
+            .modes
+            .iter()
+            .map(|mode| mode.id.clone())
+            .collect();
+        let shown = crate::agent::LEVELS
+            .iter()
+            .find(|(id, _)| Some(*id) == level.as_deref())
+            .map(|(_, name)| (*name).to_owned())
+            .unwrap_or_else(|| "thinking —".to_owned());
+        let mut asked = None;
+        ui.menu_button(format!("{shown} ▾"), |ui| {
+            for (id, name) in crate::agent::LEVELS {
+                let chosen = level.as_deref() == Some(id);
+                let has = offered.iter().any(|mode| mode == id);
+                if ui
+                    .add_enabled(has, egui::Button::selectable(chosen, name))
+                    .on_disabled_hover_text("this agent does not offer this level")
+                    .clicked()
+                    && !chosen
+                {
+                    asked = Some(id.to_owned());
+                    ui.close();
+                }
+            }
+        });
+        if let Some(asked) = asked {
+            state.agent.set_mode(&asked);
+        }
+        ui.separator();
+
+        // What the agent may do without asking. Separate from the level because ACP
+        // carries both on one channel, and a menu that mixes "deep" with "read-only" is
+        // a menu nobody can read.
         let mode = state.agent.current_mode.clone();
-        if state.agent.modes.is_empty() {
-            ui.weak("thinking —");
+        let permissions: Vec<_> = state
+            .agent
+            .modes
+            .iter()
+            .filter(|mode| !crate::agent::is_level(&mode.id))
+            .cloned()
+            .collect();
+        if permissions.is_empty() {
+            ui.weak("mode —");
         } else {
             let shown = mode
                 .as_deref()
                 .and_then(|id| {
-                    state
-                        .agent
-                        .modes
+                    permissions
                         .iter()
                         .find(|mode| mode.id == id)
                         .map(|mode| mode.name.clone())
                 })
-                .unwrap_or_else(|| "thinking —".to_owned());
-            let choices = state.agent.modes.clone();
+                .unwrap_or_else(|| "mode —".to_owned());
+            let choices = permissions.clone();
             let mut asked = None;
             ui.menu_button(format!("{shown} ▾"), |ui| {
                 for option in &choices {
@@ -364,4 +468,14 @@ fn input(ui: &mut Ui, state: &mut AppState) {
             state.agent.wants_focus = false;
         }
     });
+}
+
+/// One model in the menu. True when it has just been chosen.
+fn pick(ui: &mut Ui, option: &Model, current: Option<&str>, asked: &mut Option<String>) -> bool {
+    let chosen = current == Some(option.id.as_str());
+    if ui.selectable_label(chosen, &option.name).clicked() && !chosen {
+        *asked = Some(option.id.clone());
+        return true;
+    }
+    false
 }

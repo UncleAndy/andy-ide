@@ -10,11 +10,66 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use ide_agents::{
-    Event as AgentEvent, Mode, Model, PermissionPolicy, PermissionRequest, Registry, Session, Usage,
+    ChoiceRequest, Event as AgentEvent, Mode, Model, PermissionPolicy, PermissionRequest, Registry,
+    Session, Usage,
 };
 
 /// How long the worker waits for the next thing before checking whether it was told to go.
 const PUMP: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How long the panel waits before starting a crashed agent again.
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+/// How many times in a row an agent that keeps dying is started before the panel gives up.
+/// A crash loop is not a conversation, and retrying it forever spends the person's time.
+const RECONNECT_ATTEMPTS: u32 = 5;
+
+/// The levels of thinking an agent may offer, in the order they are shown.
+///
+/// ACP has one channel for this — `session/set_mode` — and agents use it for two
+/// different things: how hard the model thinks, and what it is allowed to do without
+/// asking. The names below are the first kind, and an agent that offers them is offering
+/// a level rather than a permission.
+pub const LEVELS: [(&str, &str); 5] = [
+    ("none", "None"),
+    ("low", "Low"),
+    ("normal", "Normal"),
+    ("high", "High"),
+    ("extra", "Extra"),
+];
+
+/// Whether this mode id is a level of thinking rather than a permission.
+pub fn is_level(id: &str) -> bool {
+    LEVELS.iter().any(|(level, _)| *level == id)
+}
+
+/// The provider a model id belongs to: the part before the first `/` or `:`.
+///
+/// ACP gives a model an id and a name, and nothing about who serves it. Agents that have
+/// more than one provider say so in the id — `nous/hermes-4`, `openrouter:claude` — and a
+/// menu that ignores it asks a person to read forty models in one flat list.
+pub fn provider_of(id: &str) -> Option<&str> {
+    let cut = id.find(['/', ':'])?;
+    let provider = id[..cut].trim();
+    (!provider.is_empty()).then_some(provider)
+}
+
+/// The models in the order the agent listed them, grouped by provider.
+///
+/// Groups keep the order they first appear in, and a model whose id names no provider
+/// goes to the group that has no name: it is drawn without a header when it is the only
+/// one, and under one when it is not.
+pub fn grouped(models: &[Model]) -> Vec<(Option<String>, Vec<&Model>)> {
+    let mut groups: Vec<(Option<String>, Vec<&Model>)> = Vec::new();
+    for model in models {
+        let provider = provider_of(&model.id).map(str::to_owned);
+        match groups.iter_mut().find(|(name, _)| *name == provider) {
+            Some((_, group)) => group.push(model),
+            None => groups.push((provider, vec![model])),
+        }
+    }
+    groups
+}
 
 /// One line of the transcript.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -37,6 +92,12 @@ enum Command {
     Prompt(String),
     /// Answer the question the agent is waiting on.
     Permission { id: u64, option: Option<String> },
+    /// Answer a choice among variants: the one picked, or a refusal.
+    Choice {
+        id: u64,
+        field: String,
+        value: Option<String>,
+    },
     /// Switch models, and say so through the status line.
     Model(String),
     /// Switch mode: how hard the agent thinks.
@@ -60,7 +121,6 @@ struct Worker {
 }
 
 /// The agent conversation shown in the panel.
-#[derive(Default)]
 pub struct AgentState {
     /// The agents `agents.toml` lists.
     pub registry: Registry,
@@ -74,6 +134,9 @@ pub struct AgentState {
     pub queued: Option<String>,
     /// Whether the field is asking for the keyboard back after a send.
     pub wants_focus: bool,
+    /// Set when the person asked to copy from the panel: the window turns the shortcut
+    /// into the copy event egui's own text selection listens for.
+    pub wants_copy: bool,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
     /// What the menu calls it: two agents from one binary with different arguments are
@@ -91,6 +154,7 @@ pub struct AgentState {
     pub usage: Option<Usage>,
     /// Where the panel was last drawn, for the tests that point at it.
     pub shown_rect: Option<egui::Rect>,
+    /// Set when the person asked to copy from the panel.
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
     pub took: Option<Duration>,
@@ -98,6 +162,22 @@ pub struct AgentState {
     pub busy: bool,
     /// The question waiting for a person's answer.
     pub asking: Option<(u64, PermissionRequest)>,
+    /// The variants waiting for a person's choice, and what the agent called them.
+    pub choice: Option<(u64, ChoiceRequest)>,
+    /// Whether a crashed agent is started again without being asked.
+    pub auto_reconnect: bool,
+    /// How long to wait before the next attempt; zero in tests that cannot wait.
+    pub reconnect_delay: Duration,
+    /// Attempts made since the last completed turn: a crash loop is given up on.
+    attempts: u32,
+    /// When the next attempt is due, once a crash has been seen.
+    retry_at: Option<Instant>,
+    /// Set while `start` is being called by the reconnection, so a manual start and a
+    /// retry do not share the same attempt count.
+    reconnecting: bool,
+    /// When the session last became ready: a crash after a long healthy run is not part
+    /// of a crash loop, and the attempts are forgiven.
+    connected_at: Option<Instant>,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -109,6 +189,47 @@ pub struct AgentState {
     /// would be asking a stranger to remember somebody else's afternoon.
     resume: Option<String>,
     resumed_from: Option<String>,
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self {
+            registry: Registry::default(),
+            chosen: None,
+            transcript: Vec::new(),
+            input: String::new(),
+            queued: None,
+            wants_focus: false,
+            wants_copy: false,
+            command: String::new(),
+            name: String::new(),
+            status: String::new(),
+            models: Vec::new(),
+            current_model: None,
+            modes: Vec::new(),
+            current_mode: None,
+            usage: None,
+            shown_rect: None,
+            started: None,
+            took: None,
+            busy: false,
+            asking: None,
+            choice: None,
+            // An agent is a long conversation; a process that dies should not end it.
+            auto_reconnect: true,
+            reconnect_delay: RECONNECT_DELAY,
+            attempts: 0,
+            retry_at: None,
+            reconnecting: false,
+            connected_at: None,
+            worker: None,
+            root: None,
+            place: None,
+            session: None,
+            resume: None,
+            resumed_from: None,
+        }
+    }
 }
 
 impl AgentState {
@@ -126,10 +247,13 @@ impl AgentState {
         self.chosen = None;
         self.transcript.clear();
         self.asking = None;
+        self.choice = None;
         self.busy = false;
         self.session = None;
         self.resume = None;
         self.resumed_from = None;
+        self.attempts = 0;
+        self.retry_at = None;
         let Some(root) = self.root.clone() else {
             self.registry = Registry::defaults();
             self.status = "no project: an agent has nowhere to work".to_owned();
@@ -213,6 +337,13 @@ impl AgentState {
             self.status = "an agent is already running".to_owned();
             return;
         }
+        // A start a person asked for begins a new run of attempts; a retry keeps counting
+        // the crashes it is answering.
+        if !self.reconnecting {
+            self.attempts = 0;
+            self.retry_at = None;
+        }
+        self.reconnecting = false;
         let Some(root) = self.root.clone() else {
             self.status = "no project: an agent has nowhere to work".to_owned();
             return;
@@ -244,6 +375,43 @@ impl AgentState {
             }
             Err(error) => self.status = format!("{name} did not start: {error}"),
         }
+    }
+
+    /// Takes the copy shortcut when the pointer is over the panel.
+    ///
+    /// egui listens for a copy *event*, and the keyboard backend only makes one out of
+    /// `Ctrl`+`C` — `Ctrl`+`Insert` is a copy only on Windows. So both are recognised
+    /// here, and the event is put back into the input by the panel itself, after the
+    /// editor has had its turn and found nothing to copy.
+    pub fn take_copy_shortcut(&mut self, ctx: &egui::Context) {
+        let Some(rect) = self.shown_rect else {
+            return;
+        };
+        let over = ctx
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| rect.contains(pos));
+        if !over {
+            return;
+        }
+        ctx.input_mut(|input| {
+            // The event, for `Ctrl`+`C`; the key, for `Ctrl`+`Insert`, which the backend
+            // leaves in the queue as a plain key press.
+            let mut asked = false;
+            input.events.retain(|event| {
+                if matches!(event, egui::Event::Copy) {
+                    asked = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if input.consume_key(egui::Modifiers::CTRL, egui::Key::Insert) {
+                asked = true;
+            }
+            if asked {
+                self.wants_copy = true;
+            }
+        });
     }
 
     /// Writes the command into `agents.toml`, so the next start needs no typing.
@@ -308,6 +476,15 @@ impl AgentState {
         self.started.map(|started| started.elapsed()).or(self.took)
     }
 
+    /// The level of thinking in use, when the agent's current mode is one.
+    ///
+    /// ACP has a single mode channel and agents spend it on either a level or a
+    /// permission, so the panel asks the current mode what it is rather than keeping a
+    /// second idea of the state that could disagree with the agent's.
+    pub fn level(&self) -> Option<String> {
+        self.current_mode.clone().filter(|mode| is_level(mode))
+    }
+
     /// Asks the agent to switch models; the choice shows up when it agrees.
     pub fn set_model(&mut self, model: &str) {
         let Some(worker) = &self.worker else {
@@ -338,6 +515,101 @@ impl AgentState {
         }
     }
 
+    /// Answers the choice among variants the agent is waiting on.
+    ///
+    /// `None` refuses: an agent must be able to hear that the person did not want any of
+    /// the variants, or it waits forever for an answer that is not coming.
+    pub fn answer_choice(&mut self, value: Option<&str>) {
+        let Some((id, request)) = self.choice.take() else {
+            return;
+        };
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        let _ = worker.commands.send(Command::Choice {
+            id,
+            field: request.field,
+            value: value.map(str::to_owned),
+        });
+        self.status = match value {
+            Some(value) => format!("chose {value}"),
+            None => "declined the choice".to_owned(),
+        };
+    }
+
+    /// Empties what the panel shows, keeping the conversation's id for the restart.
+    ///
+    /// A restored session replays its history through the agent's own events. Keeping
+    /// the lines already on screen would draw every message twice, and the widget ids
+    /// behind them would collide. The id stays: that is what makes it the same
+    /// conversation rather than a new one.
+    pub fn clear_panel(&mut self) {
+        self.transcript.clear();
+        self.models.clear();
+        self.current_model = None;
+        self.modes.clear();
+        self.current_mode = None;
+        self.usage = None;
+        self.asking = None;
+        self.choice = None;
+        self.busy = false;
+        self.started = None;
+        self.took = None;
+        self.queued = None;
+    }
+
+    /// Whether the panel is waiting to start a crashed agent again.
+    pub fn waiting_to_reconnect(&self) -> bool {
+        self.retry_at.is_some()
+    }
+
+    /// Schedules a restart after a crash, unless one is already scheduled.
+    ///
+    /// The wait grows with each attempt in a row: an agent that dies on start would
+    /// otherwise be restarted as fast as the window repaints.
+    fn schedule_reconnect(&mut self) {
+        if !self.auto_reconnect || self.retry_at.is_some() {
+            return;
+        }
+        // A session that ran for a while and then died is not a crash loop; only deaths
+        // in quick succession count against the budget.
+        if self
+            .connected_at
+            .is_some_and(|connected| connected.elapsed() > Duration::from_secs(60))
+        {
+            self.attempts = 0;
+        }
+        if self.attempts >= RECONNECT_ATTEMPTS {
+            self.status = "the agent keeps stopping; not reconnecting again".to_owned();
+            return;
+        }
+        let factor = 1u32 << self.attempts.min(5);
+        let delay = (self.reconnect_delay * factor).min(Duration::from_secs(30));
+        self.retry_at = Some(Instant::now() + delay);
+        self.status = format!(
+            "the agent stopped — reconnecting in {:.1} s",
+            delay.as_secs_f32()
+        );
+    }
+
+    /// Starts the agent again, with the panel emptied first.
+    fn reconnect_now(&mut self) {
+        self.retry_at = None;
+        if self.worker.is_some() {
+            return;
+        }
+        self.attempts += 1;
+        self.clear_panel();
+        let attempt = self.attempts;
+        self.reconnecting = true;
+        self.start();
+        if self.worker.is_some() {
+            self.status = format!(
+                "the agent stopped — reconnecting (attempt {attempt} of {RECONNECT_ATTEMPTS})"
+            );
+        }
+    }
+
     /// Answers the question the agent is waiting on.
     pub fn answer(&mut self, option: Option<String>) {
         let Some((id, _)) = self.asking.take() else {
@@ -352,6 +624,11 @@ impl AgentState {
 
     /// Takes everything the worker has said since the last frame.
     pub fn pump(&mut self) {
+        // A crash is answered between frames, on the frame that notices it is due: the
+        // panel does not keep a timer thread for a process it is about to start anyway.
+        if self.retry_at.is_some_and(|at| Instant::now() >= at) {
+            self.reconnect_now();
+        }
         loop {
             let Some(worker) = &self.worker else {
                 return;
@@ -362,7 +639,7 @@ impl AgentState {
                 Err(TryRecvError::Disconnected) => {
                     self.worker = None;
                     self.busy = false;
-                    self.status = "the agent stopped".to_owned();
+                    self.schedule_reconnect();
                     return;
                 }
             }
@@ -383,6 +660,10 @@ impl AgentState {
         }
         self.busy = false;
         self.asking = None;
+        self.choice = None;
+        // Stopping is a decision: a process ended on purpose is not one to start again.
+        self.retry_at = None;
+        self.attempts = 0;
     }
 
     /// Files one reply from the worker.
@@ -394,6 +675,8 @@ impl AgentState {
                 // conversation back, and a file written on the way out is not written.
                 self.remember_session(&session);
                 self.session = Some(session.clone());
+                self.connected_at = Some(Instant::now());
+                self.retry_at = None;
                 self.status = if resumed {
                     format!("ready, session {session} resumed")
                 } else {
@@ -439,6 +722,10 @@ impl AgentState {
                     self.status = request.title();
                     self.asking = Some((id, request));
                 }
+                AgentEvent::Choice { id, request } => {
+                    self.status = request.title().to_owned();
+                    self.choice = Some((id, request));
+                }
                 AgentEvent::Setup(state) => {
                     self.models = state.models;
                     self.current_model = state.current_model;
@@ -453,6 +740,9 @@ impl AgentState {
                     // resets to zero tells nobody how long the last answer took.
                     self.took = self.started.take().map(|started| started.elapsed());
                     self.busy = false;
+                    // A turn that came back is proof the agent works: a crash after it is
+                    // not part of a crash loop.
+                    self.attempts = 0;
                     self.status = reason.clone();
                     if let Some(queued) = self.queued.take() {
                         self.input = queued;
@@ -463,7 +753,9 @@ impl AgentState {
                     self.took = self.started.take().map(|started| started.elapsed());
                     self.busy = false;
                     self.worker = None;
-                    self.status = "the agent closed its output".to_owned();
+                    // The process is gone. A conversation is not its process, so the panel
+                    // starts another one and asks it to load the same session.
+                    self.schedule_reconnect();
                 }
                 AgentEvent::Failed(error) => {
                     self.took = self.started.take().map(|started| started.elapsed());
@@ -522,6 +814,9 @@ fn work(
             Ok(Command::Permission { id, option }) => {
                 let _ = session.answer_permission(id, option.as_deref());
             }
+            Ok(Command::Choice { id, field, value }) => {
+                let _ = session.answer_choice(id, &field, value.as_deref());
+            }
             Ok(Command::Model(model)) => {
                 if let Err(error) = session.set_model(&model)
                     && replies
@@ -563,5 +858,75 @@ fn work(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    fn model(id: &str, name: &str) -> Model {
+        Model {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_slash_or_a_colon_names_the_provider() {
+        assert_eq!(provider_of("nous/hermes-4"), Some("nous"));
+        assert_eq!(provider_of("openrouter:claude"), Some("openrouter"));
+        assert_eq!(
+            provider_of("small"),
+            None,
+            "an id with no separator names no provider"
+        );
+        assert_eq!(
+            provider_of("a/b/c"),
+            Some("a"),
+            "only the first separator counts"
+        );
+        assert_eq!(provider_of("/leading"), None, "an empty provider is none");
+    }
+
+    #[test]
+    fn models_are_grouped_in_the_order_their_provider_first_appears() {
+        let models = vec![
+            model("small", "Small"),
+            model("nous/hermes-4", "Hermes 4"),
+            model("large", "Large"),
+            model("openai/gpt-5", "GPT-5"),
+        ];
+        let groups = grouped(&models);
+
+        assert_eq!(
+            groups.len(),
+            3,
+            "the providers were not separated: {groups:?}"
+        );
+        assert_eq!(groups[0].0, None, "the unnamed group is not first");
+        assert_eq!(
+            groups[0]
+                .1
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small", "large"],
+            "a later model without a provider was not put back with the first"
+        );
+        assert_eq!(groups[1].0.as_deref(), Some("nous"));
+        assert_eq!(groups[2].0.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn only_the_five_agreed_names_are_levels_of_thinking() {
+        for (id, _) in LEVELS {
+            assert!(is_level(id), "{id} was not recognised as a level");
+        }
+        assert!(
+            !is_level("read-only"),
+            "a permission was taken for a level of thinking"
+        );
+        assert!(!is_level("Full access"));
     }
 }

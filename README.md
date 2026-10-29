@@ -141,10 +141,35 @@ crash is the case where a conversation is most wanted back. It is kept per agent
 id offered to a different agent asks a stranger to remember somebody else's afternoon.
 
 A status line under the conversation says how long the turn is taking, which model is
-answering, how hard it is thinking and how much of its context window is spent — both
-choices are menus, and both are answered by the agent, not by us. Anything the agent does
-not report is a dash rather than a guess. The shell opens in the project's own directory,
-and the agent is told that directory the moment the session is opened.
+answering, how hard it is thinking and how much of its context window is spent — all three
+choices are menus, and all three are answered by the agent, not by us. Anything the agent
+does not report is a dash rather than a guess. The shell opens in the project's own
+directory, and the agent is told that directory the moment the session is opened.
+
+A model is listed under the provider that serves it. An agent wired to several providers
+offers a flat list nobody can read, so the models are grouped by the part of their id before
+the first `/` or `:`, each group folding away — the provider is the first thing a person
+picks by. Next to the model is the level of thinking: `None`, `Low`, `Normal`, `High`,
+`Extra`. ACP carries levels and permissions on one channel (`session/set_mode`), so the panel
+splits what the agent offers in two: a level sits beside the model, and what the agent may do
+without asking sits to the right. A level the agent does not offer is shown greyed out rather
+than hidden — the menu says what is missing instead of pretending the choice does not exist.
+
+Selecting text in the conversation and pressing `Ctrl+C` or `Ctrl+Ins` copies it. egui makes a
+copy event out of `Ctrl+C` only, so the panel recognises both and re-issues the event after the
+editor has had its turn and found nothing; it does so only while the pointer is over the panel,
+so `Ctrl+Ins` in the editor still belongs to the editor.
+
+An agent that falls over is started again. The panel waits a second, then two, four, eight —
+up to thirty — and gives up after five tries in a row, saying so; a session that ran for a while
+before dying does not count against the budget. Before the conversation is restored the panel is
+cleared: the old transcript left in place is what made a reconnection look like the same
+message twice. The session id and the chosen model survive the clearing, since restoring a
+conversation is the point of it. `Stop` cancels the waiting as well as the process.
+
+An agent can ask the person to choose between variants, not just to allow or refuse: the client
+claims ACP's `elicitation` in `initialize`, and an `elicitation/create` request becomes buttons
+in the panel, answered with the variant's name or declined.
 
 Sending a message does not move the keyboard: the field keeps it, and a message typed while
 the answer is still coming is queued and goes out when the turn ends. Clicking into the

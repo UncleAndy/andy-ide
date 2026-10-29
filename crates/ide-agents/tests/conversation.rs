@@ -213,16 +213,35 @@ fn the_session_says_which_models_and_modes_it_offers() {
             .iter()
             .map(|model| model.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["Small", "Large"]
+        vec!["Small", "Large", "Hermes 4", "GPT-5"]
     );
-    assert_eq!(state.current_mode.as_deref(), Some("quick"));
+    // The first two ids name no provider; the other two name one before the slash, which
+    // is what the panel groups by. The grouping itself is the panel's business and is
+    // checked there.
+    assert_eq!(
+        state
+            .models
+            .iter()
+            .map(|model| model.id.split(['/', ':']).next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["small", "large", "nous", "openai"]
+    );
+    assert_eq!(state.current_mode.as_deref(), Some("normal"));
     assert_eq!(
         state
             .modes
             .iter()
             .map(|mode| mode.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["Quick", "Deep"]
+        vec![
+            "None",
+            "Low",
+            "Normal",
+            "High",
+            "Extra",
+            "Read only",
+            "Full access"
+        ]
     );
 }
 

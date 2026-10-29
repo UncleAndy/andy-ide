@@ -21,9 +21,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::protocol::{
-    ClientCapabilities, FsCapabilities, Message, PermissionRequest, SessionState, Update, Usage,
-    initialize_params, load_session_params, new_session_params, permission_answer, prompt_params,
-    session_state, set_mode_params, set_model_params, usage_of,
+    ChoiceRequest, ClientCapabilities, FsCapabilities, Message, PermissionRequest, SessionState,
+    Update, Usage, choice_answer, initialize_params, load_session_params, new_session_params,
+    permission_answer, prompt_params, session_state, set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -95,6 +95,14 @@ pub enum Event {
         id: u64,
         /// What is being asked.
         request: PermissionRequest,
+    },
+    /// The agent offers variants and waits for the person to choose one; the answer goes
+    /// back through [`Session::answer_choice`].
+    Choice {
+        /// The request id, to answer with.
+        id: u64,
+        /// The variants, and what is being asked.
+        request: ChoiceRequest,
     },
     /// The conversation the agent opened: the models and modes it offers, and which of
     /// each is in use. Sent once, as soon as the session exists.
@@ -307,6 +315,10 @@ impl Session {
                 write_text_file: false,
             },
             terminal: false,
+            // Offering to ask the person a question is a promise about this window, not
+            // about the machine the agent works on, so it is claimed even though no file
+            // or terminal capability is.
+            elicitation: Default::default(),
         };
         let answer = self.ask("initialize", initialize_params(&capabilities), HELLO)?;
         let _version = answer
@@ -451,6 +463,12 @@ impl Session {
         self.send(Message::result(id, permission_answer(option)))
     }
 
+    /// Answers an elicitation that was handed over with [`Event::Choice`]: the variant
+    /// the person picked, or a refusal when there is none.
+    pub fn answer_choice(&mut self, id: u64, field: &str, choice: Option<&str>) -> Result<()> {
+        self.send(Message::result(id, choice_answer(field, choice)))
+    }
+
     /// Ends the conversation: the input is closed, then the process is killed.
     ///
     /// Closing the input first gives a well-behaved agent the chance to leave on its own
@@ -593,7 +611,7 @@ impl Session {
                 ..
             } => {
                 self.answer_request(id, &method, &params);
-                if method == "session/request_permission" {
+                if method == "session/request_permission" || method == "elicitation/create" {
                     // The request is now in `waiting`, either as a question for the panel
                     // or answered already; the caller may want to see it.
                     return self.waiting.pop_front();
@@ -662,6 +680,7 @@ impl Session {
             "fs/read_text_file" => self.read_file(id, params),
             "fs/write_text_file" => self.write_file(id, params),
             "session/request_permission" => self.ask_permission(id, params),
+            "elicitation/create" => self.ask_choice(id, params),
             other => {
                 self.fail(id, -32601, &format!("this client does not know {other}"));
             }
@@ -735,6 +754,23 @@ impl Session {
             }
         };
         let _ = self.send(Message::result(id, permission_answer(choice)));
+    }
+
+    /// Puts a request to choose among variants to the panel.
+    ///
+    /// A mode the client never advertised is refused in the protocol's words: an agent
+    /// that opens a URL has left the window, and a panel cannot follow it.
+    fn ask_choice(&mut self, id: u64, params: &Value) {
+        if params.get("mode").and_then(Value::as_str) != Some("form") {
+            self.fail(
+                id,
+                -32602,
+                "this client asks for a choice in form mode only",
+            );
+            return;
+        }
+        let request = ChoiceRequest::from_params(params);
+        self.waiting.push_back(Event::Choice { id, request });
     }
 
     /// A path the agent named, if it lives in the project.

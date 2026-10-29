@@ -133,6 +133,12 @@ impl App {
         // Nothing has been drawn yet this frame: the editor says so itself when its tab
         // draws, and the hint is only asked about text that was actually on screen.
         self.state.editor_drawn = false;
+        // Copying from the agent panel is the panel's business. The editor holds the
+        // keyboard whenever nothing else does, so the copy shortcut arrives at the editor
+        // first and it copies its own line out of the file being edited: the selection
+        // made in the panel is the one the person means. The shortcut is taken here,
+        // before any panel is drawn, and handed to the panel below.
+        self.state.agent.take_copy_shortcut(ui.ctx());
         if !self.zoom_applied {
             self.zoom_applied = true;
             let zoom = self.state.config.font_size / DEFAULT_FONT_SIZE;
