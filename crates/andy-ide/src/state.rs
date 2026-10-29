@@ -137,6 +137,12 @@ pub struct AppState {
     highlight_key: Option<(PathBuf, usize)>,
     highlight_asked: Option<(PathBuf, usize)>,
     highlight_since: f64,
+    /// A question about this caret came back without an answer, and when it was noticed. The
+    /// question is put again, but only after a pause: a retry that follows the failure as fast
+    /// as the frames come turns one slow answer into a flood of requests, and a server that is
+    /// already behind answers none of them — the uses stay unmarked for as long as it is asked.
+    highlight_failed: bool,
+    highlight_failed_at: Option<f64>,
     /// When the zoom last changed, in input time, and the size last written.
     zoom_changed_at: f64,
     saved_font_size: f32,
@@ -206,6 +212,8 @@ impl AppState {
             highlight_key: None,
             highlight_asked: None,
             highlight_since: 0.0,
+            highlight_failed: false,
+            highlight_failed_at: None,
             zoom_changed_at: 0.0,
             saved_font_size,
             last_sync: 0.0,
@@ -501,16 +509,33 @@ impl AppState {
         /// How long the caret stays put before its uses are asked for.
         const DELAY: f64 = 0.12;
 
+        /// How long to wait before asking again when the question came back unanswered.
+        const RETRY: f64 = 2.0;
+
         let Some(buffer) = self.active_buffer() else {
             self.highlight_key = None;
             self.highlight_asked = None;
+            self.highlight_failed_at = None;
             return None;
         };
         let key = (buffer.path.clone(), buffer.caret_byte());
         if self.highlight_key.as_ref() != Some(&key) {
             self.highlight_key = Some(key);
             self.highlight_since = now;
+            self.highlight_failed_at = None;
             return Some(std::time::Duration::from_secs_f64(DELAY));
+        }
+        // The failure is stamped here, where the clock is: an answer arrives from another
+        // thread, and it has no business reading the time.
+        if std::mem::take(&mut self.highlight_failed) {
+            self.highlight_failed_at = Some(now);
+        }
+        if let Some(at) = self.highlight_failed_at {
+            let waited = now - at;
+            if waited < RETRY {
+                return Some(std::time::Duration::from_secs_f64(RETRY - waited));
+            }
+            self.highlight_failed_at = None;
         }
         if self.highlight_asked.as_ref() == self.highlight_key.as_ref() {
             return None;
@@ -1451,9 +1476,13 @@ impl AppState {
                 failed,
             } => {
                 if failed {
-                    // Ask again after the usual pause: the server was busy, which is not
-                    // the same as "this symbol is used nowhere".
+                    // The question is put again — after a pause, which `track_highlights` keeps:
+                    // the server was busy, which is not the same as "this symbol is used
+                    // nowhere", and asking again at once is what keeps it busy.
                     self.highlight_asked = None;
+                    self.highlight_failed = true;
+                } else {
+                    self.highlight_failed_at = None;
                 }
                 self.apply_highlights(&path, line, character, &spots)
             }

@@ -3288,6 +3288,43 @@ mod highlight_tests {
     }
 
     #[test]
+    fn a_question_that_was_not_answered_is_asked_again_slowly() {
+        // A server that did not answer has to be asked again, and asked again slowly. The
+        // caret's own delay is a tenth of a second: a retry that follows the failure that fast
+        // turns one slow answer into a flood of requests, and the server that is already behind
+        // answers none of them — the uses stay unmarked while it is asked again frame after
+        // frame, which is what a wall of five minutes looks like from the outside.
+        let (_project, _config, mut app) = app_with_text();
+        let caret = TEXT.find("make()").unwrap();
+        app.state.active_buffer_mut().unwrap().set_caret_byte(caret);
+        assert!(
+            app.state.track_highlights(0.0).is_some(),
+            "the caret moved and nothing was scheduled"
+        );
+
+        // What came back is not an answer: the server was busy.
+        app.state.apply_outcome(Outcome::Highlights {
+            path: std::path::PathBuf::from("a.rs"),
+            line: 0,
+            character: 3,
+            spots: Vec::new(),
+            failed: true,
+        });
+
+        let pause = app
+            .state
+            .track_highlights(1.0)
+            .expect("a failed question was not held back at all");
+        assert!(
+            pause >= std::time::Duration::from_secs_f64(1.0),
+            "the question was put again at once, after {pause:?}"
+        );
+        // Still held back within the pause, and nothing held back once it is over.
+        assert!(app.state.track_highlights(1.5).is_some());
+        assert!(app.state.track_highlights(4.0).is_none());
+    }
+
+    #[test]
     fn an_answer_is_turned_into_byte_ranges_of_this_text() {
         let (_project, _config, mut app) = app_with_text();
         let caret = TEXT.rfind("make").unwrap();
