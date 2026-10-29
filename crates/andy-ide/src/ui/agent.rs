@@ -171,7 +171,6 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             if let Some(spec) = state.agent.registry.get(&named) {
                 state.agent.command = ide_agents::quote_command(spec);
                 state.agent.name = spec.name.clone();
-                state.agent.terminal = spec.terminal.clone().unwrap_or_default();
             }
             state.agent.chosen = Some(named);
             state.agent.status = "start the agent when ready".to_owned();
@@ -201,48 +200,33 @@ fn header(ui: &mut Ui, state: &mut AppState) {
         ui.separator();
         ui.weak(&state.agent.status);
     });
-    // Three fields, in the order a person thinks about them: what to call it, what to run,
-    // and where the work happens. The last one is not a detail of the command: an agent
-    // whose project lives in a container has to be told, or it will edit the copy of the
-    // files that its own machine happens to have.
+    // One row, the way the rest of the panel is: a name to call it by, and the command
+    // that starts it. There is no separate field for the terminal, because the terminal
+    // belongs to the agent — it is configured there, and the editor only has to say where
+    // the project is and that files are worked on through it.
     let running = state.agent.running();
-    egui::Grid::new("agent-fields")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            let width = (ui.available_width() - 8.0).max(80.0);
-            ui.label("Name");
-            ui.add_enabled(
-                !running,
-                egui::TextEdit::singleline(&mut state.agent.name)
-                    .hint_text("Hermes")
-                    .desired_width(width),
-            )
-            .on_hover_text("What the list calls this agent");
-            ui.end_row();
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        let name_width = (ui.available_width() * 0.3).max(60.0);
+        ui.add_enabled(
+            !running,
+            egui::TextEdit::singleline(&mut state.agent.name)
+                .hint_text("Hermes")
+                .desired_width(name_width),
+        )
+        .on_hover_text("What the list calls this agent");
 
-            ui.label("Command");
-            ui.add_enabled(
-                !running,
-                egui::TextEdit::singleline(&mut state.agent.command)
-                    .hint_text("hermes acp")
-                    .desired_width(width),
-            )
-            .on_hover_text("The program that speaks ACP, with its arguments");
-            ui.end_row();
-
-            ui.label("Terminal");
-            ui.add_enabled(
-                !running,
-                egui::TextEdit::singleline(&mut state.agent.terminal)
-                    .hint_text("ssh dev@build  —  empty for this machine")
-                    .desired_width(width),
-            )
-            .on_hover_text(
-                "Where the agent's own shell commands run: `ssh host`, `docker exec -i c sh -c`",
-            );
-            ui.end_row();
-        });
+        ui.separator();
+        ui.label("Command");
+        let width = (ui.available_width() - 8.0).max(80.0);
+        ui.add_enabled(
+            !running,
+            egui::TextEdit::singleline(&mut state.agent.command)
+                .hint_text("hermes acp")
+                .desired_width(width),
+        )
+        .on_hover_text("The program that speaks ACP, with its arguments");
+    });
 }
 
 /// Everything said so far, the newest at the bottom.

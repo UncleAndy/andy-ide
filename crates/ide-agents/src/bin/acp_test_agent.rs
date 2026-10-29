@@ -39,6 +39,8 @@ fn main() {
     let mut mode = "quick".to_owned();
     // The directory the client handed over when it opened the session.
     let mut cwd = String::new();
+    // What it claimed it would do for us, and what it said about files.
+    let mut caps = String::new();
     while let Some(Ok(line)) = input.next() {
         if line.trim().is_empty() {
             continue;
@@ -55,6 +57,11 @@ fn main() {
 
         match method.as_str() {
             "initialize" => {
+                caps = message
+                    .get("params")
+                    .and_then(|params| params.get("clientCapabilities"))
+                    .map(|capabilities| capabilities.to_string())
+                    .unwrap_or_default();
                 answer(id, json!({"protocolVersion": 1, "agentCapabilities": {}}));
             }
             "session/new" => {
@@ -64,6 +71,9 @@ fn main() {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                if let Some(meta) = message.get("params").and_then(|params| params.get("_meta")) {
+                    caps = format!("{caps} {meta}");
+                }
                 // A real agent offers choices here; the stand-in offers two of each so a
                 // test can see both menus and watch a switch reach the agent.
                 answer(
@@ -198,49 +208,10 @@ fn main() {
                         chunk(&session, &cwd);
                         turn_answer(id);
                     }
-                    // A shell the client runs: the stand-in asked, and did not run anything
-                    // itself — which is the point of the protocol.
-                    "run" => {
-                        next_id += 1;
-                        let created = next_id;
-                        request(
-                            created,
-                            "terminal/create",
-                            json!({
-                                "sessionId": session,
-                                "command": "echo",
-                                "args": ["FROM-TERMINAL"]
-                            }),
-                        );
-                        let terminal = wait_for_answer(&mut input, created)
-                            .and_then(|value| value.get("terminalId").cloned())
-                            .and_then(|id| id.as_str().map(str::to_owned))
-                            .unwrap_or_default();
-
-                        next_id += 1;
-                        let waited = next_id;
-                        request(
-                            waited,
-                            "terminal/wait_for_exit",
-                            json!({"sessionId": session, "terminalId": terminal}),
-                        );
-                        let code = wait_for_answer(&mut input, waited)
-                            .and_then(|value| value.get("exitCode").and_then(Value::as_i64))
-                            .unwrap_or(-1);
-
-                        next_id += 1;
-                        let read = next_id;
-                        request(
-                            read,
-                            "terminal/output",
-                            json!({"sessionId": session, "terminalId": terminal}),
-                        );
-                        let said = wait_for_answer(&mut input, read)
-                            .and_then(|value| value.get("output").cloned())
-                            .and_then(|output| output.as_str().map(str::to_owned))
-                            .unwrap_or_default();
-
-                        chunk(&session, &format!("{} {}", said.trim(), code));
+                    // What the client said about files and terminals when it opened the
+                    // session: an agent that is not told works on the wrong machine.
+                    "caps" => {
+                        chunk(&session, &caps);
                         turn_answer(id);
                     }
                     "model" => {

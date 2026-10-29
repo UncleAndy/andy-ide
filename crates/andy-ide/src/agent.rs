@@ -79,9 +79,6 @@ pub struct AgentState {
     /// What the menu calls it: two agents from one binary with different arguments are
     /// two things to a person, and a name taken from the program cannot say which.
     pub name: String,
-    /// Where the agent's own shell commands are run: `ssh dev@build`, `docker exec -i dev
-    /// sh -c`, or nothing for this machine.
-    pub terminal: String,
     /// What the panel is doing, in one line.
     pub status: String,
     /// The models the agent offers, and the one in use.
@@ -141,10 +138,6 @@ impl AgentState {
                     .first()
                     .map(|agent| agent.name.clone())
                     .unwrap_or_default();
-                self.terminal = registry
-                    .first()
-                    .and_then(|agent| agent.terminal.clone())
-                    .unwrap_or_default();
                 self.registry = registry;
                 self.status = match &self.chosen {
                     Some(name) => format!("{name}, not started"),
@@ -174,16 +167,7 @@ impl AgentState {
             self.status = "no project: an agent has nowhere to work".to_owned();
             return;
         };
-        let terminal = self.terminal.trim().to_owned();
-        let spec = match ide_agents::parse_named(
-            &self.name,
-            &self.command,
-            if terminal.is_empty() {
-                None
-            } else {
-                Some(&terminal)
-            },
-        ) {
+        let spec = match ide_agents::parse_named(&self.name, &self.command) {
             Ok(spec) => spec,
             Err(error) => {
                 self.status = format!("{error}");
@@ -212,16 +196,7 @@ impl AgentState {
     /// Nothing is written until it is asked for: a panel that saved every experiment
     /// would leave a file full of typos to clean up.
     pub fn remember(&mut self) {
-        let terminal = self.terminal.trim().to_owned();
-        let spec = match ide_agents::parse_named(
-            &self.name,
-            &self.command,
-            if terminal.is_empty() {
-                None
-            } else {
-                Some(&terminal)
-            },
-        ) {
+        let spec = match ide_agents::parse_named(&self.name, &self.command) {
             Ok(spec) => spec,
             Err(error) => {
                 self.status = format!("{error}");

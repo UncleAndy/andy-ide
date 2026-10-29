@@ -39,9 +39,6 @@ struct Entry {
     args: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
-    /// Where the agent works: `ssh dev@build`, `docker exec -i dev sh -c`.
-    #[serde(default)]
-    terminal: Option<String>,
 }
 
 impl Registry {
@@ -56,7 +53,6 @@ impl Registry {
                 command: entry.command,
                 args: entry.args,
                 env: entry.env,
-                terminal: entry.terminal,
             })
             .collect();
         Ok(Self { agents })
@@ -83,7 +79,6 @@ impl Registry {
                 command: "hermes".to_owned(),
                 args: vec!["acp".to_owned()],
                 env: BTreeMap::new(),
-                terminal: None,
             }],
         }
     }
@@ -99,9 +94,6 @@ impl Registry {
             out.push_str(&format!("command = {:?}\n", agent.command));
             let args: Vec<String> = agent.args.iter().map(|arg| format!("{arg:?}")).collect();
             out.push_str(&format!("args = [{}]\n", args.join(", ")));
-            if let Some(terminal) = &agent.terminal {
-                out.push_str(&format!("terminal = {terminal:?}\n"));
-            }
             if !agent.env.is_empty() {
                 out.push_str("[agent.env]\n");
                 for (key, value) in &agent.env {
@@ -292,7 +284,6 @@ mod saving_tests {
             command: "hermes".to_owned(),
             args: vec!["acp".to_owned()],
             env: BTreeMap::new(),
-            terminal: None,
         }
     }
 
@@ -302,7 +293,6 @@ mod saving_tests {
             command: "/opt/my agent/agent".to_owned(),
             args: vec!["--stdio".to_owned()],
             env: BTreeMap::new(),
-            terminal: None,
         }
     }
 

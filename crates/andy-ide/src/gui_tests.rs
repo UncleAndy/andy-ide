@@ -4298,7 +4298,7 @@ mod the_agent_panel {
     }
 
     #[test]
-    fn the_terminal_in_the_field_is_where_the_agents_commands_run() {
+    fn the_name_and_the_command_are_on_one_row() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
             return;
@@ -4307,26 +4307,30 @@ mod the_agent_panel {
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
         gui.settle();
 
-        // `sh -c` is the same shape as `docker exec -i dev sh -c` and `ssh host`: the
-        // command the agent asks for is appended to it as one argument.
-        gui.app_mut().state.agent.terminal = "sh -c".to_owned();
-        gui.settle();
-        gui.harness.get_by_label("Start").click();
-        wait(&mut gui, "the agent starting", |gui| {
-            gui.app().state.agent.status.starts_with("ready")
-        });
-
-        gui.app_mut().state.agent.input = "run".to_owned();
-        gui.settle();
-        gui.harness.get_by_label("Send").click();
-        wait(&mut gui, "the shell the agent asked for", |gui| {
-            answer(gui).contains("FROM-TERMINAL")
-        });
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::TextInput);
+        let rows: Vec<egui::Rect> = fields.map(|field| field.rect()).collect();
         assert!(
-            answer(&gui).ends_with('0'),
-            "the exit code did not come back: {:?}",
-            answer(&gui)
+            rows.len() >= 2,
+            "the name and the command are not both on screen: {rows:?}"
         );
+        let (name, command) = (rows[0], rows[1]);
+        let middle = |rect: egui::Rect| rect.center().y;
+        assert!(
+            (middle(name) - middle(command)).abs() < 1.0,
+            "the fields are on two rows: {name:?} and {command:?}"
+        );
+        assert!(
+            name.right() <= command.left(),
+            "the fields overlap: {name:?} and {command:?}"
+        );
+        if let Some(message) = rows.get(2) {
+            assert!(
+                message.top() > command.bottom(),
+                "the message field is not on a row of its own: {message:?}"
+            );
+        }
     }
 
     #[test]

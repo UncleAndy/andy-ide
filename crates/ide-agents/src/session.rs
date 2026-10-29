@@ -25,7 +25,6 @@ use crate::protocol::{
     initialize_params, new_session_params, permission_answer, prompt_params, session_state,
     set_mode_params, set_model_params, usage_of,
 };
-use crate::terminal::Terminals;
 
 /// How long the agent gets to start and say hello.
 pub const HELLO: Duration = Duration::from_secs(60);
@@ -50,11 +49,6 @@ pub struct AgentSpec {
     pub args: Vec<String>,
     /// Extra environment, as written in the configuration.
     pub env: BTreeMap<String, String>,
-    /// Where the agent should do its work, as a command line: `ssh dev@build`, `docker
-    /// exec -i dev sh -c`. The agent's own shell commands are appended to it as one
-    /// argument, so the machine that runs the editor and the machine that runs the work
-    /// can be two different machines.
-    pub terminal: Option<String>,
 }
 
 /// What the client does when the agent asks for permission.
@@ -147,8 +141,6 @@ pub struct Session {
     state: SessionState,
     /// The last context figure the agent gave, if it gives any.
     usage: Option<Usage>,
-    /// The shells this conversation asked for, and the environment they run in.
-    terminals: Terminals,
 }
 
 impl Session {
@@ -260,7 +252,6 @@ impl Session {
             turn: None,
             state: SessionState::default(),
             usage: None,
-            terminals: Terminals::new(spec.terminal.clone(), root),
         };
 
         session.hello()?;
@@ -282,14 +273,16 @@ impl Session {
 
     /// `initialize`, then `session/new` — the two requests that make a conversation.
     fn hello(&mut self) -> Result<()> {
+        // Nothing claimed on the agent's behalf: it has a terminal of its own, the one it
+        // was configured with, and files are reached through it. Offering `fs/*` here
+        // would invite it to read and write *this* machine's copies of the project, and
+        // offering `terminal/*` would be a promise about a machine we know nothing of.
         let capabilities = ClientCapabilities {
             fs: FsCapabilities {
-                read_text_file: true,
-                write_text_file: true,
+                read_text_file: false,
+                write_text_file: false,
             },
-            // Commands the agent asks for are run for it: through the configured
-            // environment when there is one, here otherwise.
-            terminal: true,
+            terminal: false,
         };
         let answer = self.ask("initialize", initialize_params(&capabilities), HELLO)?;
         let _version = answer
@@ -297,11 +290,7 @@ impl Session {
             .cloned()
             .unwrap_or(Value::Null);
 
-        let answer = self.ask(
-            "session/new",
-            new_session_params(&self.root, self.terminals.describe()),
-            HELLO,
-        )?;
+        let answer = self.ask("session/new", new_session_params(&self.root), HELLO)?;
         let id = answer
             .get("sessionId")
             .and_then(Value::as_str)
@@ -414,7 +403,6 @@ impl Session {
     /// Closing the input first gives a well-behaved agent the chance to leave on its own
     /// terms; the kill is for the ones that do not.
     pub fn stop(&mut self) {
-        self.terminals.close();
         // Replacing the sender with one whose receiver is gone closes the queue, and the
         // writer thread then drops the child's input.
         let (dead, _) = channel();
@@ -621,13 +609,6 @@ impl Session {
             "fs/read_text_file" => self.read_file(id, params),
             "fs/write_text_file" => self.write_file(id, params),
             "session/request_permission" => self.ask_permission(id, params),
-            // The agent asked for a shell instead of running one: the environment is
-            // ours to know, and this is how it learns where the work belongs.
-            "terminal/create" => self.create_terminal(id, params),
-            "terminal/output" => self.terminal_output(id, params),
-            "terminal/wait_for_exit" => self.terminal_wait(id, params),
-            "terminal/kill" => self.terminal_kill(id, params),
-            "terminal/release" => self.terminal_release(id, params),
             other => {
                 self.fail(id, -32601, &format!("this client does not know {other}"));
             }
@@ -682,88 +663,6 @@ impl Session {
                 }
             }
             Err(refusal) => self.fail(id, -32602, &refusal),
-        }
-    }
-
-    /// Serves `terminal/create`: runs what the agent asked for, in our environment.
-    fn create_terminal(&mut self, id: u64, params: &Value) {
-        let Some(command) = params.get("command").and_then(Value::as_str) else {
-            self.fail(id, -32602, "a command is required");
-            return;
-        };
-        let args: Vec<String> = params
-            .get("args")
-            .and_then(Value::as_array)
-            .map(|args| {
-                args.iter()
-                    .filter_map(|arg| arg.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cwd = params.get("cwd").and_then(Value::as_str);
-        let limit = params.get("outputByteLimit").and_then(Value::as_u64);
-        match self.terminals.create(command, &args, cwd, limit) {
-            Ok(terminal) => {
-                let _ = self.send(Message::result(id, json!({"terminalId": terminal})));
-            }
-            Err(error) => self.fail(id, -32000, &format!("{error}")),
-        }
-    }
-
-    /// Serves `terminal/output`: what the shell has said so far.
-    fn terminal_output(&mut self, id: u64, params: &Value) {
-        let Some(terminal) = params.get("terminalId").and_then(Value::as_str) else {
-            self.fail(id, -32602, "a terminalId is required");
-            return;
-        };
-        match self.terminals.output(terminal) {
-            Ok(answer) => {
-                let _ = self.send(Message::result(id, answer));
-            }
-            Err(error) => self.fail(id, -32000, &format!("{error}")),
-        }
-    }
-
-    /// Serves `terminal/wait_for_exit`, with a deadline: a shell that never finishes must
-    /// not take the conversation with it.
-    fn terminal_wait(&mut self, id: u64, params: &Value) {
-        let Some(terminal) = params.get("terminalId").and_then(Value::as_str) else {
-            self.fail(id, -32602, "a terminalId is required");
-            return;
-        };
-        match self.terminals.wait_for_exit(terminal, ANSWER) {
-            Ok(answer) => {
-                let _ = self.send(Message::result(id, answer));
-            }
-            Err(error) => self.fail(id, -32000, &format!("{error}")),
-        }
-    }
-
-    /// Serves `terminal/kill`.
-    fn terminal_kill(&mut self, id: u64, params: &Value) {
-        let Some(terminal) = params.get("terminalId").and_then(Value::as_str) else {
-            self.fail(id, -32602, "a terminalId is required");
-            return;
-        };
-        match self.terminals.kill(terminal) {
-            Ok(()) => {
-                let _ = self.send(Message::result(id, json!({})));
-            }
-            Err(error) => self.fail(id, -32000, &format!("{error}")),
-        }
-    }
-
-    /// Serves `terminal/release`.
-    fn terminal_release(&mut self, id: u64, params: &Value) {
-        let Some(terminal) = params.get("terminalId").and_then(Value::as_str) else {
-            self.fail(id, -32602, "a terminalId is required");
-            return;
-        };
-        match self.terminals.release(terminal) {
-            Ok(()) => {
-                let _ = self.send(Message::result(id, json!({})));
-            }
-            Err(error) => self.fail(id, -32000, &format!("{error}")),
         }
     }
 

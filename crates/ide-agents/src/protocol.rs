@@ -152,21 +152,23 @@ pub fn initialize_params(capabilities: &ClientCapabilities) -> Value {
 
 /// The `session/new` parameters. `mcpServers` is empty: the editor brings no servers of
 /// its own, and an agent that wants one can start it itself.
-/// The `session/new` parameters: the directory, and where the work happens in words the
-/// agent can read.
 ///
-/// `_meta.terminal` is not part of ACP, which has no place for "this project lives in a
-/// container". It is sent anyway because the alternative is an agent that assumes it is on
-/// the machine the editor is on, and edits the wrong copy of every file.
-pub fn new_session_params(cwd: &std::path::Path, terminal: Option<&str>) -> Value {
-    let mut params = json!({
+/// The client serves no `fs/*` and no `terminal/*`, because the agent's own terminal is
+/// where its project actually is — inside a container, on a build host, wherever it was
+/// configured to work. Saying that in `initialize` alone is easy to miss; saying it once
+/// more, next to the directory, is how an agent hears it: read and write files through
+/// your own terminal, in the directory named here.
+pub fn new_session_params(cwd: &std::path::Path) -> Value {
+    json!({
         "cwd": cwd.to_string_lossy(),
         "mcpServers": Vec::<Value>::new(),
-    });
-    if let Some(terminal) = terminal {
-        params["_meta"] = json!({"terminal": terminal});
-    }
-    params
+        "_meta": {
+            "client": "andy-ide",
+            "fileAccess": "terminal",
+            "note": "Files are not read or written for you by this client: use your own \
+                     terminal for every file operation, in the cwd above."
+        },
+    })
 }
 
 /// The `session/prompt` parameters: one block of text, which is all a chat field sends.
