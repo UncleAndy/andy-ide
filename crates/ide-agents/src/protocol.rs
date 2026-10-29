@@ -767,6 +767,43 @@ mod tests {
     }
 
     #[test]
+    fn the_hermes_form_is_read_as_it_is_sent() {
+        // The exact shape Hermes 0.22.5 puts on the wire
+        // (acp_adapter/elicitation.py::build_clarify_elicitation): one
+        // "answer" property whose enum is the offered choices.
+        let params = json!({
+            "sessionId": "editor-session",
+            "mode": "form",
+            "message": "Which variant should I write?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "enum": ["short", "readable", "formal"]
+                    }
+                },
+                "required": ["answer"]
+            }
+        });
+        let request = ChoiceRequest::from_params(&params);
+        assert_eq!(request.session, "editor-session");
+        assert_eq!(request.field, "answer");
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["short", "readable", "formal"]
+        );
+        assert_eq!(
+            choice_answer(&request.field, Some("readable")),
+            json!({"action": "accept", "content": {"answer": "readable"}})
+        );
+    }
+
+    #[test]
     fn a_choice_can_be_named_with_titles() {
         let params = json!({
             "mode": "form",
