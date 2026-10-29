@@ -4829,7 +4829,7 @@ mod the_agent_panel {
         // command field is drawn above it.
         let fields = gui
             .harness
-            .get_all_by_role(egui::accesskit::Role::TextInput);
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput);
         let last = fields.last().expect("the message field");
         last.click();
         gui.settle();
@@ -4933,7 +4933,7 @@ mod the_agent_panel {
         let before = gui.app().state.active_buffer().unwrap().text().to_owned();
         let fields = gui
             .harness
-            .get_all_by_role(egui::accesskit::Role::TextInput);
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput);
         fields.last().expect("the message field").click();
         gui.settle();
         gui.harness.event(egui::Event::Text("one".to_owned()));
@@ -4993,7 +4993,7 @@ mod the_agent_panel {
         // Written while the answer is still coming: kept, and the field keeps the keys.
         let fields = gui
             .harness
-            .get_all_by_role(egui::accesskit::Role::TextInput);
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput);
         fields.last().expect("the message field").click();
         gui.settle();
         gui.harness.event(egui::Event::Text("next".to_owned()));
@@ -5146,6 +5146,13 @@ mod the_agent_panel {
         let fields = gui
             .harness
             .get_all_by_role(egui::accesskit::Role::TextInput);
+        // The message field is the field of several lines, and it is the last row of all.
+        let message = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput)
+            .last()
+            .expect("the message field")
+            .rect();
         let rows: Vec<egui::Rect> = fields.map(|field| field.rect()).collect();
         assert!(
             rows.len() >= 2,
@@ -5161,12 +5168,10 @@ mod the_agent_panel {
             name.right() <= command.left(),
             "the fields overlap: {name:?} and {command:?}"
         );
-        if let Some(message) = rows.get(2) {
-            assert!(
-                message.top() > command.bottom(),
-                "the message field is not on a row of its own: {message:?}"
-            );
-        }
+        assert!(
+            message.top() > command.bottom(),
+            "the message field is not on a row of its own: {message:?}"
+        );
     }
 
     #[test]
@@ -5591,6 +5596,242 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.choice.is_none(),
             "the question stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn the_commands_the_agent_offers_are_offered_back_when_a_slash_is_typed() {
+        // The agent names its commands and says what they do (`available_commands_update`).
+        // The panel offers them with the agent's own words while a slash is typed, and the
+        // keyboard completes the one it is on — a command typed by hand is one typo away
+        // from a prompt the agent reads as plain text.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the commands", |gui| {
+            gui.app().state.agent.commands.len() == 9
+        });
+
+        // Nothing is offered until a slash is typed.
+        gui.settle();
+        assert!(
+            gui.harness
+                .query_by_label_contains("List available commands")
+                .is_none(),
+            "the commands are offered before they are asked for"
+        );
+
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput);
+        fields.last().expect("the message field").click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("/".to_owned()));
+        for _ in 0..6 {
+            gui.harness.step();
+        }
+        assert!(
+            gui.harness.query_by_label_contains("/help").is_some(),
+            "the commands are not offered: the field says {:?}",
+            gui.app().state.agent.input
+        );
+        assert!(
+            gui.harness
+                .query_by_label_contains("List available commands")
+                .is_some(),
+            "the commands are offered without what they do"
+        );
+
+        // What is typed narrows the list, and `Enter` completes the command it is on rather
+        // than sending half of one.
+        gui.harness.event(egui::Event::Text("mo".to_owned()));
+        for _ in 0..4 {
+            gui.harness.step();
+        }
+        assert!(
+            gui.harness.query_by_label_contains("/model").is_some(),
+            "the list did not narrow to what was typed"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("/help").is_none(),
+            "the list kept the commands that do not match"
+        );
+        gui.harness.key_press(egui::Key::Enter);
+        for _ in 0..4 {
+            gui.harness.step();
+        }
+        assert_eq!(
+            gui.app().state.agent.input,
+            "/model ",
+            "the command was not completed"
+        );
+        assert!(
+            gui.app().state.agent.transcript.is_empty(),
+            "completing a command sent it"
+        );
+
+        // And a command sent as a prompt is a prompt: the agent hears it.
+        gui.harness.key_press(egui::Key::Enter);
+        wait(&mut gui, "the command reaching the agent", |gui| {
+            !gui.app().state.agent.transcript.is_empty()
+        });
+        assert!(
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .any(|line| matches!(line, crate::agent::Line::You(text) if text == "/model")),
+            "the command was not sent as it was completed: {:?}",
+            gui.app().state.agent.transcript
+        );
+    }
+
+    #[test]
+    fn the_field_is_three_lines_and_grows_with_shift_enter() {
+        // A message to an agent is often more than one line, and a field of one line makes
+        // every such message a single unreadable one. `Enter` sends — it is how a message is
+        // sent everywhere else — and `Shift`+`Enter` is what makes a new line.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        let field = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput)
+            .last()
+            .expect("the message field");
+        let rect = field.rect();
+        assert!(
+            rect.height() > 40.0,
+            "the field is not three lines tall: {rect:?}"
+        );
+        let send = gui
+            .harness
+            .query_by_label("Send")
+            .expect("the button that sends")
+            .rect();
+        assert!(
+            send.top() >= rect.bottom() - 1.0,
+            "the button is not under the field: {send:?} against {rect:?}"
+        );
+
+        field.click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("one".to_owned()));
+        gui.harness.step();
+        assert_eq!(
+            gui.app().state.agent.input,
+            "one",
+            "the field did not take what was typed"
+        );
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        gui.harness.step();
+        assert_eq!(
+            gui.app().state.agent.input,
+            "one\n",
+            "Shift+Enter did not add a line"
+        );
+        gui.harness.event(egui::Event::Text("two".to_owned()));
+        gui.harness.step();
+        assert_eq!(
+            gui.app().state.agent.input,
+            "one\ntwo",
+            "the line after Shift+Enter went somewhere else"
+        );
+        assert!(
+            gui.app().state.agent.transcript.is_empty(),
+            "Shift+Enter sent the message"
+        );
+
+        // Three lines are what it starts with, so a fourth is where it makes room: the field
+        // is not a box of three lines with the rest hidden.
+        for line in ["three", "four"] {
+            gui.harness
+                .key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+            gui.harness.step();
+            gui.harness.event(egui::Event::Text(line.to_owned()));
+            gui.harness.step();
+        }
+        assert_eq!(
+            gui.app().state.agent.input,
+            "one\ntwo\nthree\nfour",
+            "the field stopped taking lines"
+        );
+        let taller = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput)
+            .last()
+            .expect("the message field")
+            .rect();
+        assert!(
+            taller.height() > rect.height(),
+            "the field did not grow with the lines in it: {taller:?} against {rect:?}"
+        );
+
+        gui.harness.key_press(egui::Key::Enter);
+        wait(&mut gui, "the message going out", |gui| {
+            !gui.app().state.agent.transcript.is_empty()
+        });
+    }
+
+    #[test]
+    fn a_request_is_drawn_in_a_block_of_its_own() {
+        // An answer is read against the question it answers. The question is set in a block
+        // of its own, so that it can be found again by looking at the conversation rather
+        // than by reading all of it.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the request on screen", |gui| {
+            gui.harness.query_by_label("hello").is_some()
+        });
+
+        let asked = gui
+            .harness
+            .query_by_label("hello")
+            .expect("the request is not on screen")
+            .rect();
+        let block = gui
+            .harness
+            .output()
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_rgb(34, 38, 45) => {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the request is not drawn in a block of its own");
+        assert!(
+            block.contains_rect(asked),
+            "the request is outside the block: {block:?} against {asked:?}"
         );
     }
 

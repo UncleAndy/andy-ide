@@ -208,12 +208,36 @@ conversation and the card are drawn in the same ui, and two of them under one id
 state — which egui, in a debug build, says by drawing a red box and a line marked with a flame
 over both, all over the panel.
 
+The field takes the width of the panel and starts three lines tall, growing as lines are added:
+a message to an agent is rarely one line, and a field of one line makes every such message a
+single unreadable one. `Enter` sends it and `Shift`+`Enter` makes a new line, and the button that
+sends stands under the field rather than beside it. A key is read as *plainly* pressed or not at
+all: egui's own `consume_key` asks for the modifiers a shortcut needs and lets others be held
+alongside, so `Shift`+`Enter` answered to a plain `Enter` and sent the half-written message.
+
+The agent's own commands — `/help`, `/model` and the rest — are read from it rather than guessed:
+Hermes announces them as an `available_commands_update` with a name, a description, and a hint for
+the ones that take an argument. Typing `/` offers them back over the field with the agent's own
+words; what is typed narrows the list; `↑`/`↓` move along it; `Enter` or `Tab` completes the one
+the keyboard is on rather than sending half a command. A command is sent as a prompt that begins
+with it, which is the only way the protocol carries one.
+
+The person's own request is drawn as a block of its own with square corners and in a heavier
+weight than the rest, so that an answer can be read against the question it answers. The heavier
+weight is drawn rather than asked for: egui's `strong()` brightens the colour and nothing else,
+and the fonts it ships have no bold face, so the line is painted twice a fraction of a point
+apart.
+
 Sending a message does not move the keyboard: the field keeps it, and a message typed while
 the answer is still coming is queued and goes out when the turn ends. Clicking into the
 editor does move it, and keeps it there. The answer is read as Markdown as it arrives, and
 the agent's reasoning is folded away
 behind a `Thinking…` marker: the working out is not the answer, and pouring it into the same
 column makes the answer harder to find.
+
+What the rows under the conversation take is measured rather than counted: the field grows a line
+at a time, and a conversation drawn first with a fixed number of points kept back is a conversation
+that pushes the status line out of the panel the moment a second line is typed.
 
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m5.md`](.hermes/plans/2026-10-28_andy-ide-m5.md).

@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use ide_agents::{
-    ChoiceRequest, ConfigOption, Event as AgentEvent, Mode, Model, PermissionPolicy,
+    AgentCommand, ChoiceRequest, ConfigOption, Event as AgentEvent, Mode, Model, PermissionPolicy,
     PermissionRequest, REASONING, Registry, Session, THOUGHT_LEVEL, Usage,
 };
 
@@ -152,6 +152,18 @@ pub struct AgentState {
     /// The answers picked so far in a question that allows several. Kept here, beside the
     /// question, because the card is drawn again every frame and a click is one of them.
     pub picked: Vec<String>,
+    /// Where the message field was drawn, and what the rows under the conversation took
+    /// together last frame. Measured rather than counted: the field grows a line at a time as
+    /// the person writes, and the conversation above it has to be told what to leave — a fixed
+    /// number of points is a promise the field breaks the moment a second line is typed.
+    pub field_rect: Option<egui::Rect>,
+    pub below: f32,
+    /// Which of the offered commands the keyboard is on, while a slash is being typed.
+    pub command_pick: usize,
+    /// The commands the agent offers — `/help`, `/model` and the rest — as it named them.
+    /// Read from the agent, never assumed: a panel that offered its own list would offer
+    /// commands the agent has never heard of.
+    pub commands: Vec<AgentCommand>,
     /// The command line that will be run: the source of truth for which agent starts.
     pub command: String,
     /// What the menu calls it: two agents from one binary with different arguments are
@@ -227,6 +239,10 @@ impl Default for AgentState {
             wants_copy: false,
             card_rect: None,
             picked: Vec::new(),
+            commands: Vec::new(),
+            command_pick: 0,
+            field_rect: None,
+            below: 64.0,
             command: String::new(),
             name: String::new(),
             status: String::new(),
@@ -652,6 +668,7 @@ impl AgentState {
         self.current_mode = None;
         self.options.clear();
         self.usage = None;
+        self.commands.clear();
         self.asking = None;
         self.choice = None;
         self.picked.clear();
@@ -850,6 +867,9 @@ impl AgentState {
                 AgentEvent::Permission { id, request } => {
                     self.status = request.title();
                     self.asking = Some((id, request));
+                }
+                AgentEvent::Commands(commands) => {
+                    self.commands = commands;
                 }
                 AgentEvent::Choice { id, request } => {
                     self.status = request.title().to_owned();

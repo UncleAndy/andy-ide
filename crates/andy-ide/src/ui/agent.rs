@@ -6,7 +6,7 @@ use egui::Ui;
 
 use crate::agent::Line;
 use crate::state::AppState;
-use ide_agents::Model;
+use ide_agents::{AgentCommand, Model};
 
 /// The panel.
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
@@ -42,6 +42,10 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     status(ui, state);
     // The list of models floats in a layer of its own, above the button that opened it.
     models(ui, state);
+    // What the rows under the conversation took, for the conversation to leave next frame.
+    if let (Some(field), Some(panel)) = (state.agent.field_rect, state.agent.shown_rect) {
+        state.agent.below = (panel.bottom() - field.top()).max(64.0);
+    }
 }
 
 /// The colours the panel asks a person in: amber for a permission, blue for a choice among
@@ -53,6 +57,38 @@ const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 /// so the place a person has to act in is visible before the words are read.
 const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
 const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
+
+/// A line of text as heavy as a bold face would be.
+///
+/// egui's own `strong()` brightens the colour and nothing else: the fonts it ships have no
+/// bold face, and asking for one gets the same light one. So the line is drawn twice, a
+/// fraction of a point apart — which is what a heavier weight is, on the screen, when there
+/// is no heavier weight to be had. The words are announced to the readable tree as they are:
+/// nothing else knows the line is there.
+fn bold_label(ui: &mut Ui, text: &str) {
+    /// How far the second pass is shifted: enough to thicken, not enough to smear.
+    const THICKEN: f32 = 0.6;
+
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let colour = ui.visuals().strong_text_color();
+    let galley = ui
+        .painter()
+        .layout(text.to_owned(), font, colour, ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), galley.size().y),
+        egui::Sense::hover(),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    ui.painter().galley(rect.left_top(), galley.clone(), colour);
+    ui.painter()
+        .galley(rect.left_top() + egui::vec2(THICKEN, 0.0), galley, colour);
+}
+
+/// What a request of the person's own is drawn in: a shade above the panel, square corners,
+/// so that the question and the answer are two things and not one column of words.
+const REQUEST: egui::Color32 = egui::Color32::from_rgb(34, 38, 45);
+const REQUEST_EDGE: egui::Color32 = egui::Color32::from_rgb(58, 64, 74);
 
 /// The card's own measurements, in points: the padding inside its frame, its vertical inner
 /// margin and its outline, the gap under its heading, the room its refusal row takes, and one
@@ -654,9 +690,11 @@ fn header(ui: &mut Ui, state: &mut AppState) {
 /// answer harder to find.
 fn transcript(ui: &mut Ui, state: &mut AppState) {
     let lines = state.agent.transcript.clone();
-    // What the rows below the conversation take: the separator, the field and the status
-    // line. They are drawn after it, so the room is kept for them here.
-    let height = (ui.available_height() - 64.0).max(60.0);
+    // What the rows below the conversation took last frame, and a line's worth more: the field
+    // grows a line at a time, and the room for that line has to be given up on the frame it is
+    // typed, not the one after it.
+    let below = state.agent.below + ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let height = (ui.available_height() - below).max(60.0);
     egui::ScrollArea::vertical()
         .id_salt("agent-transcript")
         .stick_to_bottom(true)
@@ -666,10 +704,19 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             for line in &lines {
                 match line {
                     Line::You(text) => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.strong("You  ");
-                            ui.label(text);
-                        });
+                        // The request is a block of its own, square and set in bold: an answer
+                        // is read against the question, and the question has to be findable by
+                        // looking rather than by reading.
+                        egui::Frame::new()
+                            .fill(REQUEST)
+                            .stroke(egui::Stroke::new(1.0, REQUEST_EDGE))
+                            .corner_radius(0)
+                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                bold_label(ui, text);
+                            });
+                        ui.add_space(2.0);
                     }
                     Line::Agent(text) => {
                         ui.horizontal(|ui| {
@@ -743,59 +790,145 @@ fn question(ui: &mut Ui, state: &mut AppState) {
 
 /// The field, and the button that sends it.
 fn input(ui: &mut Ui, state: &mut AppState) {
-    ui.horizontal(|ui| {
-        // The field stays open while the agent answers: a message typed mid-answer is
-        // queued, and the keyboard stays where the person is writing. It is closed only
-        // when there is no agent to talk to.
-        let busy = !state.agent.running();
-        // The field stops short of the button: a field that takes the whole width pushes
-        // the button out of the panel, and a button nobody can see is a button nobody
-        // can press.
-        let width = (ui.available_width() - 90.0).max(80.0);
-        // A name of its own, so the keyboard can be asked back for it after a send.
-        let id = egui::Id::new("agent-message");
-        let response = ui.add_enabled(
-            !busy,
-            egui::TextEdit::singleline(&mut state.agent.input)
-                .id(id)
-                .hint_text("Ask the agent…")
-                .desired_width(width),
-        );
-        // Enter in the field sends: the field has the keyboard, so Enter cannot mean
-        // anything else here, and a single-line field gives the focus up as it commits.
-        let sent = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if sent {
-            state.agent.send();
+    /// One command row in the list: the height of a row, and how many are shown at most.
+    const ROW: f32 = 20.0;
+    const ROWS_SHOWN: usize = 8;
+
+    let busy = !state.agent.running();
+    // A name of its own, so the keyboard can be asked back for it after a send.
+    let id = egui::Id::new("agent-message");
+    let has_keyboard = ui.memory(|memory| memory.has_focus(id));
+
+    // What is typed so far, if it is a command being typed: a slash, then the name, and
+    // nothing else. A space means the argument has begun, and then there is nothing to offer.
+    let typed = state
+        .agent
+        .input
+        .strip_prefix('/')
+        .filter(|rest| !rest.contains(' '));
+    // Read out of the panel and owned here: the list is drawn after the field, and the field
+    // is where the person is typing — a borrow of the commands would be in the way of it.
+    let matches: Vec<AgentCommand> = match typed {
+        Some(typed) => state
+            .agent
+            .commands
+            .iter()
+            .filter(|command| {
+                command
+                    .name
+                    .to_lowercase()
+                    .starts_with(&typed.to_lowercase())
+            })
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    if state.agent.command_pick >= matches.len() {
+        state.agent.command_pick = 0;
+    }
+
+    // A key is read as plainly pressed or not at all. `consume_key` asks for the modifiers a
+    // shortcut *needs* and lets others be held as well, so `Shift`+`Enter` would be read as
+    // `Enter` and send the message instead of making the new line it is meant to make.
+    fn plain(ui: &mut Ui, key: egui::Key) -> bool {
+        let nothing_held = ui.input(|input| input.modifiers == egui::Modifiers::NONE);
+        nothing_held && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
+    }
+
+    // The keyboard is read before the field is drawn: in a field of several lines `Enter`
+    // would otherwise go to a new line, and the key is spent by the time the field has drawn
+    // itself. `Shift`+`Enter` is left alone, and that is what makes a new line.
+    if has_keyboard && !matches.is_empty() {
+        if plain(ui, egui::Key::ArrowDown) {
+            state.agent.command_pick = (state.agent.command_pick + 1) % matches.len();
         }
-        let pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
-        if pressed {
-            state.agent.send();
+        if plain(ui, egui::Key::ArrowUp) {
+            state.agent.command_pick =
+                (state.agent.command_pick + matches.len() - 1) % matches.len();
         }
-        // Sending is not leaving the field. Enter gives the focus up as it commits, and a
-        // click puts it on the button; either way the editor is the next thing that finds
-        // the keyboard free and takes it, and the next message is typed into a file.
-        if sent || pressed {
+        let complete = plain(ui, egui::Key::Enter) | plain(ui, egui::Key::Tab);
+        if complete {
+            state.agent.input = format!("/{} ", matches[state.agent.command_pick].name);
             state.agent.wants_focus = true;
+            return;
         }
-        // Asked for on every frame until it is held, not once: a request is not the
-        // keyboard, and a panel drawn later in the same frame asks louder.
-        if state.agent.wants_focus {
-            if response.has_focus() {
-                state.agent.wants_focus = false;
-            } else {
-                response.request_focus();
-                ui.ctx().request_repaint();
-            }
-        }
-        // A click anywhere else means the person has left the field, and is obeyed at
-        // once: the field does not hold the keyboard against a click.
-        if ui.input(|input| input.pointer.any_click()) && !response.has_focus() {
+    }
+    // Enter sends. Without the keyboard the field is not the one being typed in, and the key
+    // belongs to whoever holds it.
+    let enter = has_keyboard && plain(ui, egui::Key::Enter);
+
+    // The field takes the width it can and three lines to start with: it is where a message of
+    // several lines is written, and it grows by itself as the lines are added.
+    let field = egui::TextEdit::multiline(&mut state.agent.input)
+        .id(id)
+        .hint_text("Ask the agent\u{2026}")
+        .desired_rows(3)
+        .desired_width(f32::INFINITY);
+    let response = ui.add_enabled(!busy, field);
+    state.agent.field_rect = Some(response.rect);
+
+    // The button stands under the field, where the message it sends ends.
+    let pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
+
+    if enter || pressed {
+        state.agent.send();
+        // Sending is not leaving the field: the next message is typed here, not into a file.
+        state.agent.wants_focus = true;
+    }
+    // Asked for on every frame until it is held, not once: a request is not the keyboard, and
+    // a panel drawn later in the same frame asks louder.
+    if state.agent.wants_focus {
+        if response.has_focus() {
             state.agent.wants_focus = false;
+        } else {
+            response.request_focus();
+            ui.ctx().request_repaint();
         }
-    });
+    }
+    // A click anywhere else means the person has left the field, and is obeyed at once: the
+    // field does not hold the keyboard against a click.
+    if ui.input(|input| input.pointer.any_click()) && !response.has_focus() {
+        state.agent.wants_focus = false;
+    }
+
+    // The commands, over the field they are typed into, while they are being typed.
+    if matches.is_empty() {
+        return;
+    }
+    let rows = matches.len().min(ROWS_SHOWN);
+    let height = rows as f32 * ROW + 8.0;
+    let mut completed = None;
+    egui::Area::new(egui::Id::new("agent-commands"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(egui::pos2(response.rect.left(), response.rect.top() - 4.0))
+        .default_size(egui::vec2(360.0, height))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(320.0);
+                for (index, command) in matches.iter().enumerate().take(ROWS_SHOWN) {
+                    let row = egui::Button::selectable(
+                        index == state.agent.command_pick,
+                        format!("/{}  {}", command.name, command.description),
+                    )
+                    .min_size(egui::vec2(ui.available_width(), ROW))
+                    .corner_radius(2);
+                    let hint = match &command.hint {
+                        Some(hint) => format!("/{} \u{2014} takes {}", command.name, hint),
+                        None => format!("/{} takes nothing", command.name),
+                    };
+                    if ui.add(row).on_hover_text(hint).clicked() {
+                        completed = Some(command.name.clone());
+                    }
+                }
+            });
+        });
+    if let Some(name) = completed {
+        state.agent.input = format!("/{name} ");
+        state.agent.wants_focus = true;
+    }
 }
 
-/// One model in the menu. True when it has just been chosen.
 fn pick(ui: &mut Ui, option: &Model, current: Option<&str>, asked: &mut Option<String>) -> bool {
     let chosen = current == Some(option.id.as_str());
     // The list is grouped by provider, so the row says only the model: the provider is

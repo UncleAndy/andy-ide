@@ -21,10 +21,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::protocol::{
-    ChoiceRequest, ClientCapabilities, ConfigOption, FsCapabilities, Message, PermissionRequest,
-    SessionState, Update, Usage, choice_answer, config_option_params, initialize_params,
-    load_session_params, new_session_params, options_of, permission_answer, prompt_params,
-    session_state, set_mode_params, set_model_params, usage_of,
+    AgentCommand, ChoiceRequest, ClientCapabilities, ConfigOption, FsCapabilities, Message,
+    PermissionRequest, SessionState, Update, Usage, choice_answer, config_option_params,
+    initialize_params, load_session_params, new_session_params, options_of, permission_answer,
+    prompt_params, session_state, set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -110,6 +110,8 @@ pub enum Event {
     Setup(SessionState),
     /// How much of the context the conversation is using, when the agent says.
     Usage(Usage),
+    /// The commands the agent offers, for the panel to offer them back.
+    Commands(Vec<AgentCommand>),
     /// The turn ended, in the agent's own word: `end_turn`, `refusal`, `cancelled`.
     Finished(String),
     /// The agent closed its output: the process is gone.
@@ -678,6 +680,7 @@ impl Session {
                         // change it was not expecting is still a change it can show.
                         Some(Event::Setup(self.state.clone()))
                     }
+                    Update::Commands(commands) => Some(Event::Commands(commands)),
                     Update::Usage(usage) => {
                         self.usage = Some(usage);
                         Some(Event::Usage(usage))

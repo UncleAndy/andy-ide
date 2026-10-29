@@ -447,6 +447,50 @@ pub fn session_state(answer: &Value) -> SessionState {
     state
 }
 
+/// A command the agent offers, as `available_commands_update` carries it.
+///
+/// Hermes names them and says what they do (`acp_adapter/commands.py::_available_commands`):
+/// `name`, `description`, and an `input.hint` for the ones that take an argument. A command
+/// is sent back as a prompt that starts with its name and a slash — the protocol has no other
+/// way — so the panel only has to know what to offer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentCommand {
+    /// The word it is invoked by, without the slash.
+    pub name: String,
+    /// What it does, in the agent's own words.
+    pub description: String,
+    /// What it takes after the name, when it takes anything.
+    pub hint: Option<String>,
+}
+
+/// Reads the commands an `available_commands_update` carries.
+pub fn commands_of(update: &Value) -> Vec<AgentCommand> {
+    update
+        .get("availableCommands")
+        .and_then(Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some(AgentCommand {
+                        name: command.get("name").and_then(Value::as_str)?.to_owned(),
+                        description: command
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        hint: command
+                            .get("input")
+                            .and_then(|input| input.get("hint"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Reads the `usage_update` a `session/update` carries: Hermes sends it at the end of a turn
 /// (`acp_adapter/server.py::_build_usage_update`), with `size` the context window and `used`
 /// what has been spent from it. Before this was read, the panel showed no context figure at
@@ -514,6 +558,8 @@ pub enum Update {
     Settings(Vec<ConfigOption>),
     /// How much of its window the agent has spent: the figure a context indicator shows.
     Usage(Usage),
+    /// The commands the agent offers, whole, after it has said what they are.
+    Commands(Vec<AgentCommand>),
     /// Anything this version does not show yet.
     Other {
         /// The tag, for the record.
@@ -583,6 +629,7 @@ impl Update {
                 Update::Plan(steps)
             }
             "config_option_update" => Update::Settings(options_of(update)),
+            "available_commands_update" => Update::Commands(commands_of(update)),
             "usage_update" => match usage_update_of(update) {
                 Some(usage) => Update::Usage(usage),
                 None => Update::Other {
@@ -973,6 +1020,33 @@ mod tests {
             Update::from_value(&update),
             Update::Text("Hello".to_owned())
         );
+    }
+
+    #[test]
+    fn the_commands_are_read_the_way_hermes_sends_them() {
+        // Hermes 0.22.5, `acp_adapter/commands.py::_available_commands`: an
+        // `available_commands_update` whose commands carry a name, a description, and — for
+        // the ones that take something — an input hint.
+        let update = json!({
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "List available commands"},
+                {"name": "model",
+                 "description": "Show current model and provider, or switch models",
+                 "input": {"hint": "model name to switch to"}}
+            ]
+        });
+        match Update::from_value(&update) {
+            Update::Commands(commands) => {
+                assert_eq!(commands.len(), 2);
+                assert_eq!(commands[0].name, "help");
+                assert_eq!(commands[0].description, "List available commands");
+                assert_eq!(commands[0].hint, None);
+                assert_eq!(commands[1].name, "model");
+                assert_eq!(commands[1].hint.as_deref(), Some("model name to switch to"));
+            }
+            other => panic!("the commands were not read: {other:?}"),
+        }
     }
 
     #[test]

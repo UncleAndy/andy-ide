@@ -228,6 +228,36 @@ fn main() {
                         "configOptions": settings(&effort, &policy)
                     }),
                 );
+                // The commands it offers, announced once the session is up, the way Hermes
+                // does it (`acp_adapter/commands.py::_send_available_commands_update`): the
+                // names and descriptions of the real ones.
+                send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session_name,
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [
+                                {"name": "help", "description": "List available commands"},
+                                {"name": "model",
+                                 "description": "Show current model and provider, or switch models",
+                                 "input": {"hint": "model name to switch to"}},
+                                {"name": "tools", "description": "List available tools with descriptions"},
+                                {"name": "context", "description": "Show conversation message counts by role"},
+                                {"name": "reset", "description": "Clear conversation history"},
+                                {"name": "compress", "description": "Compress conversation context"},
+                                {"name": "steer",
+                                 "description": "Inject guidance into the currently running agent turn",
+                                 "input": {"hint": "guidance for the active turn"}},
+                                {"name": "queue",
+                                 "description": "Queue a prompt to run after the current turn finishes",
+                                 "input": {"hint": "prompt to run next"}},
+                                {"name": "version", "description": "Show Hermes version"}
+                            ]
+                        }
+                    }
+                }));
             }
             "session/new" => {
                 resumed = false;
@@ -262,6 +292,36 @@ fn main() {
                         "configOptions": settings(&effort, &policy)
                     }),
                 );
+                // The commands it offers, announced once the session is up, the way Hermes
+                // does it (`acp_adapter/commands.py::_send_available_commands_update`): the
+                // names and descriptions of the real ones.
+                send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session_name,
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [
+                                {"name": "help", "description": "List available commands"},
+                                {"name": "model",
+                                 "description": "Show current model and provider, or switch models",
+                                 "input": {"hint": "model name to switch to"}},
+                                {"name": "tools", "description": "List available tools with descriptions"},
+                                {"name": "context", "description": "Show conversation message counts by role"},
+                                {"name": "reset", "description": "Clear conversation history"},
+                                {"name": "compress", "description": "Compress conversation context"},
+                                {"name": "steer",
+                                 "description": "Inject guidance into the currently running agent turn",
+                                 "input": {"hint": "guidance for the active turn"}},
+                                {"name": "queue",
+                                 "description": "Queue a prompt to run after the current turn finishes",
+                                 "input": {"hint": "prompt to run next"}},
+                                {"name": "version", "description": "Show Hermes version"}
+                            ]
+                        }
+                    }
+                }));
             }
             // The settings the client offers to change. The reply carries the whole list
             // read back, the way Hermes answers.
