@@ -20,7 +20,7 @@ pub use watch::{
     ExternalChange, FsEvent, ProjectWatcher, decide_external_change, watch_extra_file,
     watch_project,
 };
-pub use workspace::{WORKSPACE_DIR, Workspace, WorkspaceState};
+pub use workspace::{ContextSpan, WORKSPACE_DIR, Workspace, WorkspaceState};
 
 /// Version of the crate, taken from its manifest.
 pub fn version() -> &'static str {

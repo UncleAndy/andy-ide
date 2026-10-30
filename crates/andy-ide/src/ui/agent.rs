@@ -622,7 +622,7 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             }
             ui.separator();
 
-            let usage_text = match &state.agent.usage {
+            let usage_text = match state.agent.context_usage() {
                 Some(usage) => match usage.window {
                     // A percentage of nothing is not a number; without a window only the count is
                     // shown.
@@ -639,7 +639,7 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                 dropped = true;
                 break 'facts;
             }
-            match state.agent.usage {
+            match state.agent.context_usage() {
                 Some(usage) => {
                     let text = match usage.window {
                         // A percentage of nothing is not a number; without a window only the

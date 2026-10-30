@@ -66,6 +66,26 @@ pub struct WorkspaceState {
     /// no line here at all.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub view: BTreeMap<String, bool>,
+    /// What was known about the context of the agent's conversation when the workspace was last
+    /// written: the last figure the agent sent.
+    ///
+    /// It is kept with the project so the panel has something to show the moment a session comes
+    /// back. An agent names the size of its context window only after the first exchange of a
+    /// restored session, so without this the panel was blank until something was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextSpan>,
+}
+
+/// Tokens spent, and the window they were spent from.
+///
+/// The window is the agent's own figure and may be missing: an agent that never names one gets a
+/// plain token count instead of a share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContextSpan {
+    /// Tokens spent so far.
+    pub used: u64,
+    /// The window they are spent from, if the agent named one.
+    pub window: Option<u64>,
 }
 
 impl Workspace {
@@ -150,6 +170,7 @@ mod tests {
             agent: Some("stand-in".to_owned()),
             carets: BTreeMap::from([(PathBuf::from("src/main.rs"), (12, 4))]),
             view: BTreeMap::from([("hints".to_owned(), false)]),
+            context: None,
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
@@ -170,6 +191,7 @@ mod tests {
                 agent: None,
                 carets: BTreeMap::new(),
                 view: BTreeMap::new(),
+                context: None,
             })
             .unwrap();
         let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();

@@ -218,6 +218,12 @@ pub struct AgentState {
     pub options: Vec<ConfigOption>,
     /// How much of the model's context is spent, when the agent says.
     pub usage: Option<Usage>,
+    /// The figure the agent sent last, kept from the workspace when a session is restored.
+    ///
+    /// It is not `usage`: that one is what the agent says *now*, and a connection opened through
+    /// `Agent::start` clears it. This is what the panel falls back to, so a restored session shows
+    /// where the context stood instead of nothing at all.
+    pub kept_usage: Option<Usage>,
     /// Where the panel was last drawn, for the tests that point at it.
     pub shown_rect: Option<egui::Rect>,
     /// Set when the person asked to copy from the panel.
@@ -300,6 +306,7 @@ impl Default for AgentState {
             current_mode: None,
             options: Vec::new(),
             usage: None,
+            kept_usage: None,
             shown_rect: None,
             started: None,
             took: None,
@@ -620,6 +627,12 @@ impl AgentState {
     ///
     /// This is what the foot's button follows: an answer being written can be stopped
     /// whichever side began it.
+    /// What the panel shows about the context: what the agent says now, or — until it says
+    /// anything — what it said when the workspace was last written.
+    pub fn context_usage(&self) -> Option<Usage> {
+        self.usage.or(self.kept_usage)
+    }
+
     pub fn working(&self) -> bool {
         self.busy || self.last_word.is_some_and(|when| when.elapsed() < SILENCE)
     }
@@ -793,6 +806,8 @@ impl AgentState {
         self.current_mode = None;
         self.options.clear();
         self.usage = None;
+        // A session of its own, a figure of its own: what the last one knew is not this one's.
+        self.kept_usage = None;
         self.commands.clear();
         self.asking = None;
         self.choice = None;

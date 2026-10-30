@@ -7328,6 +7328,61 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_context_figure_comes_back_with_the_session() {
+        // An agent names the size of its context window only after the first exchange of a
+        // restored session, so the panel used to read "ctx —" until something was asked. The last
+        // figure the agent sent is kept with the project and shown the moment the session returns.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("notes.rs"), "let a = 1;\n").unwrap();
+        let workspace = ide_core::Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&ide_core::WorkspaceState {
+                tabs: vec![std::path::PathBuf::from("notes.rs")],
+                active: Some(0),
+                layout: None,
+                hidden: None,
+                agent: None,
+                carets: Default::default(),
+                view: Default::default(),
+                context: Some(ide_core::ContextSpan {
+                    used: 12345,
+                    window: Some(200_000),
+                }),
+            })
+            .unwrap();
+
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("notes.rs", "let a = 1;\n")],
+                Some("notes.rs"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        let blank = painted_text(&gui, "ctx —");
+        assert!(
+            painted_text(&gui, "ctx 6% of 200k"),
+            "the context figure did not come back with the session{}{}",
+            if blank {
+                ": the panel still says "
+            } else {
+                " (the panel says something else: "
+            },
+            if blank {
+                "\"ctx —\""
+            } else {
+                "not the kept figure)"
+            }
+        );
+    }
+
+    #[test]
     fn a_mark_in_the_transcript_is_a_glyph_the_font_of_the_window_has() {
         // `↳` came out as an empty box: the fonts egui brings do not have it, and neither do they
         // have the arrows an editor wants. The window puts DejaVu Sans behind its own fonts, and
@@ -7386,6 +7441,7 @@ mod the_agent_panel {
                 agent: Some("stand-in".to_owned()),
                 carets: Default::default(),
                 view: Default::default(),
+                context: None,
             })
             .unwrap();
 

@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+use ide_agents::Usage;
 use ide_core::{
-    Config, ExternalChange, FileIndex, FileIndexCache, FsEvent, Project, Recent, Tabs, TreeOptions,
-    Workspace, WorkspaceState, decide_external_change, watch_project,
+    Config, ContextSpan, ExternalChange, FileIndex, FileIndexCache, FsEvent, Project, Recent, Tabs,
+    TreeOptions, Workspace, WorkspaceState, decide_external_change, watch_project,
 };
 
 use crate::editor::EditorBuffer;
@@ -1003,6 +1004,13 @@ impl AppState {
         else {
             return;
         };
+        // What the panel knew about the context comes back with the session: an agent names the
+        // size of its window only after the first exchange of a restored session, and a blank
+        // figure until then reads as a session that remembered nothing.
+        self.agent.kept_usage = state.context.map(|span| Usage {
+            used: span.used,
+            window: span.window,
+        });
         for path in state.tabs {
             if root.join(&path).is_file() {
                 self.open_file(&path);
@@ -1146,6 +1154,10 @@ impl AppState {
             // The View switches are part of the project as much as the panels are: a person who
             // works without hints does not want them back on the next launch.
             view: self.view_switches(),
+            context: self.agent.context_usage().map(|usage| ContextSpan {
+                used: usage.used,
+                window: usage.window,
+            }),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;
