@@ -59,6 +59,13 @@ pub struct WorkspaceState {
     /// so a project that has never had a caret open reads as it always did.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub carets: BTreeMap<PathBuf, (usize, usize)>,
+    /// The View switches of the window, by the name the window gives them — the same reason the
+    /// panels are stored by name: the core must not know egui, and a saved workspace should
+    /// outlive a build that renames one. A switch this build does not know is left in the file
+    /// rather than dropped for a build that never comes, and a project that has never said has
+    /// no line here at all.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view: BTreeMap<String, bool>,
 }
 
 impl Workspace {
@@ -142,6 +149,7 @@ mod tests {
             hidden: Some(vec!["diff".to_owned()]),
             agent: Some("stand-in".to_owned()),
             carets: BTreeMap::from([(PathBuf::from("src/main.rs"), (12, 4))]),
+            view: BTreeMap::from([("hints".to_owned(), false)]),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
@@ -161,6 +169,7 @@ mod tests {
                 hidden: None,
                 agent: None,
                 carets: BTreeMap::new(),
+                view: BTreeMap::new(),
             })
             .unwrap();
         let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();

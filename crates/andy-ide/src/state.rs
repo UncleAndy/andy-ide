@@ -1,6 +1,6 @@
 //! Application state that is not the dock layout.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -1049,6 +1049,37 @@ impl AppState {
         )
     }
 
+    /// The View switches, as the workspace file keeps them: the two the window has now, under
+    /// the names it knows them by.
+    pub fn view_switches(&self) -> BTreeMap<String, bool> {
+        BTreeMap::from([
+            ("hidden-files".to_owned(), self.tree.show_hidden),
+            ("preview".to_owned(), self.preview_open),
+            ("hints".to_owned(), self.hints),
+        ])
+    }
+
+    /// The View switches the project remembers, if it has ever said.
+    pub fn stored_view(&self) -> Option<BTreeMap<String, bool>> {
+        let workspace = self.workspace.as_ref()?;
+        let view = workspace.read_state().view;
+        (!view.is_empty()).then_some(view)
+    }
+
+    /// Puts the View switches of a project back. A name this build does not know is left alone:
+    /// it belongs to a build that does.
+    pub fn apply_view(&mut self, view: &BTreeMap<String, bool>) {
+        if let Some(value) = view.get("hidden-files") {
+            self.tree.show_hidden = *value;
+        }
+        if let Some(value) = view.get("preview") {
+            self.preview_open = *value;
+        }
+        if let Some(value) = view.get("hints") {
+            self.hints = *value;
+        }
+    }
+
     /// The agent that was on duty when the window closed, if the workspace remembers one.
     pub fn stored_agent(&self) -> Option<String> {
         let workspace = self.workspace.as_ref()?;
@@ -1112,6 +1143,9 @@ impl AppState {
                 .values()
                 .map(|buffer| (buffer.path.clone(), buffer.line_col()))
                 .collect(),
+            // The View switches are part of the project as much as the panels are: a person who
+            // works without hints does not want them back on the next launch.
+            view: self.view_switches(),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

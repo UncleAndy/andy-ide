@@ -40,6 +40,10 @@ impl App {
         state.hidden = state
             .stored_hidden()
             .unwrap_or_else(|| PUT_AWAY_AT_START.to_vec());
+        // The View switches come back with the project, the way the panels do.
+        if let Some(view) = state.stored_view() {
+            state.apply_view(&view);
+        }
         let mut dock = state
             .stored_layout()
             .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
@@ -1027,6 +1031,7 @@ mod layout_persistence_tests {
                 hidden: None,
                 agent: None,
                 carets: Default::default(),
+                view: Default::default(),
             })
             .unwrap();
 
@@ -1046,6 +1051,32 @@ mod layout_persistence_tests {
                 .map(|path| path.node_path()),
             Some(stored_node),
             "the restored window rebuilt the layout instead of reading it"
+        );
+    }
+
+    #[test]
+    fn the_view_switches_of_the_project_come_back() {
+        // Every checkbox of the View menu belongs to the project: someone who works without
+        // hints, with the preview on and with hidden files shown gets that window back.
+        let (project, config, mut app) = drawn_app();
+        app.state.hints = false;
+        app.state.preview_open = true;
+        app.state.tree.show_hidden = true;
+        app.state.save_workspace(None, 100.0, true);
+
+        let restored = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        assert!(!restored.state.hints, "Show hints came back on");
+        assert!(
+            restored.state.preview_open,
+            "the preview switch was forgotten"
+        );
+        assert!(
+            restored.state.tree.show_hidden,
+            "hidden files were forgotten"
         );
     }
 
@@ -1116,6 +1147,7 @@ mod layout_persistence_tests {
                 hidden: Some(vec![Tab::Terminal.slug().to_owned()]),
                 agent: None,
                 carets: Default::default(),
+                view: Default::default(),
             })
             .unwrap();
 
@@ -1148,6 +1180,7 @@ mod layout_persistence_tests {
                 hidden: None,
                 agent: None,
                 carets: Default::default(),
+                view: Default::default(),
             })
             .unwrap();
 
