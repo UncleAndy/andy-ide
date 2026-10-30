@@ -7222,6 +7222,102 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_words_of_the_person_are_readable_in_both_themes() {
+        // A request is a block with words on it, and the two colours must not be the same: drawn
+        // in a fixed shade of grey, the block was dark on dark the moment the theme was light.
+        // The check is the contrast between the words and the background they are drawn on.
+        for theme in [ide_core::Theme::Dark, ide_core::Theme::Light] {
+            let Some(mut gui) = with_agent() else {
+                println!("the stand-in agent is not built: the check was skipped");
+                return;
+            };
+            gui.app_mut().state.config.theme = theme;
+            gui.harness
+                .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+            gui.settle();
+            gui.harness.get_by_label("Start").click();
+            wait(&mut gui, "the agent starting", |gui| {
+                gui.app().state.agent.status.starts_with("ready")
+            });
+            let words = "the words of the person";
+            gui.app_mut().state.agent.transcript.clear();
+            gui.app_mut()
+                .state
+                .agent
+                .transcript
+                .push(crate::agent::Line::You(words.to_owned()));
+            gui.settle();
+
+            let panel = gui.app().state.agent.shown_rect.expect("the panel");
+            let shapes = &gui.harness.output().shapes;
+            // The words, and the last rectangle drawn under them: the block they stand in.
+            let mut found = None;
+            let mut under = egui::Color32::TRANSPARENT;
+            for clipped in shapes {
+                match &clipped.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill != egui::Color32::TRANSPARENT
+                            && rect.rect.width() > 40.0
+                            && panel.contains(rect.rect.min) =>
+                    {
+                        under = rect.fill;
+                    }
+                    egui::Shape::Text(text)
+                        if text.galley.job.text == words
+                            && panel.contains(text.pos)
+                            && text.pos.y >= panel.top() =>
+                    {
+                        let colour = text
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|section| section.format.color)
+                            .expect("the words have no colour");
+                        found = Some((colour, under));
+                    }
+                    _ => {}
+                }
+            }
+            let (colour, background) = found.unwrap_or_else(|| {
+                panic!("the words of the person were not drawn in {theme:?}");
+            });
+            // What the colours really look like: the block's fill is drawn half-transparent over
+            // the window, and the words may be drawn over the block in turn.
+            let window = match theme {
+                ide_core::Theme::Dark => egui::Visuals::dark().panel_fill,
+                ide_core::Theme::Light => egui::Visuals::light().panel_fill,
+            };
+            let background = over(background, window);
+            let colour = over(colour, background);
+            let contrast = (luma(colour) - luma(background)).abs();
+            assert!(
+                contrast >= 60.0,
+                "in the {theme:?} theme the words of the person are drawn {colour:?} on \
+                 {background:?}: a contrast of {contrast:.0}"
+            );
+        }
+    }
+
+    /// A colour as it appears over another: what a half-transparent fill really looks like.
+    fn over(top: egui::Color32, bottom: egui::Color32) -> egui::Color32 {
+        let alpha = top.a() as f32 / 255.0;
+        let mix = |above: u8, below: u8| {
+            (above as f32 * alpha + below as f32 * (1.0 - alpha)).round() as u8
+        };
+        egui::Color32::from_rgb(
+            mix(top.r(), bottom.r()),
+            mix(top.g(), bottom.g()),
+            mix(top.b(), bottom.b()),
+        )
+    }
+
+    /// How bright a colour reads, the way an eye weighs the three channels.
+    fn luma(colour: egui::Color32) -> f32 {
+        0.299 * colour.r() as f32 + 0.587 * colour.g() as f32 + 0.114 * colour.b() as f32
+    }
+
+    #[test]
     fn a_tables_lines_keep_their_distance_from_the_words() {
         // A line between two rows is drawn halfway across the gap the table leaves between
         // them, and that gap is three points: a point and a half from the words of the row
@@ -7851,17 +7947,24 @@ mod the_agent_panel {
             .query_by_label("hello")
             .expect("the request is not on screen")
             .rect();
+        // The block is told by its place, not by a shade: the colour comes from the theme now,
+        // and a fixed shade is exactly what made the words dark on dark under a light theme.
+        // The smallest filled rectangle that holds the words is the block around them.
         let block = gui
             .harness
             .output()
             .shapes
             .iter()
-            .find_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_rgb(34, 38, 45) => {
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill != egui::Color32::TRANSPARENT
+                        && rect.rect.contains_rect(asked) =>
+                {
                     Some(rect.rect)
                 }
                 _ => None,
             })
+            .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
             .expect("the request is not drawn in a block of its own");
         assert!(
             block.contains_rect(asked),

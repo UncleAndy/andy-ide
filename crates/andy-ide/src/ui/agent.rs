@@ -63,11 +63,6 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
 const ASKING: egui::Color32 = egui::Color32::from_rgb(226, 192, 96);
 const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 
-/// The card a question is drawn in, and its edge: a shade above the panel's own background,
-/// so the place a person has to act in is visible before the words are read.
-const CARD: egui::Color32 = egui::Color32::from_rgb(26, 29, 34);
-const CARD_EDGE: egui::Color32 = egui::Color32::from_rgb(54, 60, 70);
-
 /// Whether the key was pressed with nothing else held.
 ///
 /// egui's `consume_key` asks for the modifiers a shortcut *needs* and lets others be held
@@ -77,11 +72,6 @@ fn plain_key(ui: &mut Ui, key: egui::Key) -> bool {
     let nothing_held = ui.input(|input| input.modifiers == egui::Modifiers::NONE);
     nothing_held && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
 }
-
-/// What a request of the person's own is drawn in: a shade above the panel, square corners,
-/// so that the question and the answer are two things and not one column of words.
-const REQUEST: egui::Color32 = egui::Color32::from_rgb(34, 38, 45);
-const REQUEST_EDGE: egui::Color32 = egui::Color32::from_rgb(58, 64, 74);
 
 /// The card's own measurements, in points: the padding inside its frame, its vertical inner
 /// margin and its outline, the gap under its heading, the room its refusal row takes, and one
@@ -171,9 +161,14 @@ fn waiting_card(
     let window = allowed.min(ui.available_height().max(floor));
 
     let mut chosen = None;
+    // The colours of the card come from the theme, like every other frame of a block in this
+    // window: drawn in a fixed shade of grey, the words on it are dark on dark the moment the
+    // theme is light.
     let frame = egui::Frame::group(ui.style())
-        .fill(CARD)
-        .stroke(egui::Stroke::new(CARD_OUTLINE, CARD_EDGE))
+        .stroke(egui::Stroke::new(
+            CARD_OUTLINE,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(CARD_PAD as i8, CARD_MARGIN as i8))
         .show(ui, |ui| {
@@ -821,9 +816,11 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         // The request is a block of its own, square and set in bold: an answer
                         // is read against the question, and the question has to be findable by
                         // looking rather than by reading.
-                        egui::Frame::new()
-                            .fill(REQUEST)
-                            .stroke(egui::Stroke::new(1.0, REQUEST_EDGE))
+                        // A shade above the panel and square corners, so that the question and
+                        // the answer are two things and not one column of words — the shade and
+                        // the edge from the theme, against the words of the person, which are
+                        // drawn from the theme as well.
+                        egui::Frame::group(ui.style())
                             .corner_radius(0)
                             .inner_margin(egui::Margin::symmetric(8, 5))
                             .show(ui, |ui| {
