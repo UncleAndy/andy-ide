@@ -6496,6 +6496,154 @@ mod the_agent_panel {
             .count()
     }
 
+    /// What a table in the panel is made of: the words, the horizontal lines and the bands
+    /// of its rows, all inside the panel.
+    struct TableParts {
+        words: Vec<(f32, f32, f32, f32, String)>,
+        lines: Vec<f32>,
+        bands: Vec<(f32, f32, f32, f32)>,
+    }
+
+    fn table_parts(gui: &Gui) -> TableParts {
+        let panel = gui.app().state.agent.shown_rect.expect("the panel");
+        let narrow = panel.width() * 0.5;
+        let left = panel.left() + panel.width() * 0.4;
+        let mut parts = TableParts {
+            words: Vec::new(),
+            lines: Vec::new(),
+            bands: Vec::new(),
+        };
+        for clipped in &gui.harness.output().shapes {
+            match &clipped.shape {
+                egui::Shape::Text(text) => {
+                    let inside = text.pos.x >= panel.left()
+                        && text.pos.x <= left
+                        && text.pos.y >= panel.top()
+                        && text.pos.y <= panel.bottom();
+                    if inside {
+                        parts.words.push((
+                            text.pos.y,
+                            text.pos.y + text.galley.size().y,
+                            text.pos.x,
+                            text.pos.x + text.galley.size().x,
+                            text.galley.job.text.clone(),
+                        ));
+                    }
+                }
+                egui::Shape::LineSegment { points, .. } => {
+                    let flat = (points[0].y - points[1].y).abs() < 0.5;
+                    let width = (points[0].x - points[1].x).abs();
+                    if flat && width < narrow && points[0].x > panel.left() - 10.0 {
+                        parts.lines.push(points[0].y);
+                    }
+                }
+                egui::Shape::Rect(rect) => {
+                    // A band is looked for by what it does — a strip of this panel's width
+                    // where the words of a row are — rather than by its colour: the theme in
+                    // hand may paint `faint_bg_color` see-through, and a band that is not seen
+                    // is still drawn in the same place.
+                    // A band of a row, not the table's own frame: the frame is one strip as
+                    // tall as the whole table, a row's band is a row tall.
+                    let inside = rect.rect.width() < narrow
+                        && rect.rect.height() > 8.0
+                        && rect.rect.height() < 70.0
+                        && rect.rect.top() >= panel.top()
+                        && rect.rect.bottom() <= panel.bottom();
+                    if inside {
+                        parts.bands.push((
+                            rect.rect.top(),
+                            rect.rect.bottom(),
+                            rect.rect.left(),
+                            rect.rect.right(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        parts
+    }
+
+    #[test]
+    fn a_tables_lines_and_bands_do_not_cross_its_words() {
+        // The line under a row and the edge of a band belong in the empty room between two
+        // rows. Counted from `item_spacing`, the line landed inside the words of the next row
+        // (y 616 while that row began at y 615) and the bands of the grid came from the row
+        // heights of the frame before. Both are placed from what the cells took now, and
+        // neither may touch a word.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words to wrap onto two lines |\n| second row | two |\n| third row | a cell long enough that it wraps as well somewhere |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        // The words of this table, told apart from the words of the panel around it by what
+        // they say: a band is looked for where these words are, and nowhere else — the panel
+        // has bands of its own (its tabs, its buttons).
+        let mut parts = table_parts(&gui);
+        let mine = |word: &str| word == "what" || word == "why" || word.contains("row");
+        parts.words.retain(|(_, _, _, _, word)| mine(word));
+        // A band of this table runs from the left edge of the panel to the right edge of the
+        // table's own words — which is what tells it apart from the bands of the panel around
+        // it (a tab, a button), and from the panel's own background, which is wider than half
+        // the panel and was dropped above.
+        let panel = gui.app().state.agent.shown_rect.expect("the panel");
+        let right_edge = parts
+            .words
+            .iter()
+            .map(|(_, _, _, x1, _)| *x1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        parts.bands.retain(|(_, _, left, right)| {
+            *left <= panel.left() + 6.0 && *right >= right_edge - 2.0
+        });
+        assert!(
+            parts.words.len() >= 6,
+            "the table is not drawn: {} pieces of text",
+            parts.words.len()
+        );
+        assert!(parts.lines.len() >= 3, "the table has no lines");
+        assert!(!parts.bands.is_empty(), "the table has no bands");
+        // No allowance: a line one point inside a word is a line drawn across it, which is
+        // exactly what counting the gap from `item_spacing` produced.
+        let crossing = |y: f32| {
+            parts
+                .words
+                .iter()
+                .any(|(top, bottom, _, _, _)| y > *top && y < *bottom)
+        };
+        for y in &parts.lines {
+            assert!(
+                !crossing(*y),
+                "a line at {y:.1} is drawn across the words of a row"
+            );
+        }
+        for (top, bottom, _, _) in &parts.bands {
+            assert!(
+                !crossing(*top) && !crossing(*bottom),
+                "a band runs from {top:.1} to {bottom:.1}, across the words of a row"
+            );
+            assert!(
+                parts.lines.iter().any(|y| (y - top).abs() < 1.5),
+                "the band starting at {top:.1} is not bounded by a line"
+            );
+        }
+        gui.app_mut().state.agent.stop();
+    }
+
     #[test]
     fn a_table_takes_only_the_room_its_words_need() {
         // A cell of a table takes the room its words need, not the whole column it could

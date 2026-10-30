@@ -120,18 +120,22 @@ fn render(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
     egui_commonmark::CommonMarkViewer::new().show(ui, cache, markdown);
 }
 
-/// Draws a table through egui's own grid, with a ceiling on its columns and lines between
-/// them.
+/// Draws a table through egui's own grid, with a ceiling on its columns, a band on every
+/// other row and lines between the columns and the rows.
 fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         let gap = ui.spacing().item_spacing.x;
         let room = ui.available_width();
         let share = ((room - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
-        // The id of the piece the table is drawn in: two tables in one answer are two
-        // pieces, and a grid under a shared id is what egui warns about over the table.
+        // The bands are drawn here rather than by the grid: a grid paints them from the row
+        // heights of the frame before, and with a cell that wraps its bands drift away from
+        // the words they belong to. A place for each band is taken before the words are drawn,
+        // so the bands stay behind the text — a band of every other row, the heading counted.
+        let slots: Vec<egui::layers::ShapeIdx> = (0..table.rows.len() / 2)
+            .map(|_| ui.painter().add(egui::Shape::Noop))
+            .collect();
         let cells = egui::Grid::new(ui.id())
-            .striped(true)
             .num_columns(columns)
             .max_col_width(share)
             .show(ui, |ui| {
@@ -160,52 +164,91 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
                 rows
             })
             .inner;
-        lines(ui, &cells, columns, gap);
+        bands_and_lines(ui, &slots, &cells);
     });
 }
 
-/// The lines of the table, drawn over the grid: a grid draws none of its own.
+/// The bands and the lines of a table, placed from what the cells actually took.
 ///
-/// Where they go is measured, not counted. Every cell says how much room it took, the widest
-/// cell of a column is that column's edge, and a line sits halfway into the gap between two
-/// columns — drawn at a guessed x it would cross the words of one column or of the other.
-fn lines(ui: &Ui, cells: &[Vec<egui::Rect>], columns: usize, gap: f32) {
-    let top = cells
-        .iter()
-        .flatten()
-        .map(|rect| rect.top())
-        .fold(f32::INFINITY, f32::min);
-    let bottom = cells
-        .iter()
-        .flatten()
-        .map(|rect| rect.bottom())
-        .fold(f32::NEG_INFINITY, f32::max);
-    let left = cells
-        .iter()
-        .flatten()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-    if !top.is_finite() || bottom <= top || !left.is_finite() {
+/// A column's edge is its widest cell and a row's is its tallest, and both a line and the edge
+/// of a band sit halfway into the room the grid left between two neighbours — the room it left,
+/// not the room `item_spacing` suggests. Counted from the spacing, the line under a row lands
+/// inside the next row as soon as a cell wraps, and it is drawn there.
+fn bands_and_lines(ui: &Ui, slots: &[egui::layers::ShapeIdx], cells: &[Vec<egui::Rect>]) {
+    if cells.is_empty() || cells.iter().all(Vec::is_empty) {
         return;
     }
-    let edge = |column: usize| {
+    let columns = cells.iter().map(Vec::len).max().unwrap_or(0);
+    let row_top = |row: &[egui::Rect]| {
+        row.iter()
+            .map(|rect| rect.top())
+            .fold(f32::INFINITY, f32::min)
+    };
+    let row_bottom = |row: &[egui::Rect]| {
+        row.iter()
+            .map(|rect| rect.bottom())
+            .fold(f32::NEG_INFINITY, f32::max)
+    };
+    let column_left = |column: usize| {
+        cells
+            .iter()
+            .filter_map(|row| row.get(column))
+            .map(|rect| rect.left())
+            .fold(f32::INFINITY, f32::min)
+    };
+    let column_right = |column: usize| {
         cells
             .iter()
             .filter_map(|row| row.get(column))
             .map(|rect| rect.right())
             .fold(f32::NEG_INFINITY, f32::max)
     };
+
+    let top = row_top(&cells[0]);
+    let bottom = row_bottom(&cells[cells.len() - 1]);
+    let left = (0..columns).map(column_left).fold(f32::INFINITY, f32::min);
+    let right = (0..columns)
+        .map(column_right)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !top.is_finite() || bottom <= top || !left.is_finite() {
+        return;
+    }
+    // Where one row ends and the next begins, and where the table begins and ends.
+    let mut edge: Vec<f32> = Vec::with_capacity(cells.len() + 1);
+    edge.push(top);
+    for index in 0..cells.len().saturating_sub(1) {
+        edge.push((row_bottom(&cells[index]) + row_top(&cells[index + 1])) * 0.5);
+    }
+    edge.push(bottom);
+
+    // A band on every other row, from one edge to the next: the same edges the lines are
+    // drawn on, so a band never reaches past the line into the words of the row below it.
+    let margin = ui.spacing().item_spacing.x * 0.5;
+    for (slot, index) in slots.iter().zip((1..cells.len()).step_by(2)) {
+        ui.painter().set(
+            *slot,
+            egui::Shape::rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left - margin, edge[index]),
+                    egui::pos2(right + margin, edge[index + 1]),
+                ),
+                0.0,
+                ui.visuals().faint_bg_color,
+            ),
+        );
+    }
+
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     let painter = ui.painter();
     for column in 0..columns.saturating_sub(1) {
-        painter.vline(edge(column) + gap * 0.5, top..=bottom, stroke);
+        painter.vline(
+            (column_right(column) + column_left(column + 1)) * 0.5,
+            top..=bottom,
+            stroke,
+        );
     }
-    for row in cells.iter().take(cells.len().saturating_sub(1)) {
-        let bottom_of_row = row
-            .iter()
-            .map(|rect| rect.bottom())
-            .fold(f32::NEG_INFINITY, f32::max);
-        painter.hline(left..=edge(columns - 1), bottom_of_row + gap * 0.5, stroke);
+    for y in edge.iter().take(edge.len().saturating_sub(1)).skip(1) {
+        painter.hline(left..=right, *y, stroke);
     }
 }
 
