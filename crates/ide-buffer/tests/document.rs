@@ -117,3 +117,42 @@ fn a_lone_carriage_return_is_a_line_break() {
     assert_eq!(doc.line_col_to_char(1, 0), 4);
     assert_eq!(doc.char_to_line_col(6), (1, 2));
 }
+
+#[test]
+fn replacing_a_range_is_one_undo_step() {
+    let mut d = Document::new("one two one");
+    d.replace_range(0..3, "1");
+    // The second replacement is written where the text stands now, not where it stood before
+    // the first one: the first made the document two characters shorter.
+    d.replace_range(6..9, "1");
+    assert_eq!(d.text(), "1 two 1");
+    // Each replacement is its own step, and each reverts on its own.
+    assert!(d.undo());
+    assert_eq!(d.text(), "1 two one");
+    assert!(d.undo());
+    assert_eq!(d.text(), "one two one");
+    // And forward again, in the same order.
+    assert!(d.redo());
+    assert_eq!(d.text(), "1 two one");
+    assert!(d.redo());
+    assert_eq!(d.text(), "1 two 1");
+}
+
+#[test]
+fn a_replacement_that_takes_nothing_away_extends_a_typing_step() {
+    // An insertion at the caret is a replacement of nothing, and behaves as typing does.
+    let mut d = Document::new("ab");
+    d.replace_range(2..2, "c");
+    assert_eq!(d.text(), "abc");
+    assert!(d.undo());
+    assert_eq!(d.text(), "ab");
+}
+
+#[test]
+fn a_replacement_of_a_stretch_that_is_longer_than_one_character_reverts_whole() {
+    let mut d = Document::new("before middle after");
+    d.replace_range(7..13, "X");
+    assert_eq!(d.text(), "before X after");
+    assert!(d.undo());
+    assert_eq!(d.text(), "before middle after");
+}

@@ -74,20 +74,46 @@ impl Document {
         self.dirty = true;
     }
 
+    /// Replaces a range of chars with `text`, as one step of the history.
+    ///
+    /// `remove` and `insert` on the same place are two steps of the history, so a search
+    /// replacing ten places would need ten presses of undo to take them back. One step holds
+    /// both the text taken out and the text put in.
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str) {
+        let len = self.rope.len_chars();
+        let start = range.start.min(len);
+        let end = range.end.min(len).max(start);
+        let removed = self.rope.slice(start..end).to_string();
+        if removed.is_empty() && text.is_empty() {
+            return;
+        }
+        self.rope.remove(start..end);
+        self.rope.insert(start, text);
+        self.history.record(Edit {
+            range: start..end,
+            removed,
+            inserted: text.to_string(),
+            kind: if text.is_empty() {
+                EditKind::Remove
+            } else {
+                EditKind::Insert
+            },
+        });
+        self.dirty = true;
+    }
+
     /// Reverts the last step. Returns false when there is nothing to revert.
+    ///
+    /// A step is a range that now holds the text it put in, and both directions are the same
+    /// move read backwards: the text in the range is taken out, the text the step replaced is
+    /// laid back. A step that only inserted, or only removed, is the same move with one side
+    /// empty — and a step that did both (a replacement, a search replacing many places as
+    /// one step) reverts as one, which a step recorded as an insertion alone could not do.
     pub fn undo(&mut self) -> bool {
         let Some(edit) = self.history.pop_undo() else {
             return false;
         };
-        match edit.kind {
-            EditKind::Insert => {
-                let end = edit.range.start + edit.inserted.chars().count();
-                self.rope.remove(edit.range.start..end);
-            }
-            EditKind::Remove => {
-                self.rope.insert(edit.range.start, &edit.removed);
-            }
-        }
+        self.swap(edit.range.start, &edit.inserted, &edit.removed);
         self.history.push_redo(edit);
         self.dirty = true;
         true
@@ -98,18 +124,22 @@ impl Document {
         let Some(edit) = self.history.pop_redo() else {
             return false;
         };
-        match edit.kind {
-            EditKind::Insert => {
-                self.rope.insert(edit.range.start, &edit.inserted);
-            }
-            EditKind::Remove => {
-                let end = edit.range.start + edit.removed.chars().count();
-                self.rope.remove(edit.range.start..end);
-            }
-        }
+        self.swap(edit.range.start, &edit.removed, &edit.inserted);
         self.history.push_undo(edit);
         self.dirty = true;
         true
+    }
+
+    /// Puts `put` where `take` stands, at `at`, in characters.
+    fn swap(&mut self, at: usize, take: &str, put: &str) {
+        let at = at.min(self.rope.len_chars());
+        let take = take.chars().count();
+        if take > 0 {
+            self.rope.remove(at..(at + take).min(self.rope.len_chars()));
+        }
+        if !put.is_empty() {
+            self.rope.insert(at, put);
+        }
     }
 
     pub fn can_undo(&self) -> bool {
