@@ -221,6 +221,7 @@ dependencies = [
  "ide-term",
  "jiff",
  "lsp-types",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "tempfile",

@@ -6,6 +6,7 @@ pub mod editor;
 pub mod git;
 pub mod history;
 pub mod hover;
+pub mod markdown;
 pub mod preview;
 pub mod problems;
 pub mod prompt;

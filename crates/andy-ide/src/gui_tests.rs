@@ -6317,6 +6317,121 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_table_of_long_cells_wraps_inside_the_panel() {
+        // A cell of a table is a share of the panel wide and wraps inside it. The renderer
+        // puts a cell in a container that never wraps, and three cells of a sentence each
+        // made the table 240 px wider than the panel — a horizontal bar under a table with
+        // nothing wide in it. A table that fits by dropping what it cannot draw would be no
+        // better, so the cells are looked for as well as measured.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // A sentence long enough that three of them in a row want more room than the
+        // panel has: with the renderer drawing the cells, this table came out 240 px too
+        // wide.
+        let sentence =
+            "Every cell here is a phrase long enough to need wrapping somewhere in the line";
+        let table = format!(
+            "| what | why | how |\n| --- | --- | --- |\n| {s} | {s} | {s} |\n",
+            s = sentence
+        );
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table));
+        gui.settle();
+
+        let panel = gui.app().state.agent.shown_rect.expect("the panel");
+        let mut cells = 0;
+        let mut widest: f32 = 0.0;
+        for clipped in &gui.harness.output().shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                let inside = text.pos.x >= panel.left() - 40.0
+                    && text.pos.y >= panel.top()
+                    && text.pos.y <= panel.bottom();
+                if !inside {
+                    continue;
+                }
+                if text.galley.job.text.contains("Every cell") {
+                    cells += 1;
+                }
+                widest = widest.max(text.pos.x + text.galley.size().x);
+            }
+        }
+        assert!(
+            cells >= 3,
+            "the cells of the table are not drawn: {cells} of them are on screen"
+        );
+        assert!(
+            widest <= panel.right() + 1.0,
+            "the table is wider than the panel: {widest:.1} against {:.1}",
+            panel.right()
+        );
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
+    fn a_line_without_spaces_stays_inside_the_panel() {
+        // Code and inline code carry lines with nowhere to break — a path, a hash, a URL —
+        // and the answer is read in a panel, not in a page that scrolls sideways. What the
+        // panel draws has to be no wider than the panel.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        for (name, body) in [
+            ("a block of code", format!("```\n{}\n```", "x".repeat(300))),
+            ("inline code", format!("see `{}` here", "y".repeat(300))),
+        ] {
+            gui.app_mut().state.agent.transcript.clear();
+            gui.app_mut()
+                .state
+                .agent
+                .transcript
+                .push(crate::agent::Line::Agent(body));
+            gui.settle();
+            let panel = gui.app().state.agent.shown_rect.expect("the panel");
+            let mut widest: f32 = 0.0;
+            for clipped in &gui.harness.output().shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    if text.pos.x < panel.left()
+                        || text.pos.y < panel.top()
+                        || text.pos.y > panel.bottom()
+                    {
+                        continue;
+                    }
+                    widest = widest.max(text.pos.x + text.galley.size().x);
+                }
+            }
+            assert!(
+                widest <= panel.right() + 1.0,
+                "{name} is wider than the panel: {widest:.1} against {:.1}",
+                panel.right()
+            );
+        }
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
     fn two_answers_with_a_table_do_not_share_a_grid_id() {
         // An answer's Markdown is drawn by a renderer that puts a Grid under the panel's
         // ui, and every answer in a conversation shares that ui: two answers carrying a

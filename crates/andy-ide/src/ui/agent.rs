@@ -85,7 +85,7 @@ fn plain_key(ui: &mut Ui, key: egui::Key) -> bool {
 /// fraction of a point apart — which is what a heavier weight is, on the screen, when there
 /// is no heavier weight to be had. The words are announced to the readable tree as they are:
 /// nothing else knows the line is there.
-fn bold_label(ui: &mut Ui, text: &str) {
+pub(super) fn bold_label(ui: &mut Ui, text: &str) {
     /// How far the second pass is shifted: enough to thicken, not enough to smear.
     const THICKEN: f32 = 0.6;
 
@@ -867,13 +867,12 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         // several answers share the panel's ui, and a Grid under a shared
                         // id is what egui answers with "Second use of GRID ID …" over the
                         // block.
-                        ui.push_id(("agent-answer", index), |ui| {
-                            egui_commonmark::CommonMarkViewer::new().show(
-                                ui,
-                                &mut state.commonmark,
-                                text,
-                            );
-                        });
+                        super::markdown::answer(
+                            ui,
+                            &mut state.commonmark,
+                            egui::Id::new(("agent-answer", index)),
+                            text,
+                        );
                     }
                     Line::Thinking(thought) => {
                         // The id is the block's place in the conversation, not the length
