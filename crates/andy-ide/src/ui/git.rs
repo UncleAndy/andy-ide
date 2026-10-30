@@ -9,13 +9,15 @@ use ide_git::{Area, Branch, Change};
 
 use crate::state::{Action, AppState};
 
+use super::{diff, history};
+
 /// What the panel was asked to do this frame, applied after the list is drawn.
 enum Asked {
     StageSelected,
     UnstageSelected,
     StageAll,
     Commit,
-    History,
+    HideDiff,
     Switch(String),
     CreateBranch,
 }
@@ -39,19 +41,65 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
                 ui.strong("Git");
             }
         }
-        // History is reachable whether or not the work tree is clean: a clean
-        // repository is exactly when a person goes looking at what came before.
+        ui.separator();
+        // The two windows this panel has onto the repository, as a choice inside the tab and not
+        // as tabs of their own. A panel that opened another panel would take the person away
+        // from the list they were reading — and the list is where they were.
         if ui
-            .button("Show history")
-            .on_hover_text("List the commits behind HEAD")
+            .selectable_label(!state.git.history, "Changes")
+            .on_hover_text("What is staged and what is only on disk")
             .clicked()
         {
-            asked = Some(Asked::History);
+            state.git.history = false;
+        }
+        if ui
+            .selectable_label(state.git.history, "History")
+            .on_hover_text("The commits behind HEAD")
+            .clicked()
+        {
+            state.git.history = true;
         }
         branches_menu(ui, state, &mut asked);
         remote_buttons(ui, state);
     });
     ui.separator();
+
+    // The diff of what is picked, under the list: one change, line by line, without leaving the
+    // panel that lists it. A fresh one opens the pane by itself, because a diff that was asked
+    // for and not shown is a question that was answered with silence.
+    if state.git.diff_open {
+        egui::Panel::bottom("git_diff")
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Diff");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Hide")
+                            .on_hover_text("Keep the list to yourself for a while")
+                            .clicked()
+                        {
+                            asked = Some(Asked::HideDiff);
+                        }
+                    });
+                });
+                diff::panel(ui, state);
+            });
+    }
+
+    if state.git.history {
+        history::body(ui, state);
+    } else {
+        changes(ui, state);
+    }
+    apply(state, asked);
+}
+
+/// The changes of the repository: the two halves of `git status`, the commit field, and the
+/// gestures the list answers to.
+fn changes(ui: &mut Ui, state: &mut AppState) {
+    let mut asked = None;
 
     if let Some(error) = &state.git.error {
         ui.add_space(6.0);
@@ -217,7 +265,7 @@ fn apply(state: &mut AppState, asked: Option<Asked>) {
         Some(Asked::UnstageSelected) => state.git.unstage_selected(),
         Some(Asked::StageAll) => state.git.stage_all(),
         Some(Asked::Commit) => state.git.commit(),
-        Some(Asked::History) => state.git.show_history = true,
+        Some(Asked::HideDiff) => state.git.diff_open = false,
         Some(Asked::Switch(name)) => state.git.switch_to(&name),
         Some(Asked::CreateBranch) => state.git.create_branch(),
         None => {}

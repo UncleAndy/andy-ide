@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabInsert};
+use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabInsert, TabPath};
 
 use crate::state::{AppState, DEFAULT_FONT_SIZE, MAX_ZOOM, MIN_ZOOM, display_name};
-use crate::ui::{Tab, Viewer};
+use crate::ui::{Place, Tab, Viewer};
 
 /// How often the dock layout is turned into JSON while the app runs.
 const LAYOUT_SERIALIZE_SECS: f64 = 0.5;
@@ -33,13 +33,18 @@ impl App {
         project: Option<PathBuf>,
         file: Option<PathBuf>,
     ) -> Self {
-        let state = AppState::with_config_dir(config_dir, project, file);
-        let dock = with_terminal(
-            state
-                .stored_layout()
-                .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
-                .unwrap_or_else(default_layout),
-        );
+        let mut state = AppState::with_config_dir(config_dir, project, file);
+        // What the person put away is part of the project, like the layout: a panel that was left
+        // off screen comes back off screen. A project that has never said comes back with the
+        // panels this build starts without.
+        state.hidden = state
+            .stored_hidden()
+            .unwrap_or_else(|| PUT_AWAY_AT_START.to_vec());
+        let mut dock = state
+            .stored_layout()
+            .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
+            .unwrap_or_else(default_layout);
+        complete(&mut dock, &state.hidden);
         Self {
             state,
             dock,
@@ -49,6 +54,13 @@ impl App {
         }
     }
 }
+
+/// The panels a project starts without.
+///
+/// The diff and the history are windows onto the repository the Git panel already shows, and the
+/// Git panel says the same things from inside itself; a project that wants them as panels of their
+/// own asks in the View menu, and the answer is remembered with the project.
+const PUT_AWAY_AT_START: [Tab; 2] = [Tab::Diff, Tab::History];
 
 /// Editor in the middle, projects on the left, problems along the bottom.
 ///
@@ -69,55 +81,58 @@ fn default_layout() -> DockState<Tab> {
         0.72,
         Node::leaf(Tab::Problems),
     );
-    with_terminal(dock)
+    dock
 }
 
-/// Puts the terminal in the bottom leaf as a tab beside the problems.
+/// Puts the panels the layout does not have where their kind belongs.
 ///
-/// The bottom strip is one row of tabs, not two panes: a pane of its own took half
-/// the width of the terminal away from the code above and half of it from the panel
-/// beside it. Both panels are drawn by their own tab, so whichever is in front uses
-/// the whole width.
-///
-/// A saved layout can disagree with that in two ways, and both are tidied here: it
-/// may have no terminal tab at all, or it may have one in a pane of its own from a
-/// version that split the strip.
-fn with_terminal(dock: DockState<Tab>) -> DockState<Tab> {
-    let dock = place_beside_problems(place_beside_problems(dock, Tab::Terminal), Tab::Agent);
-    let dock = place_beside_problems(dock, Tab::Git);
-    let dock = place_beside_problems(dock, Tab::Diff);
-    place_beside_problems(dock, Tab::History)
-}
-
-/// Puts `tab` in the bottom leaf, beside the problems, where it belongs.
-///
-/// A saved layout can disagree with that in two ways, and both are tidied here: it
-/// may have no such tab at all, or it may have one in a pane of its own from a
-/// version that split the strip.
-fn place_beside_problems(mut dock: DockState<Tab>, tab: Tab) -> DockState<Tab> {
-    let Some(problems) = dock.find_tab(&Tab::Problems) else {
-        if dock.find_tab(&tab).is_none() {
-            dock.push_to_first_leaf(tab);
+/// A layout saved by an older build can be missing a panel that has since been added, and a
+/// window has to be able to show it — so a missing panel is put back. A panel the person put away
+/// is missing on purpose and is left missing, which is what the workspace remembers. A panel that
+/// is already in the layout is not touched at all: where a person dragged it is the layout, and
+/// the layout is what a workspace keeps between launches.
+fn complete(dock: &mut DockState<Tab>, hidden: &[Tab]) {
+    for tab in Tab::ALL {
+        if hidden.contains(&tab) || dock.find_tab(&tab).is_some() {
+            continue;
         }
-        return dock;
-    };
-    match dock.find_tab(&tab) {
-        Some(found) if found.node_path() == problems.node_path() => dock,
-        Some(found) => {
-            dock.move_tab(found, (problems.node_path(), TabInsert::Append));
-            // The problems were in front before the move and are in front after it.
-            let _ = dock.set_active_tab(problems);
-            dock
-        }
-        None => {
-            // A new tab would otherwise land in the focused leaf, which is not
-            // necessarily the bottom one.
-            dock.set_focused_node_and_surface(problems.node_path());
-            dock.push_to_focused_leaf(tab);
-            let _ = dock.set_active_tab(problems);
-            dock
-        }
+        place(dock, tab);
     }
+}
+
+/// Puts one panel where its kind belongs.
+fn place(dock: &mut DockState<Tab>, tab: Tab) {
+    match tab.place() {
+        Place::Left => {
+            dock.split(NodePath::MAIN_ROOT, Split::Left, 0.22, Node::leaf(tab));
+        }
+        Place::Centre => match dock.find_tab(&Tab::Projects) {
+            // The code stands to the right of the projects panel, which is where the default
+            // layout puts it and what a person who put it away expects to get back.
+            Some(projects) => {
+                dock.split(projects.node_path(), Split::Right, 0.22, Node::leaf(tab));
+            }
+            None => dock.push_to_first_leaf(tab),
+        },
+        Place::Bottom => match dock.find_tab(&Tab::Problems) {
+            Some(problems) => beside(dock, problems, tab),
+            None => {
+                dock.split(NodePath::MAIN_ROOT, Split::Below, 0.72, Node::leaf(tab));
+            }
+        },
+    }
+}
+
+/// Adds a panel to the leaf that holds `neighbour`, and leaves the neighbour in front: the bottom
+/// strip is one row of tabs, and a panel arriving in it must not take the front from the panel a
+/// person was reading.
+fn beside(dock: &mut DockState<Tab>, neighbour: TabPath, tab: Tab) {
+    dock.push_to_first_leaf(tab);
+    let Some(added) = dock.find_tab(&tab) else {
+        return;
+    };
+    dock.move_tab(added, (neighbour.node_path(), TabInsert::Append));
+    let _ = dock.set_active_tab(neighbour);
 }
 
 impl eframe::App for App {
@@ -218,12 +233,6 @@ impl App {
         self.state.git.follow(root);
         let config = self.state.config_dir.clone();
         self.state.agent.follow(root, &config);
-        if std::mem::take(&mut self.state.git.show_diff) {
-            bring_to_front(&mut self.dock, Tab::Diff);
-        }
-        if std::mem::take(&mut self.state.git.show_history) {
-            bring_to_front(&mut self.dock, Tab::History);
-        }
         self.handle_keys(ui);
         self.state.poll_fs_events();
         self.state.poll_lsp();
@@ -365,16 +374,16 @@ impl App {
             self.state.preview_open = !self.state.preview_open;
         }
         if terminal_pressed {
-            bring_to_front(&mut self.dock, Tab::Terminal);
+            show_panel(&mut self.dock, &mut self.state, Tab::Terminal);
         }
         if git_pressed {
-            bring_to_front(&mut self.dock, Tab::Git);
+            show_panel(&mut self.dock, &mut self.state, Tab::Git);
         }
         if blame_pressed {
             self.state.toggle_blame();
         }
         if agent_pressed {
-            bring_to_front(&mut self.dock, Tab::Agent);
+            show_panel(&mut self.dock, &mut self.state, Tab::Agent);
         }
         if quick_open_pressed {
             self.state.quick_open.open();
@@ -435,6 +444,25 @@ impl App {
 ///
 /// The keyboard follows to that pane: a panel brought forward is the one that is
 /// about to be used.
+/// Puts a panel on screen: in front if it is already in the dock, where its kind belongs if it
+/// is not. Everything behind it — a shell that is still running, a conversation, the changes of a
+/// repository — is untouched: a panel that is put away is not stopped.
+pub(crate) fn show_panel(dock: &mut DockState<Tab>, state: &mut AppState, tab: Tab) {
+    state.bring_back(tab);
+    if dock.find_tab(&tab).is_none() {
+        place(dock, tab);
+    }
+    bring_to_front(dock, tab);
+}
+
+/// Puts a panel away: it leaves the dock and the workspace remembers that it is gone.
+pub(crate) fn hide_panel(dock: &mut DockState<Tab>, state: &mut AppState, tab: Tab) {
+    state.put_away(tab);
+    if let Some(path) = dock.find_tab(&tab) {
+        dock.remove_tab(path);
+    }
+}
+
 pub(crate) fn bring_to_front(dock: &mut DockState<Tab>, tab: Tab) {
     if let Some(path) = dock.find_tab(&tab) {
         dock.set_focused_node_and_surface(path.node_path());
@@ -480,19 +508,26 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 ui.close();
             }
             ui.separator();
-            // The bottom of the window is a row of tabs, so a panel is "opened" by
-            // bringing its tab to the front.
-            if ui.button("problems	Ctrl+Shift+M").clicked() {
-                bring_to_front(dock, Tab::Problems);
-                ui.close();
+            // Every panel the window has, on or off. The list is built from the panels this
+            // build knows rather than written out here, so a panel cannot end up reachable only
+            // by remembering its shortcut. A tick shows the panel and brings it to the front; a
+            // panel that is not on screen is put back where its kind belongs, with everything
+            // behind it exactly as it was left.
+            let mut asked: Option<(Tab, bool)> = None;
+            for tab in Tab::ALL {
+                let mut shown = dock.find_tab(&tab).is_some();
+                let label = match tab.shortcut() {
+                    Some(key) => format!("{title}\t{key}", title = tab.title()),
+                    None => tab.title().to_owned(),
+                };
+                if ui.checkbox(&mut shown, label).changed() {
+                    asked = Some((tab, shown));
+                }
             }
-            if ui.button("terminal	Alt+F12").clicked() {
-                bring_to_front(dock, Tab::Terminal);
-                ui.close();
-            }
-            if ui.button("git	Alt+9").clicked() {
-                bring_to_front(dock, Tab::Git);
-                ui.close();
+            match asked {
+                Some((tab, true)) => show_panel(dock, state, tab),
+                Some((tab, false)) => hide_panel(dock, state, tab),
+                None => {}
             }
             ui.separator();
             let mut dark = state.config.theme == ide_core::Theme::Dark;
@@ -541,17 +576,27 @@ mod tests {
     }
 
     #[test]
-    fn default_layout_holds_every_panel() {
-        let dock = default_layout();
+    fn the_default_layout_is_a_frame_that_is_filled_in() {
+        // A default layout is a frame — the code, the files and the problems — and the rest of the
+        // panels are arranged around it by `complete`, which knows which of them a project starts
+        // without.
+        let mut dock = default_layout();
+        let frame: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
+        assert_eq!(
+            frame.len(),
+            3,
+            "the default layout is the frame, not the furniture: {frame:?}"
+        );
+
+        complete(&mut dock, &PUT_AWAY_AT_START);
         let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
-        assert_eq!(tabs.len(), 8, "every panel is part of the layout: {tabs:?}");
-        assert!(tabs.contains(&Tab::Projects));
-        assert!(tabs.contains(&Tab::Editor));
-        assert!(tabs.contains(&Tab::Problems));
-        assert!(tabs.contains(&Tab::Terminal));
-        assert!(tabs.contains(&Tab::Git));
-        assert!(tabs.contains(&Tab::Diff));
-        assert!(tabs.contains(&Tab::History));
+        assert!(tabs.contains(&Tab::Projects) && tabs.contains(&Tab::Editor));
+        assert!(tabs.contains(&Tab::Problems) && tabs.contains(&Tab::Terminal));
+        assert!(tabs.contains(&Tab::Git) && tabs.contains(&Tab::Agent));
+        assert!(
+            !tabs.contains(&Tab::Diff) && !tabs.contains(&Tab::History),
+            "a panel a project starts without was put on screen: {tabs:?}"
+        );
     }
 
     #[test]
@@ -883,13 +928,31 @@ mod layout_persistence_tests {
         let (_project, _config, app) = drawn_app();
         let json = serde_json::to_string(&app.dock).expect("layout serializes");
         let back: DockState<Tab> = serde_json::from_str(&json).expect("layout reads back");
-        assert_eq!(back.iter_all_tabs().count(), 8);
+        // Every panel that was in the layout is still in it, and no other: what the file is for is
+        // the arrangement, and an arrangement is about the panels that were arranged.
+        assert_eq!(
+            back.iter_all_tabs().count(),
+            app.dock.iter_all_tabs().count()
+        );
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
     #[test]
     fn a_stored_layout_is_restored_at_startup() {
-        let (project, config, app) = drawn_app();
+        let (project, config, mut app) = drawn_app();
+        // A panel where the defaults would never put it: the problems belong along the bottom, and
+        // here they are standing with the projects. A layout that is read back keeps them there; a
+        // layout that is rebuilt from the defaults would move them.
+        let projects = app.dock.find_tab(&Tab::Projects).expect("the projects tab");
+        let projects_path = projects.node_path();
+        let problems = app.dock.find_tab(&Tab::Problems).expect("the problems tab");
+        app.dock
+            .move_tab(problems, (projects_path, egui_dock::TabInsert::Append));
+        let stored_node = app
+            .dock
+            .find_tab(&Tab::Problems)
+            .expect("the problems tab")
+            .node_path();
         let layout = serde_json::to_string(&app.dock).unwrap();
 
         let workspace = Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
@@ -898,6 +961,7 @@ mod layout_persistence_tests {
                 tabs: vec![],
                 active: None,
                 layout: Some(layout.clone()),
+                hidden: None,
             })
             .unwrap();
 
@@ -906,8 +970,53 @@ mod layout_persistence_tests {
             Some(project.path().to_path_buf()),
             None,
         );
-        assert_eq!(restored.dock.iter_all_tabs().count(), 8);
-        assert_eq!(serde_json::to_string(&restored.dock).unwrap(), layout);
+        // The layout of the panels that are on screen, and only those: the panels this build
+        // starts without were never in it, and a workspace that has never said does not get them
+        // added.
+        assert_eq!(restored.dock.iter_all_tabs().count(), 6);
+        assert_eq!(
+            restored
+                .dock
+                .find_tab(&Tab::Problems)
+                .map(|path| path.node_path()),
+            Some(stored_node),
+            "the restored window rebuilt the layout instead of reading it"
+        );
+    }
+
+    #[test]
+    fn a_panel_put_away_is_still_away_after_a_restart() {
+        let (project, config, mut app) = drawn_app();
+        hide_panel(&mut app.dock, &mut app.state, Tab::Terminal);
+        assert!(app.dock.find_tab(&Tab::Terminal).is_none());
+
+        // Both halves of the answer are written together: where the panels stand, and which of
+        // them is not there at all.
+        let root = project.path().canonicalize().unwrap();
+        let workspace = Workspace::open(&root).unwrap();
+        workspace
+            .write_state(&WorkspaceState {
+                tabs: vec![],
+                active: None,
+                layout: Some(serde_json::to_string(&app.dock).unwrap()),
+                hidden: Some(vec![Tab::Terminal.slug().to_owned()]),
+            })
+            .unwrap();
+
+        let restored = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        assert!(
+            restored.dock.find_tab(&Tab::Terminal).is_none(),
+            "a panel that was put away came back on its own"
+        );
+        assert!(restored.state.hidden.contains(&Tab::Terminal));
+        assert!(
+            restored.dock.find_tab(&Tab::Git).is_some(),
+            "the panels that were on screen did not come back"
+        );
     }
 
     #[test]
@@ -920,12 +1029,13 @@ mod layout_persistence_tests {
                 tabs: vec![],
                 active: None,
                 layout: Some("{\"nonsense\": true}".to_owned()),
+                hidden: None,
             })
             .unwrap();
 
         let app = App::new(Some(project.path().to_path_buf()), None);
         let _ = config;
-        assert_eq!(app.dock.iter_all_tabs().count(), 8);
+        assert_eq!(app.dock.iter_all_tabs().count(), 6);
     }
 }
 
@@ -3859,7 +3969,8 @@ mod the_bottom_strip {
 
     #[test]
     fn the_panels_share_one_leaf() {
-        let dock = default_layout();
+        let mut dock = default_layout();
+        complete(&mut dock, &PUT_AWAY_AT_START);
         let problems = dock.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = dock.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(
@@ -3867,7 +3978,7 @@ mod the_bottom_strip {
             terminal.node_path(),
             "the terminal still has a pane of its own"
         );
-        assert_eq!(tab_count_in_the_problems_leaf(&dock), 6);
+        assert_eq!(tab_count_in_the_problems_leaf(&dock), 4);
         let git = dock.find_tab(&Tab::Git).expect("a git tab");
         assert_eq!(
             problems.node_path(),
@@ -3895,8 +4006,9 @@ mod the_bottom_strip {
             0.72,
             Node::leaf(Tab::Problems),
         );
-        // The shape this version wrote: the terminal in a pane of its own beside the
-        // problems, which is exactly what the change removes.
+        // A pane of its own, put there by a person dragging it: the window must leave it alone.
+        // Moving a tab a person placed is the same thing as forgetting where they put it, which
+        // is what a workspace is asked to remember.
         let problems = dock.find_tab(&Tab::Problems).unwrap();
         dock.split(
             problems.node_path(),
@@ -3904,11 +4016,34 @@ mod the_bottom_strip {
             0.5,
             Node::leaf(Tab::Terminal),
         );
-        let tidied = with_terminal(dock);
-        let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
-        let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
-        assert_eq!(problems.node_path(), terminal.node_path());
-        assert_eq!(tidied.iter_all_tabs().count(), 7, "a tab was duplicated");
+        let mut kept = dock.clone();
+        complete(&mut kept, &PUT_AWAY_AT_START);
+        let problems = kept.find_tab(&Tab::Problems).expect("a problems tab");
+        let terminal = kept.find_tab(&Tab::Terminal).expect("a terminal tab");
+        assert_ne!(
+            problems.node_path(),
+            terminal.node_path(),
+            "the terminal was moved back beside the problems"
+        );
+        assert_eq!(
+            kept.iter_all_tabs().count(),
+            6,
+            "a tab was added or duplicated"
+        );
+
+        // And a panel the person put away stays away.
+        let mut hidden = dock.clone();
+        let terminal = hidden.find_tab(&Tab::Terminal).unwrap();
+        hidden.remove_tab(terminal);
+        complete(&mut hidden, &[Tab::Terminal]);
+        assert!(
+            hidden.find_tab(&Tab::Terminal).is_none(),
+            "a panel that was put away came back"
+        );
+        assert!(
+            hidden.find_tab(&Tab::Agent).is_some(),
+            "a panel was not put back"
+        );
     }
 
     /// A layout written before the Git panel existed must gain one, not lose it.
@@ -3921,7 +4056,8 @@ mod the_bottom_strip {
             0.72,
             Node::leaf(Tab::Problems),
         );
-        let tidied = with_terminal(dock);
+        let mut tidied = dock;
+        complete(&mut tidied, &PUT_AWAY_AT_START);
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let git = tidied.find_tab(&Tab::Git).expect("a git tab");
         assert_eq!(problems.node_path(), git.node_path());
@@ -3941,7 +4077,8 @@ mod the_bottom_strip {
             0.72,
             Node::leaf(Tab::Problems),
         );
-        let tidied = with_terminal(dock);
+        let mut tidied = dock;
+        complete(&mut tidied, &PUT_AWAY_AT_START);
         let problems = tidied.find_tab(&Tab::Problems).expect("a problems tab");
         let terminal = tidied.find_tab(&Tab::Terminal).expect("a terminal tab");
         assert_eq!(problems.node_path(), terminal.node_path());
@@ -3949,6 +4086,6 @@ mod the_bottom_strip {
             active_tab_in(&tidied, tidied.find_tab(&Tab::Problems).unwrap()),
             Some(Tab::Problems)
         );
-        assert_eq!(tidied.iter_all_tabs().count(), 7);
+        assert_eq!(tidied.iter_all_tabs().count(), 6);
     }
 }

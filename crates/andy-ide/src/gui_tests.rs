@@ -14,6 +14,7 @@ use egui_kittest::kittest::Queryable;
 use crate::app::App;
 use crate::lsp::DiagnosticLine;
 use crate::state::Prompt;
+use crate::ui::Tab;
 
 /// A window with a project in it.
 struct Gui {
@@ -3325,6 +3326,172 @@ mod the_terminal_links {
 
 /// The Git panel: the branch, the two halves of the status, and a click that opens
 /// the file.
+mod the_panels {
+    use super::*;
+
+    /// A window on a project of its own.
+    fn on_a_project() -> Gui {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let harness = window(
+            project.path(),
+            config.path(),
+            &[("a.txt", "one\n")],
+            Some("a.txt"),
+        );
+        Gui {
+            harness,
+            _project: project,
+            _config: Some(config),
+        }
+    }
+
+    /// Clicks the cross of a tab.
+    ///
+    /// The dock draws its tab bar itself: the titles are drawn and the crosses are painted, so
+    /// there is no label to ask for and nothing in the tree of the window to click. What the dock
+    /// does give every cross is an identifier of its own — `the tab's id`, then `"close-button"` —
+    /// and egui keeps the rectangle of every widget under its identifier for a frame. The cross is
+    /// therefore asked for by name rather than guessed at by arithmetic: the arithmetic was wrong
+    /// by a padding per tab, which is how a click meant for one tab landed on the cross of the one
+    /// before it.
+    fn put_away_with_the_cross(gui: &mut Gui, tab: Tab) {
+        gui.settle();
+        let id = egui::Id::new("egui_dock::DockArea");
+        let mut found = None;
+        for (surface_index, surface) in gui.app().dock.iter_surfaces_indexed() {
+            for ((node_index, tab_index), there) in surface.iter_all_tabs() {
+                if *there != tab {
+                    continue;
+                }
+                let cross = id
+                    .with((surface_index, "surface"))
+                    .with((node_index, "node"))
+                    .with((tab_index, "tab"))
+                    .with("close-button");
+                found = gui.harness.ctx.read_response(cross).map(|it| it.rect);
+            }
+        }
+        let rect =
+            found.unwrap_or_else(|| panic!("the tab of {} has no cross on screen", tab.title()));
+        click_at(&mut gui.harness, rect.center());
+        // A click is events in a queue; the frame that reads them is what closes the tab, and the
+        // frame after that is where the dock has tidied the leaf it left behind.
+        gui.settle();
+        gui.settle();
+    }
+
+    #[test]
+    fn the_cross_puts_a_panel_away_instead_of_throwing_it_out() {
+        // The cross of a panel means what its line in the menu means: the panel leaves the window
+        // and everything behind it stays where it was. A panel is not a document, and a shell
+        // that is still running is not the dock's to stop.
+        let mut gui = on_a_project();
+        put_away_with_the_cross(&mut gui, Tab::Terminal);
+        assert!(
+            gui.app().dock.find_tab(&Tab::Terminal).is_none(),
+            "the cross left the panel in the dock"
+        );
+        assert!(
+            gui.app().state.hidden.contains(&Tab::Terminal),
+            "the cross did not write the panel down as put away"
+        );
+
+        // And the menu brings it back, which is the door it was put away from.
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Terminal\tAlt+F12").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Terminal).is_some(),
+            "the panel did not come back"
+        );
+        assert!(!gui.app().state.hidden.contains(&Tab::Terminal));
+    }
+
+    #[test]
+    fn the_keys_call_a_panel_that_was_put_away() {
+        // A shortcut is a way of asking for a panel, and asking for one that is put away must not
+        // do nothing: a person pressing Alt+F12 wants the terminal, not an explanation.
+        let mut gui = on_a_project();
+        put_away_with_the_cross(&mut gui, Tab::Terminal);
+        assert!(gui.app().dock.find_tab(&Tab::Terminal).is_none());
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::F12);
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Terminal).is_some(),
+            "the key did not bring the panel back"
+        );
+        assert!(!gui.app().state.hidden.contains(&Tab::Terminal));
+    }
+
+    #[test]
+    fn where_a_person_dragged_a_panel_is_where_it_comes_back() {
+        // Where a person dragged a panel is the layout, and the layout is what a project keeps.
+        // Reading a layout back must therefore fill in what is missing and move nothing: a panel
+        // put back where the defaults like it is the same as forgetting where it was.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let moved;
+
+        {
+            let mut harness = window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            );
+            let app = harness.state_mut();
+            let projects = app.dock.find_tab(&Tab::Projects).expect("the projects tab");
+            let projects_path = projects.node_path();
+            let git = app.dock.find_tab(&Tab::Git).expect("the git tab");
+            assert_ne!(
+                projects_path,
+                git.node_path(),
+                "the drag would prove nothing"
+            );
+            app.dock
+                .move_tab(git, (projects_path, egui_dock::TabInsert::Append));
+            harness.run();
+            let app = harness.state_mut();
+            moved = app
+                .dock
+                .find_tab(&Tab::Git)
+                .expect("the git tab")
+                .node_path();
+            // What the window writes on its way out, and every few seconds while it is open.
+            let layout = serde_json::to_string(&app.dock).expect("the layout");
+            app.state.save_workspace(Some(layout), 1000.0, true);
+        }
+
+        // A second launch on the same project.
+        let harness = window(
+            project.path(),
+            config.path(),
+            &[("a.txt", "one\n")],
+            Some("a.txt"),
+        );
+        let dock = &harness.state().dock;
+        assert!(
+            dock.find_tab(&Tab::Terminal).is_some(),
+            "the panels that were on screen did not all come back"
+        );
+        assert_eq!(
+            dock.find_tab(&Tab::Git).map(|path| path.node_path()),
+            Some(moved),
+            "the panel was moved back where the defaults like it"
+        );
+        assert!(
+            dock.find_tab(&Tab::Diff).is_none(),
+            "a panel that was put away came back on its own"
+        );
+    }
+}
+
 mod the_git_panel {
     use super::*;
 
@@ -3375,6 +3542,63 @@ mod the_git_panel {
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num9);
         gui.settle();
         gui.settle();
+    }
+
+    #[test]
+    fn the_panel_does_its_work_without_leaving_its_own_tab() {
+        // The diff and the history used to be panels of their own, and looking at a change moved
+        // the person out of the list they were reading: the list is where they were, and the
+        // answer belongs beside the question.
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+        show_panel(&mut gui);
+        let before: Vec<Tab> = gui
+            .app()
+            .dock
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .collect();
+
+        gui.harness.get_by_label("M  a.txt").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        assert!(
+            gui.app().state.git.diff_open,
+            "the diff was asked for and not opened"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("+two").is_some(),
+            "the diff is not drawn in the panel that listed the change"
+        );
+
+        // The history is the other window of the same tab.
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        assert!(
+            gui.app().state.git.history,
+            "the panel did not turn to its history"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("first").is_some(),
+            "the commits are not drawn"
+        );
+
+        let after: Vec<Tab> = gui
+            .app()
+            .dock
+            .iter_all_tabs()
+            .map(|(_, tab)| *tab)
+            .collect();
+        assert_eq!(before, after, "the panel opened a tab of its own");
+        assert_eq!(
+            gui.app_mut()
+                .dock
+                .find_active_focused()
+                .map(|(_, tab)| *tab),
+            Some(Tab::Git),
+            "the front of the window stopped being the panel that was being read"
+        );
     }
 
     #[test]
@@ -3758,7 +3982,9 @@ mod the_git_panel {
         gui.settle();
 
         show_panel(&mut gui);
-        gui.harness.get_by_label("Show history").click();
+        // The history is the panel's other window, and it is turned to inside the panel: looking
+        // at what came before is not a reason to leave the list of what is here now.
+        gui.harness.get_by_label("History").click();
         gui.settle();
         gui.settle();
 
@@ -3818,7 +4044,11 @@ mod the_git_panel {
         );
         assert!(
             gui.harness.query_by_label("+two").is_some(),
-            "the diff panel is not on screen"
+            "the diff of the commit is not on screen"
+        );
+        assert!(
+            gui.app().dock.find_tab(&Tab::History).is_none(),
+            "reading a commit opened a tab of its own"
         );
     }
 
@@ -6078,6 +6308,73 @@ mod the_agent_panel {
             "Send is not on the right half of the panel: {:?}",
             send
         );
+    }
+
+    #[test]
+    fn a_panel_put_away_from_the_menu_keeps_what_was_in_it() {
+        // The menu is the door for a panel that is not on screen at all, and putting a panel away
+        // is not throwing it out: the conversation is still there when it comes back, because the
+        // conversation was never the dock's.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        // The answer, and not the question: a transcript that only holds the request is a turn
+        // still running, and a turn still running adds to the conversation while the panel is
+        // away — the snapshot has to be of a finished turn. `settle` then runs the frames until
+        // nothing asks for another one, which is what the last chunk of an answer does.
+        wait(&mut gui, "the greeting", |gui| !answer(gui).is_empty());
+        gui.settle();
+        let said = gui.app().state.agent.transcript.clone();
+        assert!(
+            said.iter().any(|line| matches!(line, crate::agent::Line::You(_))),
+            "the request is not part of the conversation: {said:?}"
+        );
+
+        // The panel's own line in the menu, unchecked.
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Agent\tAlt+0").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Agent).is_none(),
+            "the panel is still in the dock"
+        );
+        assert!(
+            gui.app().state.hidden.contains(&Tab::Agent),
+            "the workspace did not remember that the panel was put away"
+        );
+        assert_eq!(
+            gui.app().state.agent.transcript,
+            said,
+            "the conversation went away with the panel"
+        );
+
+        // And back it comes, with everything that was in it.
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Agent\tAlt+0").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Agent).is_some(),
+            "the panel did not come back"
+        );
+        assert!(!gui.app().state.hidden.contains(&Tab::Agent));
+        assert_eq!(gui.app().state.agent.transcript, said);
     }
 
     #[test]

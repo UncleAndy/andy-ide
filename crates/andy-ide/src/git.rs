@@ -60,10 +60,12 @@ pub struct GitState {
     pub diff: Option<DiffView>,
     /// Why the diff could not be made, if it could not.
     pub diff_error: Option<String>,
-    /// Set when a fresh diff should be brought to the front.
-    pub show_diff: bool,
-    /// Set when the history panel should be brought to the front.
-    pub show_history: bool,
+    /// Whether the diff of what is picked is on screen, under the list. It is a pane of the
+    /// panel, not a tab of its own: a diff belongs to the row it was asked from.
+    pub diff_open: bool,
+    /// Whether the panel shows the history instead of the changes. One tab, two windows onto the
+    /// same repository.
+    pub history: bool,
     /// What went wrong on the last read, if anything.
     pub error: Option<String>,
     /// The message being written for the next commit.
@@ -201,7 +203,7 @@ impl GitState {
                     text: file.unified,
                 });
                 self.diff_error = None;
-                self.show_diff = true;
+                self.diff_open = true;
             }
             Err(error) => {
                 self.diff = None;
@@ -230,7 +232,7 @@ impl GitState {
                     text,
                 });
                 self.diff_error = None;
-                self.show_diff = true;
+                self.diff_open = true;
             }
             Err(error) => {
                 self.diff = None;

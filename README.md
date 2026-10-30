@@ -56,6 +56,20 @@ above the screen: `+` opens another shell, `×` closes it with its process. A UR
 `file:line` in the output is a link: `Ctrl+Click` opens it — the page in the browser,
 the file at its line in the editor.
 
+Every panel of the window is a place, not a document, and every one of them can be put
+away: the `View` menu lists them all with the key that calls each one, and the `×` on a tab
+means the same thing. Putting a panel away is not throwing it out — a shell keeps running,
+a conversation keeps its words, the changes of a repository keep their places — and the
+panel comes back where its kind belongs: the files on the left, the code in the middle,
+everything else along the bottom beside the problems. Which panels are on screen, and where
+each of them stands, are remembered with the project in `.andy-ide`: the layout is written
+out together with the list of what was put away, so the next launch is the window that was
+left. A layout is read back, not rebuilt — a panel that was dragged somewhere of its own
+stays there, and only a panel the layout has never heard of is put where its kind belongs.
+A project opened for the first time starts without the `Diff` and `History` panels: the Git
+panel says the same things from inside itself, and a window with fewer tabs is a window
+where the ones that are there can be read.
+
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 
@@ -67,14 +81,17 @@ twice. The `Git` panel sits beside `Problems` and `Terminal` in the bottom strip
 (`Alt+9`), names the branch, groups the changes under the two headings and opens a
 file when its line is clicked; a project that is not a repository says so instead of
 showing an empty list. A single click selects a change, a double click opens the file,
-and `Enter` shows its diff in the `Diff` tab beside it — both sides read where they
+and `Enter` shows its diff under the list, in the panel itself — both sides read where they
 live, `HEAD`'s tree and the index as objects, the work tree as a file, so looking at a
 diff cannot disturb the work in progress. `Stage`, `Unstage` and `Stage all` move
 changes into the index and `Commit` writes them with the message in the field. Reading
 is native; writing is the real `git`, so hooks, signing and commit templates behave
 exactly as they do on the command line, and a hook's refusal is shown in its own
-words. `Show history` lists the last two hundred commits newest first; `Enter` on one
-of them shows what it changed, in the same `Diff` tab. The `Branches` menu switches
+words. `History` is the panel's other window — a choice inside the tab, not a tab of its
+own: it lists the last two hundred commits newest first, and `Enter` on one shows what it
+changed in the same pane under the list. A panel that opened another panel would take the
+person away from the list they were reading, and the list is where they were. The
+`Branches` menu switches
 `HEAD` and starts new ones — through the real `git switch`, so a dirty tree that would
 lose work is refused by `git` itself instead of by a guess. In the editor, the margin of
 every open file carries a three-pixel stripe beside each line that the index does not

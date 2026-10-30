@@ -20,6 +20,12 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     });
     ui.separator();
 
+    body(ui, state);
+}
+
+/// The commits themselves, without a heading of their own: the Git panel shows the same list
+/// inside its own tab, where the heading would be a second one for the same thing.
+pub fn body(ui: &mut Ui, state: &mut AppState) {
     if let Some(error) = &state.git.error {
         ui.add_space(6.0);
         ui.weak(error.clone());

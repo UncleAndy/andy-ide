@@ -10,6 +10,7 @@ use ide_core::{
 };
 
 use crate::editor::EditorBuffer;
+use crate::ui::Tab;
 
 /// Font size that maps to zoom factor 1.0: the configured size scales the whole
 /// interface, so there is one number to remember instead of two.
@@ -101,6 +102,9 @@ pub struct AppState {
     pub pending: Vec<Action>,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
+    /// The panels the person has put away, in the order they were put away. What is not here is
+    /// on screen: a panel that is written down is a panel the dock does not hold.
+    pub hidden: Vec<Tab>,
     /// A question waiting for an answer; the interface draws it as a modal.
     pub prompt: Option<Prompt>,
     /// Set when the user chose to leave; the next frame closes the window.
@@ -193,6 +197,7 @@ impl AppState {
             status: String::new(),
             pending: Vec::new(),
             layout: None,
+            hidden: Vec::new(),
             prompt: None,
             quit_requested: false,
             quit_decided: false,
@@ -998,6 +1003,38 @@ impl AppState {
             .and_then(|workspace| workspace.read_state().layout)
     }
 
+    /// The panels this workspace remembers being put away, or `None` for a workspace that has
+    /// never said. A panel this build does not know is left out rather than kept for a build
+    /// that never comes.
+    pub fn stored_hidden(&self) -> Option<Vec<Tab>> {
+        let workspace = self.workspace.as_ref()?;
+        let stored = workspace.read_state().hidden?;
+        Some(
+            stored
+                .iter()
+                .filter_map(|slug| Tab::of_slug(slug))
+                .collect(),
+        )
+    }
+
+    /// Puts a panel away: it leaves the dock, and everything behind it — a shell that is still
+    /// running, a conversation, the changes of a repository — stays where it was.
+    pub fn put_away(&mut self, tab: Tab) {
+        if !self.hidden.contains(&tab) {
+            self.hidden.push(tab);
+            self.status = format!("{} put away", tab.title());
+        }
+    }
+
+    /// Brings it back, and the workspace remembers that it is on screen.
+    pub fn bring_back(&mut self, tab: Tab) {
+        let was_hidden = self.hidden.len();
+        self.hidden.retain(|hidden| *hidden != tab);
+        if self.hidden.len() != was_hidden {
+            self.status = format!("{} back on screen", tab.title());
+        }
+    }
+
     /// Writes the workspace file when it changed, at most every 300 ms unless
     /// `force` is set (used when the window closes).
     pub fn save_workspace(&mut self, layout: Option<String>, now: f64, force: bool) {
@@ -1018,6 +1055,12 @@ impl AppState {
             // The layout is serialized once in a while and kept here between
             // saves, so a save that does not carry one cannot wipe it.
             layout: self.layout.clone(),
+            hidden: Some(
+                self.hidden
+                    .iter()
+                    .map(|tab| tab.slug().to_owned())
+                    .collect(),
+            ),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

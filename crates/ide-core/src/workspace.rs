@@ -36,6 +36,15 @@ pub struct WorkspaceState {
     /// Serialized dock layout; opaque here, because the core must not know egui.
     #[serde(default)]
     pub layout: Option<String>,
+    /// The panels that are put away, by the name the window gives them. Names rather than the
+    /// window's own panel type, for the same reason: the core must not know egui, and a saved
+    /// workspace should outlive a build that renames one of them.
+    ///
+    /// `None` is a workspace that has never said, which is not the same as one that has said
+    /// nothing is put away: the first is a project opened for the first time and wants this
+    /// build's own answer, the second is a person who has shown every panel and means it.
+    #[serde(default)]
+    pub hidden: Option<Vec<String>>,
 }
 
 impl Workspace {
@@ -116,6 +125,7 @@ mod tests {
             tabs: vec![PathBuf::from("src/main.rs"), PathBuf::from("README.md")],
             active: Some(1),
             layout: Some("{\"surfaces\":[]}".to_owned()),
+            hidden: Some(vec!["diff".to_owned()]),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
