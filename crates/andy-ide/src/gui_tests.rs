@@ -4539,6 +4539,22 @@ mod the_agent_panel {
             .collect()
     }
 
+    /// What the agent said last: the line an answer about the session is, and not the whole
+    /// replayed history the panel may have come back with.
+    fn last_answer(gui: &Gui) -> String {
+        gui.app()
+            .state
+            .agent
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                crate::agent::Line::Agent(text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// What the panel said about a switch of model or level, in the order it said it.
     fn switches(gui: &Gui) -> Vec<String> {
         gui.app()
@@ -4648,7 +4664,81 @@ mod the_agent_panel {
         wait(&mut second, "the answer about the session", |gui| {
             answer(gui).contains("loaded")
         });
-        assert_eq!(answer(&second), "stand-in-session loaded");
+        assert_eq!(last_answer(&second), "stand-in-session loaded");
+    }
+
+    #[test]
+    fn a_restored_session_brings_back_the_words_of_both_sides() {
+        // On `session/load` an agent replays the conversation it kept, and the replay carries
+        // the person's own words as well as its answers — one chunk per message with the role,
+        // like Hermes' (`acp_adapter/server.py::_history_replay_updates`). Drawn into the same
+        // line, the words of both sides would read as a conversation that was all answers, and
+        // a person opening the panel would find half of what they said gone.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            place.join("agent-session.json"),
+            "{\"agent\":\"stand-in\",\"session\":\"kept-42\"}\n",
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the conversation coming back", |gui| {
+            gui.app().state.agent.status.contains("resumed")
+        });
+
+        let lines = gui.app().state.agent.transcript.clone();
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::You(text) if text == "why is the sky blue?"
+            )),
+            "the person's own words did not come back: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::Agent(text) if text == "Because air scatters blue light."
+            )),
+            "the answer did not come back in a line of its own: {lines:?}"
+        );
+
+        // And a fresh answer after the restore starts a line of its own, instead of growing
+        // into the replayed answer as though both were one message.
+        gui.app_mut().state.agent.input = "session".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer about the session", |gui| {
+            last_answer(gui).contains("loaded")
+        });
+        assert_eq!(last_answer(&gui), "kept-42 loaded");
     }
 
     #[test]
@@ -4702,7 +4792,7 @@ mod the_agent_panel {
         wait(&mut gui, "the answer about the session", |gui| {
             answer(gui).contains("loaded")
         });
-        assert_eq!(answer(&gui), "kept-42 loaded");
+        assert_eq!(last_answer(&gui), "kept-42 loaded");
 
         gui.harness.get_by_label("New session").click();
         wait(&mut gui, "the new conversation", |gui| {
@@ -6493,7 +6583,7 @@ mod the_agent_panel {
     }
 
     #[test]
-    fn a_crashed_agent_is_started_again_with_an_empty_panel() {
+    fn a_crashed_agent_is_started_again_with_the_conversation_restored() {
         // A process dying is not the conversation ending. The panel starts another one,
         // asks for the same session, and clears what was on screen first: the restored
         // agent replays its history, and keeping the old lines would draw them twice.
@@ -6531,10 +6621,22 @@ mod the_agent_panel {
             Some(session.as_str()),
             "the restarted agent was not asked for the same conversation"
         );
+        // The restored session replays what it kept, and the replay carries the words of both
+        // sides: the panel comes back to its conversation, not to a blank wall.
+        let lines = gui.app().state.agent.transcript.clone();
         assert!(
-            gui.app().state.agent.transcript.is_empty(),
-            "the panel kept its lines while the session was restored: {:?}",
-            gui.app().state.agent.transcript
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::You(text) if text == "why is the sky blue?"
+            )),
+            "the person's words were not restored after the restart: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::Agent(text) if text == "Because air scatters blue light."
+            )),
+            "the answer was not restored after the restart: {lines:?}"
         );
         assert!(
             gui.app().state.agent.status.contains("resumed"),

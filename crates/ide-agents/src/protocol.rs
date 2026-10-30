@@ -540,6 +540,10 @@ pub fn set_mode_params(session: &str, mode: &str) -> Value {
 pub enum Update {
     /// A piece of the agent's answer, to be appended as it arrives.
     Text(String),
+    /// The person's own words, as a restored session replays them. The other side of a
+    /// conversation belongs in the transcript too: a panel that drew every replay as the
+    /// agent's answer would read as a conversation that was all answers.
+    You(String),
     /// A piece of the agent's reasoning: shown folded away, because it is the working
     /// out and not the answer.
     Thinking(String),
@@ -585,13 +589,25 @@ impl Update {
                     .unwrap_or_default();
                 Update::Thinking(text.to_owned())
             }
-            "agent_message_chunk" | "user_message_chunk" => {
+            // A message chunk is one complete message of the conversation: the agent's
+            // answer, or the person's own words when a session replays its history
+            // (`acp_adapter/server.py::_history_replay_updates` sends each role as its own
+            // chunk). The two are drawn differently, so they are read apart.
+            "agent_message_chunk" => {
                 let text = update
                     .get("content")
                     .and_then(|content| content.get("text"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 Update::Text(text.to_owned())
+            }
+            "user_message_chunk" => {
+                let text = update
+                    .get("content")
+                    .and_then(|content| content.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                Update::You(text.to_owned())
             }
             "tool_call" | "tool_call_update" => Update::ToolCall {
                 id: update
@@ -1074,6 +1090,32 @@ mod tests {
         }));
         assert!(!odd.free_text, "a number was read as something to write");
         assert!(odd.options.is_empty());
+    }
+
+    #[test]
+    fn a_user_message_chunk_is_kept_apart_from_the_agent() {
+        // A restored session replays the conversation as one chunk per message, and the
+        // person's own words are chunks of their own (`acp_adapter/server.py`: the replay
+        // sends `user_message_chunk` for role user and `agent_message_chunk` for assistant).
+        // Read into the same slot, the words of both sides would draw as the agent's answer —
+        // a transcript that restores as if the person had said nothing.
+        let user = Update::from_value(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "why is the sky blue?"}
+        }));
+        assert_eq!(
+            user,
+            Update::You("why is the sky blue?".to_owned()),
+            "the person's own words were read as the agent's"
+        );
+        let agent = Update::from_value(&json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Because air scatters blue light."}
+        }));
+        assert_eq!(
+            agent,
+            Update::Text("Because air scatters blue light.".to_owned())
+        );
     }
 
     #[test]

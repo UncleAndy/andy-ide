@@ -412,7 +412,9 @@ fn conversation(session: &mut Session) -> String {
     let mut said = String::new();
     while let Some(event) = session.next_event(Duration::from_secs(5)) {
         match event {
-            Event::Text(text) => said.push_str(&text),
+            // A resumed session replays what it kept before it answers; the answer is the
+            // last thing said, and the replay is the history, not the report.
+            Event::Text(text) => said = text,
             Event::Finished(_) | Event::Closed => break,
             _ => {}
         }

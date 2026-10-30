@@ -158,6 +158,10 @@ pub struct AgentState {
     /// number of points is a promise the field breaks the moment a second line is typed.
     pub field_rect: Option<egui::Rect>,
     pub below: f32,
+    /// Whether the last line of the transcript is an answer still growing. The pieces of one
+    /// streamed answer share a line; the person's own words end it, because what follows them
+    /// is the next answer, not another piece of the one before.
+    agent_line_open: bool,
     /// What is being written into a question that has no answers to pick, and whether the
     /// card is asking for the keyboard to write it with.
     pub card_text: String,
@@ -248,6 +252,7 @@ impl Default for AgentState {
             picked: Vec::new(),
             commands: Vec::new(),
             command_pick: 0,
+            agent_line_open: false,
             card_text: String::new(),
             card_wants_focus: false,
             field_rect: None,
@@ -525,6 +530,12 @@ impl AgentState {
             self.status = "the agent is gone".to_owned();
             return;
         }
+        // The words the person just sent are a boundary: whatever the agent says from here on
+        // is the next answer, not another piece of the last one. A restored conversation that
+        // ended in an answer would otherwise glue the new answer onto it — the replay arrives
+        // without a mark of where it ends, and the load's own answer is not always the last
+        // thing a panel hears before this message. The acting person is the mark.
+        self.agent_line_open = false;
         self.transcript.push(Line::You(text));
         self.input.clear();
         self.busy = true;
@@ -674,6 +685,7 @@ impl AgentState {
     /// conversation rather than a new one.
     pub fn clear_panel(&mut self) {
         self.transcript.clear();
+        self.agent_line_open = false;
         self.models.clear();
         self.current_model = None;
         self.models_open = false;
@@ -841,6 +853,10 @@ impl AgentState {
                 self.session = Some(session.clone());
                 self.connected_at = Some(Instant::now());
                 self.retry_at = None;
+                // The replayed history ended with the load's answer: whatever the agent says
+                // from here on is its own answer, a line of its own, and not another piece of
+                // the last replayed one (`acp_adapter/server.py` replays before responding).
+                self.agent_line_open = false;
                 self.status = if resumed {
                     format!("ready, session {session} resumed")
                 } else {
@@ -860,24 +876,39 @@ impl AgentState {
                     } else {
                         self.transcript.push(Line::Thinking(thought));
                     }
+                    self.agent_line_open = false;
                 }
                 AgentEvent::Text(text) => {
-                    // Pieces of one answer join the last line the agent wrote, which is
-                    // what makes a stream read as a sentence and not as a column.
-                    if let Some(Line::Agent(said)) = self.transcript.last_mut() {
+                    // Pieces of one answer join the line it is growing into, which is what
+                    // makes a stream read as a sentence and not as a column. A line that is
+                    // not an answer growing — a replayed message, the person's words — is
+                    // not added to.
+                    if let Some(Line::Agent(said)) = self.transcript.last_mut()
+                        && self.agent_line_open
+                    {
                         said.push_str(&text);
                     } else {
                         self.transcript.push(Line::Agent(text));
+                        self.agent_line_open = true;
                     }
+                }
+                AgentEvent::You(text) => {
+                    // The person's own words, replayed with a restored session: a block like
+                    // the one drawn when they were typed, and the answer that may follow is
+                    // not glued to it.
+                    self.transcript.push(Line::You(text));
+                    self.agent_line_open = false;
                 }
                 AgentEvent::ToolCall { title, status, .. } => {
                     self.transcript
                         .push(Line::Tool(format!("{title} ({status})")));
+                    self.agent_line_open = false;
                 }
                 AgentEvent::Plan(steps) => {
                     for step in steps {
                         self.transcript.push(Line::Tool(format!("· {step}")));
                     }
+                    self.agent_line_open = false;
                 }
                 AgentEvent::Other { kind } => {
                     tracing::debug!(target: "andy_ide::agent", %kind, "an update this panel does not show");
@@ -962,6 +993,16 @@ fn work(
             return;
         }
     };
+    // A load that resumes a session replays the conversation before it answers, and the
+    // replay went into the session's own queue while the load's answer was being waited
+    // for. It has to reach the panel before the ready line does: a panel that drew "ready"
+    // first and the conversation after would show a restored session as an empty one on the
+    // very frame it was looked at, and everything a person had said would seem lost.
+    while let Some(event) = session.next_event(Duration::from_millis(1)) {
+        if replies.send(Reply::Event(event)).is_err() {
+            return;
+        }
+    }
     if replies
         .send(Reply::Ready {
             session: session.id().to_owned(),

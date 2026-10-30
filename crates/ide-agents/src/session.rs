@@ -69,6 +69,8 @@ pub enum PermissionPolicy {
 pub enum Event {
     /// A piece of the answer, to append.
     Text(String),
+    /// The person's own words from a replayed history, to draw as theirs.
+    You(String),
     /// A piece of the agent's reasoning, to be kept apart from the answer and folded
     /// away: a person reading an answer wants the answer, and wants the reasoning to
     /// be there when they ask for it.
@@ -668,6 +670,7 @@ impl Session {
                 let update = params.get("update")?;
                 match Update::from_value(update) {
                     Update::Text(text) => Some(Event::Text(text)),
+                    Update::You(text) => Some(Event::You(text)),
                     Update::Thinking(thought) => Some(Event::Thinking(thought)),
                     Update::ToolCall { id, title, status } => {
                         Some(Event::ToolCall { id, title, status })

@@ -209,6 +209,26 @@ fn main() {
                 }
                 session_name = wanted;
                 resumed = true;
+                // A kept conversation is replayed before the load is answered, the way Hermes
+                // replays it (`acp_adapter/server.py::_history_replay_updates`): one chunk per
+                // message, the person's own words with their own role. A session restored to
+                // a panel that only heard the answers would read as half the conversation.
+                for (role, said) in [
+                    ("user_message_chunk", "why is the sky blue?"),
+                    ("agent_message_chunk", "Because air scatters blue light."),
+                ] {
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_name,
+                            "update": {
+                                "sessionUpdate": role,
+                                "content": {"type": "text", "text": said}
+                            }
+                        }
+                    }));
+                }
                 answer(
                     id,
                     json!({
