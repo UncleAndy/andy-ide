@@ -530,7 +530,28 @@ impl LspSession {
         path: &Path,
         position: Position,
     ) -> Result<Vec<lsp_types::DocumentHighlight>> {
-        let result = self.positioned_request("textDocument/documentHighlight", path, position)?;
+        self.document_highlights_with(path, position, REQUEST_TIMEOUT)
+    }
+
+    /// The same, with a timeout of the caller's own: the first question to a server that
+    /// may still be loading its index gets a long one, because an answer believed too early
+    /// is the one thing worse than an answer late.
+    pub fn document_highlights_with(
+        &mut self,
+        path: &Path,
+        position: Position,
+        timeout: Duration,
+    ) -> Result<Vec<lsp_types::DocumentHighlight>> {
+        let uri = self.uri(path)?;
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position,
+        };
+        let result = self.process.request_with_timeout(
+            "textDocument/documentHighlight",
+            Some(serde_json::to_value(params)?),
+            timeout,
+        )?;
         Ok(serde_json::from_value(result).unwrap_or_default())
     }
 

@@ -443,16 +443,16 @@ fn work(
 /// server are to be believed from now on.
 fn highlights_until_loaded(
     warm: bool,
-    mut ask: impl FnMut() -> anyhow::Result<Vec<lsp_types::DocumentHighlight>>,
+    mut ask: impl FnMut(Duration) -> anyhow::Result<Vec<lsp_types::DocumentHighlight>>,
     mut wait: impl FnMut(u64) -> bool,
 ) -> (bool, Vec<Spot>, bool) {
-    // The first question goes out at once, the rest after waits that grow: a server that is
-    // loading is asked again, not believed. A server already known to be loaded is asked once.
-    let delays: &[u64] = if warm {
-        &[0]
-    } else {
-        &[0, 250, 500, 1000, 2000, 4000, 8000, 8000]
-    };
+    /// How long a probe waits: a server that can answer does so at once, and one that is
+    /// loading answers nothing either way.
+    const PROBE: Duration = Duration::from_secs(2);
+    /// How long the last question of a cold server waits: long enough for the crate to load
+    /// under a busy machine, short enough for the wall that waits beside it.
+    const COLD: Duration = Duration::from_secs(260);
+
     let spots_of = |highlights: Vec<lsp_types::DocumentHighlight>| -> Vec<Spot> {
         highlights
             .iter()
@@ -466,30 +466,54 @@ fn highlights_until_loaded(
             })
             .collect()
     };
-    for (index, delay) in delays.iter().enumerate() {
-        if index > 0 && !wait(*delay) {
-            break;
+
+    if warm {
+        // A loaded server answers a question, or refuses it; an empty answer is the answer.
+        return match ask(ide_lsp::REQUEST_TIMEOUT) {
+            Ok(highlights) => (false, spots_of(highlights), true),
+            Err(_) => (true, Vec::new(), true),
+        };
+    }
+
+    // The first questions of a cold server are probes: it may not have loaded its index
+    // yet, and an empty answer from a server that is loading is "not yet", not "used
+    // nowhere". A probe that goes unanswered is a server still loading — a slow one is
+    // exactly why the probes are short — while a refusal ends the question at once. The
+    // last question is given the long wait: under a busy machine the loading can take
+    // longer than any probe, the server answers when the crate is in, and an answer
+    // believed before then leaves the uses unmarked until the caret moves.
+    let probes: &[(u64, Duration)] = &[(0, PROBE), (250, PROBE), (1000, PROBE), (3000, PROBE)];
+    for (delay, timeout) in probes {
+        if !wait(*delay) {
+            return (false, Vec::new(), warm);
         }
-        match ask() {
+        match ask(*timeout) {
             Ok(highlights) => {
                 let spots = spots_of(highlights);
                 if !spots.is_empty() {
-                    // The index answered: this server is loaded, and an empty answer from it
-                    // from now on says what it looks like it says.
+                    // The index answered: this server is loaded, and the empty answers it
+                    // gives from now on are the answer.
                     return (false, spots, true);
                 }
-                if index + 1 == delays.len() {
-                    // The waiting ran out with the server answering. Whatever the empty answer
-                    // means, asking again on the next caret move cannot make it say more.
-                    return (false, Vec::new(), true);
-                }
             }
-            // A refusal is not "not yet": the question is not put again behind the caller's
-            // back, because the caller is the one who knows when to put it again.
+            // A question that went unanswered is a server still loading, which is a reason
+            // to keep waiting and not to give up.
+            Err(error) if silence(&error) => {}
             Err(_) => return (true, Vec::new(), warm),
         }
     }
-    (false, Vec::new(), warm)
+    match ask(COLD) {
+        Ok(highlights) => (false, spots_of(highlights), true),
+        // Whatever the long wait heard at the end of it, the question is not put again
+        // behind the caller's back: the caller knows when to put it again.
+        Err(_) => (true, Vec::new(), warm),
+    }
+}
+
+/// Whether a request went unanswered rather than refused: a timeout, which for a server
+/// that may still be loading its index is a reason to keep waiting, not to give up.
+fn silence(error: &anyhow::Error) -> bool {
+    error.to_string().contains("got no answer within")
 }
 
 fn pause(delay_ms: u64, stopping: &AtomicBool) -> bool {
@@ -644,7 +668,7 @@ fn apply(
             // next frame asks again instead of believing that the symbol has no uses.
             let (failed, spots, loaded) = highlights_until_loaded(
                 *warm,
-                || session.document_highlights(&path, position),
+                |timeout| session.document_highlights_with(&path, position, timeout),
                 |delay| pause(delay, stopping),
             );
             *warm = loaded;
@@ -708,12 +732,15 @@ mod highlight_tests {
     #[test]
     fn an_empty_answer_from_a_cold_server_is_asked_again() {
         // A server that has not loaded the crate answers `null`, and `null` is an empty list:
-        // believed, it leaves the uses unmarked until the caret moves. It is asked again.
+        // believed, it leaves the uses unmarked until the caret moves. It is asked again, with
+        // probes of the length a server that can answer at all does not need.
         let mut asked = 0;
+        let mut timeouts = Vec::new();
         let (failed, spots, loaded) = highlights_until_loaded(
             false,
-            || {
+            |timeout| {
                 asked += 1;
+                timeouts.push(timeout);
                 if asked < 3 {
                     Ok(Vec::new())
                 } else {
@@ -723,6 +750,11 @@ mod highlight_tests {
             |_| true,
         );
         assert_eq!(asked, 3, "the empty answers were believed");
+        assert_eq!(
+            timeouts[..2],
+            vec![Duration::from_secs(2), Duration::from_secs(2)],
+            "the probes were not the short ones: {timeouts:?}"
+        );
         assert!(!failed, "asking again was reported as a refusal");
         assert_eq!(spots, vec![(7, 0, 7, 3)]);
         assert!(
@@ -736,10 +768,12 @@ mod highlight_tests {
         // Once the index has answered, an empty answer is the answer: a symbol used nowhere
         // must not cost a queue of questions.
         let mut asked = 0;
+        let mut timeouts = Vec::new();
         let (failed, spots, loaded) = highlights_until_loaded(
             true,
-            || {
+            |timeout| {
                 asked += 1;
+                timeouts.push(timeout);
                 Ok(Vec::new())
             },
             |_| true,
@@ -747,6 +781,11 @@ mod highlight_tests {
         assert_eq!(
             asked, 1,
             "a loaded server was asked again about an empty answer"
+        );
+        assert_eq!(
+            timeouts[0],
+            ide_lsp::REQUEST_TIMEOUT,
+            "a loaded server was not given the usual patience: {timeouts:?}"
         );
         assert!(spots.is_empty() && !failed && loaded);
     }
@@ -756,15 +795,17 @@ mod highlight_tests {
         let mut asked = 0;
         let (failed, spots, _) = highlights_until_loaded(
             false,
-            || {
+            |_timeout| {
                 asked += 1;
-                Err(anyhow::anyhow!("the server did not answer in 30 s"))
+                Err(anyhow::anyhow!(
+                    "textDocument/documentHighlight failed: method not found"
+                ))
             },
             |_| true,
         );
         assert!(
             failed,
-            "a server that did not answer was reported as an empty answer"
+            "a server that refused was reported as an empty answer"
         );
         assert!(spots.is_empty());
         assert_eq!(
@@ -774,21 +815,65 @@ mod highlight_tests {
     }
 
     #[test]
-    fn the_waiting_runs_out_and_the_empty_answer_is_believed() {
-        let mut asked = 0;
+    fn the_probes_run_out_and_the_last_question_waits_long() {
+        // An empty answer from a cold server is probed, and once the probes have run out the
+        // last question is the long one: a crate that is still loading under a busy machine
+        // answers when it is in, and the uses must still be there when it does.
+        let mut timeouts = Vec::new();
         let (failed, spots, loaded) = highlights_until_loaded(
             false,
-            || {
-                asked += 1;
+            |timeout| {
+                timeouts.push(timeout);
                 Ok(Vec::new())
             },
             |_| true,
         );
-        assert!(asked > 1, "the empty answer was not waited out at all");
-        assert!(
-            !failed && spots.is_empty() && loaded,
-            "the waiting never ended: {asked} questions asked"
+        assert_eq!(
+            timeouts.len(),
+            5,
+            "the probes and the long question: {timeouts:?}"
         );
+        assert!(
+            timeouts[..4]
+                .iter()
+                .all(|timeout| *timeout <= Duration::from_secs(2)),
+            "the probes were not the short ones: {timeouts:?}"
+        );
+        assert_eq!(
+            timeouts[4],
+            Duration::from_secs(260),
+            "the last question was not the long wait: {timeouts:?}"
+        );
+        assert!(!failed && spots.is_empty() && loaded);
+    }
+
+    #[test]
+    fn a_silent_server_is_kept_waiting_until_the_long_question_is_answered() {
+        // The failure this ladder was written around once every few full runs: a server
+        // loading its crate under a busy machine answers nothing until the crate is in. A
+        // question that went unanswered is not a refusal — the question keeps its patience,
+        // and the last one is long enough for the loading to finish.
+        let mut asked = 0;
+        let (failed, spots, loaded) = highlights_until_loaded(
+            false,
+            |timeout| {
+                asked += 1;
+                if asked <= 4 {
+                    Err(anyhow::anyhow!(
+                        "textDocument/documentHighlight got no answer within {timeout:?}"
+                    ))
+                } else {
+                    Ok(vec![highlight(7)])
+                }
+            },
+            |_| true,
+        );
+        assert_eq!(
+            asked, 5,
+            "the silence was believed before the long question"
+        );
+        assert!(!failed && loaded, "the long answer was not believed");
+        assert_eq!(spots, vec![(7, 0, 7, 3)]);
     }
 }
 
