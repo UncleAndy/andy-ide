@@ -39,6 +39,10 @@ pointer on a symbol shows its signature, and the other uses of the symbol under 
 caret are dimmed behind the text. `Shift+F6` renames the symbol under the caret: the
 server's answer is shown as a list of the places it would change, and nothing is written
 until Enter is pressed on that list. The problems panel shows what the server published.
+What is not there yet: the list of the implementations of a trait, the hierarchy of
+incoming calls, and completion. The client today asks a server for a definition, the
+places a symbol is used, the symbols of a file and of the project, a hover, the other
+uses under the caret and a rename, and for nothing else.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
 
@@ -73,7 +77,13 @@ where the ones that are there can be read.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 
-Milestone M4 (git) is under way. `ide-git` reads the repository through `gix` — no
+Milestone M4 (git) is done: every one of its acceptance criteria is met — the panel
+follows the changes, a diff opens with the lines coloured, a commit is written and is
+found again in the history, a branch is switched only where the real `git` agrees the
+work is safe, and a failed `push` is shown in the words `git` printed. What the milestone
+has not got is an acceptance report of its own, the way M1 has one.
+
+`ide-git` reads the repository through `gix` — no
 process per repaint, and no lie when `git` is absent or wrapped: the branch, the dirty
 bit and the list of changes, with `git status`'s two halves kept apart (in the index
 against `HEAD`, on disk against the index), so a file staged and then edited shows
@@ -108,15 +118,24 @@ repository`, which runs `git init -b main` in the project root.
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m4.md`](.hermes/plans/2026-10-28_andy-ide-m4.md).
 
-Milestone M5 (agents) is under way. `ide-agents` speaks the Agent Client Protocol over a
-child process's standard input and output — one JSON-RPC message per line, a deadline on
-every wait, two threads per agent so that nothing waits where the window is drawn. Which
-agents exist is `agents.toml`, not code: a second agent is a table in that file, and a
-project's copy wins over the user's. The client answers what an agent asks it for —
-`fs/read_text_file` inside the project and nowhere else, `fs/write_text_file` only after
-the editor has allowed it, permissions by policy or by a question in the panel — and
-refuses to claim a terminal it does not yet offer. `crates/ide-agents/src/bin/acp_test_agent.rs`
-is a stand-in agent the tests drive, so the client can be exercised without a model
+Milestone M5 (agents) is under way: the panel holds a conversation with an agent, a
+permission is asked before the agent is allowed to do anything, and a second agent is a
+table in `agents.toml`. Two things of the milestone are not there. The context of the
+open file does not travel with a request — `prompt_params` carries the text alone, and a
+prompt is that one block. And the rule "an edit reaches the file only after it was
+confirmed, and shown as a diff" is not the one this editor follows.
+
+`ide-agents` speaks the Agent Client Protocol over a child process's standard input and
+output — one JSON-RPC message per line, a deadline on every wait, two threads per agent so
+that nothing waits where the window is drawn. Which agents exist is `agents.toml`, not
+code: a second agent is a table in that file, and a project's copy wins over the user's.
+The code that would serve `fs/read_text_file` and `fs/write_text_file` — reads inside the
+project and nowhere else, a write only where the editor has allowed it — is written and
+tested, but it is not what happens: the panel claims neither of those capabilities and
+never turns a write on, so an edit is the agent's own business, done through the
+terminal it was configured with. The paragraph about `_meta.fileAccess` below says the
+same thing to the agent, where it looks. `crates/ide-agents/src/bin/acp_test_agent.rs` is
+a stand-in agent the tests drive, so the client can be exercised without a model
 installed.
 
 The panel is `Alt+0`: a list of the agents in the file, the conversation as it arrives, a
@@ -286,10 +305,9 @@ Plan and state:
 |---|---|
 | `ide-core` | Project model, file tree, configuration, sessions, filesystem watching |
 | `ide-buffer` | Rope-backed text buffer, cursors, selections, undo history |
-| `ide-lsp` | Language server client: transport, handshake, document sync, navigation requests |
+| `ide-lsp` | Language server client: transport, handshake, document synchronisation, the server registry, navigation requests |
 | `ide-syntax` | Language registry, tree-sitter grammars, incremental highlighting |
-| `ide-lsp` | LSP client, language server registry, document synchronisation |
-| `ide-agents` | Agent registry, ACP client, MCP bridge, edit proposals |
+| `ide-agents` | Agent registry, ACP client, session state, permissions and questions |
 | `ide-term` | PTY sessions, screen emulation, link detection |
 | `ide-git` | Repository state, diffs, index, commits, branches, history |
 | `andy-ide` | The application: window, dock panels, editor |
