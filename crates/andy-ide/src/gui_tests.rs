@@ -6908,6 +6908,93 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_row_stands_as_far_from_the_line_below_it_as_from_the_line_above() {
+        // A cell is taller than its words by the same room at each end, so the line between two
+        // rows is as far under the words of one as over the words of the next. A renderer
+        // leaves a gap of its own after the last block of a cell, and left in it made the room
+        // under the words half again the room above them — the line then sat low in its gap.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words in it to wrap onto two lines and a bit more of them for certain |\n| second row | two |\n| third row | another cell long enough that it wraps as well, twice over and then once more |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        let mut parts = table_parts(&gui);
+        only_the_tables_words(&mut parts);
+        let (left, right) = parts.frame;
+        let mut lines: Vec<f32> = parts
+            .lines
+            .iter()
+            .filter(|(_, x0, x1)| *x0 >= left - 2.0 && *x1 <= right + 2.0)
+            .map(|(y, ..)| *y)
+            .collect();
+        lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(lines.len() >= 3, "the table has {} lines", lines.len());
+
+        // The rows of the table: the words of one row share a band of heights, and a row is
+        // what stands between two of the lines. The band is what matters, not a word of it —
+        // a row may hold a cell of two lines and a cell of two words, and the row is as tall as
+        // the tallest of them.
+        let mut words: Vec<(f32, f32)> = parts
+            .words
+            .iter()
+            .map(|(top, bottom, ..)| (*top, *bottom))
+            .collect();
+        words.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut rows: Vec<(f32, f32)> = Vec::new();
+        for (top, bottom) in words {
+            match rows.last_mut() {
+                Some(row) if top < row.1 => {
+                    row.0 = row.0.min(top);
+                    row.1 = row.1.max(bottom);
+                }
+                _ => rows.push((top, bottom)),
+            }
+        }
+        assert!(rows.len() >= 4, "the table has {} rows", rows.len());
+
+        let mut checked = 0;
+        for (top, bottom) in &rows {
+            let above = lines
+                .iter()
+                .filter(|y| **y <= *top)
+                .max_by(|a, b| a.partial_cmp(b).unwrap());
+            let below = lines
+                .iter()
+                .filter(|y| **y >= *bottom)
+                .min_by(|a, b| a.partial_cmp(b).unwrap());
+            let (Some(above), Some(below)) = (above, below) else {
+                continue;
+            };
+            checked += 1;
+            let over = top - above;
+            let under = below - bottom;
+            assert!(
+                (over - under).abs() <= 1.0,
+                "a row stands {over:.1} points under a line and {under:.1} points over one"
+            );
+        }
+        assert!(
+            checked >= 2,
+            "too little of the table was checked: {checked} rows"
+        );
+    }
+
+    #[test]
     fn a_tables_lines_keep_their_distance_from_the_words() {
         // A line between two rows is drawn halfway across the gap the table leaves between
         // them, and that gap is three points: a point and a half from the words of the row

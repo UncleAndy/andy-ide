@@ -190,7 +190,19 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
                         let left = ui.available_width();
                         ui.add_space((width - used).min(left));
                     }
-                    line.push(drawn.response.rect);
+                    // Whatever a cell holds leaves a gap of its own after it — the space
+                    // between two items of a ui (`item_spacing.y`, three points), left behind
+                    // by the renderer, by a heading drawn as a label, by the room of an empty
+                    // cell. Left in, the cell is taller than its words by that much at the
+                    // bottom only, the room under the words of a row comes out half again the
+                    // room above them, and the line between two rows sits low in its gap. The
+                    // cell ends with its words and its own room at each end.
+                    let rect = drawn.response.rect;
+                    let tail = ui.spacing().item_spacing.y;
+                    line.push(egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.max.x, rect.max.y - tail),
+                    ));
                 }
             });
             rows.push(line);
