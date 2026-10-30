@@ -6499,16 +6499,25 @@ mod the_agent_panel {
     /// What a table in the panel is made of: the words, the horizontal lines and the bands
     /// of its rows, all inside the panel.
     struct TableParts {
+        /// The table's own frame: its left and right uprights.
+        frame: (f32, f32),
         words: Vec<(f32, f32, f32, f32, String)>,
-        lines: Vec<f32>,
+        /// Every horizontal line of the panel: where it is, and where it runs.
+        lines: Vec<(f32, f32, f32)>,
         bands: Vec<(f32, f32, f32, f32)>,
     }
 
     fn table_parts(gui: &Gui) -> TableParts {
         let panel = gui.app().state.agent.shown_rect.expect("the panel");
-        let narrow = panel.width() - 8.0;
-        let left = panel.left() + panel.width() * 0.4;
+        let inside = |x: f32, y: f32| {
+            x >= panel.left()
+                && x <= panel.left() + panel.width() * 0.9
+                && y >= panel.top()
+                && y <= panel.bottom()
+        };
+        let mut frames: Vec<egui::Rect> = Vec::new();
         let mut parts = TableParts {
+            frame: (f32::NAN, f32::NAN),
             words: Vec::new(),
             lines: Vec::new(),
             bands: Vec::new(),
@@ -6516,40 +6525,36 @@ mod the_agent_panel {
         for clipped in &gui.harness.output().shapes {
             match &clipped.shape {
                 egui::Shape::Text(text) => {
-                    let inside = text.pos.x >= panel.left()
-                        && text.pos.x <= left
-                        && text.pos.y >= panel.top()
-                        && text.pos.y <= panel.bottom();
-                    if inside {
+                    let y = text.pos.y;
+                    let (x0, x1) = (text.pos.x, text.pos.x + text.galley.size().x);
+                    if inside(text.pos.x, y) {
                         parts.words.push((
-                            text.pos.y,
-                            text.pos.y + text.galley.size().y,
-                            text.pos.x,
-                            text.pos.x + text.galley.size().x,
+                            y,
+                            y + text.galley.size().y,
+                            x0,
+                            x1,
                             text.galley.job.text.clone(),
                         ));
                     }
                 }
                 egui::Shape::LineSegment { points, .. } => {
-                    let flat = (points[0].y - points[1].y).abs() < 0.5;
-                    let width = (points[0].x - points[1].x).abs();
-                    if flat && width < narrow && points[0].x > panel.left() - 10.0 {
-                        parts.lines.push(points[0].y);
+                    let (x0, x1) = (points[0].x.min(points[1].x), points[0].x.max(points[1].x));
+                    if (points[0].y - points[1].y).abs() < 0.5
+                        && inside(x0, points[0].y)
+                        && x1 - x0 > 60.0
+                    {
+                        parts.lines.push((points[0].y, x0, x1));
                     }
                 }
                 egui::Shape::Rect(rect) => {
-                    // A band is looked for by what it does — a strip of this panel's width
-                    // where the words of a row are — rather than by its colour: the theme in
-                    // hand may paint `faint_bg_color` see-through, and a band that is not seen
-                    // is still drawn in the same place.
-                    // A band of a row, not the table's own frame: the frame is one strip as
-                    // tall as the whole table, a row's band is a row tall.
-                    let inside = rect.rect.width() < narrow
-                        && rect.rect.height() > 8.0
-                        && rect.rect.height() < 70.0
-                        && rect.rect.top() >= panel.top()
-                        && rect.rect.bottom() <= panel.bottom();
-                    if inside {
+                    // A band of a row is looked for by what it does — a strip where the words
+                    // of a row are — rather than by its colour: the theme in hand may paint
+                    // `faint_bg_color` see-through, and a band that is not seen is drawn in the
+                    // same place. The table's own frame is one strip as tall as the whole
+                    // table, a row's band is a row tall.
+                    let tall = rect.rect.height() > 8.0 && rect.rect.height() < 70.0;
+                    if tall && rect.rect.width() > 60.0 && inside(rect.rect.left(), rect.rect.top())
+                    {
                         parts.bands.push((
                             rect.rect.top(),
                             rect.rect.bottom(),
@@ -6557,11 +6562,131 @@ mod the_agent_panel {
                             rect.rect.right(),
                         ));
                     }
+                    // The frame is drawn as one stroked rectangle around the whole table, and
+                    // it is told apart by covering every word of it.
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 60.0
+                        && inside(rect.rect.left(), rect.rect.top())
+                    {
+                        frames.push(rect.rect);
+                    }
                 }
                 _ => {}
             }
         }
+        // The frame of the table: the stroked rectangle that holds the most of its words.
+        // The panel has stroked rectangles of its own (the field below it, for one), and the
+        // panel has words of its own too (its tabs), so the frame is chosen by how much of the
+        // table it covers.
+        let covers = |frame: &egui::Rect| {
+            parts
+                .words
+                .iter()
+                .filter(|(y0, y1, x0, x1, _)| {
+                    *x0 >= frame.left() - 1.0
+                        && *x1 <= frame.right() + 1.0
+                        && *y0 >= frame.top() - 1.0
+                        && *y1 <= frame.bottom() + 1.0
+                })
+                .count()
+        };
+        if let Some(frame) = frames
+            .into_iter()
+            .filter(|frame| covers(frame) >= 4)
+            .max_by_key(|frame| covers(frame))
+        {
+            parts.frame = (frame.left(), frame.right());
+        }
         parts
+    }
+
+    /// The words of a table, told apart from the words of the panel around it by what they say:
+    /// the panel has words of its own (its tabs, its buttons).
+    fn only_the_tables_words(parts: &mut TableParts) {
+        let mine = |word: &str| word == "what" || word == "why" || word.contains("row");
+        parts.words.retain(|(_, _, _, _, word)| mine(word));
+    }
+
+    /// Whether a y is within the rows of the table, give or take the room around them.
+    fn within_the_rows(parts: &TableParts, y: f32) -> bool {
+        let first = parts
+            .words
+            .iter()
+            .map(|(y, ..)| *y)
+            .fold(f32::INFINITY, f32::min);
+        let last = parts
+            .words
+            .iter()
+            .map(|(_, y, ..)| *y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        y > first - 30.0 && y < last + 30.0
+    }
+
+    #[test]
+    fn a_tables_lines_and_bands_reach_its_frame() {
+        // A line that stops at the widest cell leaves a gap at either side of every row, and
+        // a band does the same: both run from one side of the table's frame to the other.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words in it to wrap onto two lines and a bit more |\n| second row | two |\n| third row | another cell that wraps as well somewhere here indeed |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        let mut parts = table_parts(&gui);
+        only_the_tables_words(&mut parts);
+        let (left, right) = parts.frame;
+        assert!(
+            left.is_finite() && right > left,
+            "the table has no frame: {left:?}..{right:?}"
+        );
+        let (words_left, words_right) = parts.words.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(l, r), (_, _, x0, x1, _)| (l.min(*x0), r.max(*x1)),
+        );
+        assert!(
+            words_left >= left - 2.0 && words_right <= right + 2.0,
+            "the words run {words_left:.1}..{words_right:.1}, and the frame is {left:.1}..{right:.1}"
+        );
+        let mut lines = 0;
+        for (y, x0, x1) in &parts.lines {
+            if !within_the_rows(&parts, *y) {
+                continue;
+            }
+            lines += 1;
+            assert!(
+                *x0 <= left + 2.0 && *x1 >= right - 2.0,
+                "a line at y {y:.1} runs {x0:.1}..{x1:.1}, and the frame is {left:.1}..{right:.1}"
+            );
+        }
+        assert!(lines >= 2, "the table has {lines} lines of its own");
+        let mut bands = 0;
+        for (top, bottom, x0, x1) in &parts.bands {
+            if !within_the_rows(&parts, *top) {
+                continue;
+            }
+            bands += 1;
+            assert!(
+                *x0 <= left + 2.0 && *x1 >= right - 2.0,
+                "a band from y {top:.1} to {bottom:.1} runs {x0:.1}..{x1:.1}, and the frame is {left:.1}..{right:.1}"
+            );
+        }
+        assert!(bands >= 1, "the table has no bands of its own");
+        gui.app_mut().state.agent.stop();
     }
 
     #[test]
@@ -6597,25 +6722,26 @@ mod the_agent_panel {
         let mut parts = table_parts(&gui);
         let mine = |word: &str| word == "what" || word == "why" || word.contains("row");
         parts.words.retain(|(_, _, _, _, word)| mine(word));
-        // A band of this table runs from the left edge of the panel to the right edge of the
-        // table's own words — which is what tells it apart from the bands of the panel around
-        // it (a tab, a button), and from the panel's own background, which is wider than half
-        // the panel and was dropped above.
-        let panel = gui.app().state.agent.shown_rect.expect("the panel");
-        let right_edge = parts
-            .words
-            .iter()
-            .map(|(_, _, _, x1, _)| *x1)
-            .fold(f32::NEG_INFINITY, f32::max);
+        // A band of this table runs from one side of its frame to the other — which is what
+        // tells it apart from the bands of the panel around it (a tab, a button).
+        let (frame_left, frame_right) = parts.frame;
         parts.bands.retain(|(_, _, left, right)| {
-            *left <= panel.left() + 6.0 && *right >= right_edge - 2.0
+            (*left - frame_left).abs() <= 2.0 && (*right - frame_right).abs() <= 2.0
         });
         assert!(
             parts.words.len() >= 6,
             "the table is not drawn: {} pieces of text",
             parts.words.len()
         );
-        assert!(parts.lines.len() >= 3, "the table has no lines");
+        assert!(
+            parts
+                .lines
+                .iter()
+                .filter(|(y, ..)| within_the_rows(&parts, *y))
+                .count()
+                >= 3,
+            "the table has no lines"
+        );
         assert!(!parts.bands.is_empty(), "the table has no bands");
         // No allowance: a line one point inside a word is a line drawn across it, which is
         // exactly what counting the gap from `item_spacing` produced.
@@ -6625,11 +6751,13 @@ mod the_agent_panel {
                 .iter()
                 .any(|(top, bottom, _, _, _)| y > *top && y < *bottom)
         };
-        for y in &parts.lines {
-            assert!(
-                !crossing(*y),
-                "a line at {y:.1} is drawn across the words of a row"
-            );
+        for (y, ..) in &parts.lines {
+            if within_the_rows(&parts, *y) {
+                assert!(
+                    !crossing(*y),
+                    "a line at {y:.1} is drawn across the words of a row"
+                );
+            }
         }
         for (top, bottom, _, _) in &parts.bands {
             assert!(
@@ -6637,7 +6765,7 @@ mod the_agent_panel {
                 "a band runs from {top:.1} to {bottom:.1}, across the words of a row"
             );
             assert!(
-                parts.lines.iter().any(|y| (y - top).abs() < 1.5),
+                parts.lines.iter().any(|(y, ..)| (*y - top).abs() < 1.5),
                 "the band starting at {top:.1} is not bounded by a line"
             );
         }

@@ -135,7 +135,9 @@ fn render(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
 /// shrunk — in proportion — when together they want more than they have.
 fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    let mut drawn_slots: Vec<egui::layers::ShapeIdx> = Vec::new();
+    let mut drawn_cells: Vec<Vec<egui::Rect>> = Vec::new();
+    let frame = egui::Frame::group(ui.style()).show(ui, |ui| {
         let gap = ui.spacing().item_spacing.x;
         let widths = column_widths(ui, columns, gap);
 
@@ -181,8 +183,13 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
             rows.push(line);
         }
         remember_widths(ui, columns, &rows, &widths);
-        bands_and_lines(ui, &slots, &rows);
+        drawn_slots = slots;
+        drawn_cells = rows;
     });
+    // The bands and the lines are drawn to the table's own frame, which is only known once
+    // it has been drawn: a line that stops short of it leaves a gap on either side of every
+    // row, and so does a band.
+    bands_and_lines(ui, frame.response.rect, &drawn_slots, &drawn_cells);
 }
 
 /// How wide each column is to be drawn: what it wanted last frame, or an equal share of the
@@ -238,7 +245,12 @@ fn remember_widths(ui: &Ui, columns: usize, rows: &[Vec<egui::Rect>], given: &[f
 /// of a band sit halfway into the room the grid left between two neighbours — the room it left,
 /// not the room `item_spacing` suggests. Counted from the spacing, the line under a row lands
 /// inside the next row as soon as a cell wraps, and it is drawn there.
-fn bands_and_lines(ui: &Ui, slots: &[egui::layers::ShapeIdx], cells: &[Vec<egui::Rect>]) {
+fn bands_and_lines(
+    ui: &Ui,
+    frame: egui::Rect,
+    slots: &[egui::layers::ShapeIdx],
+    cells: &[Vec<egui::Rect>],
+) {
     if cells.is_empty() || cells.iter().all(Vec::is_empty) {
         return;
     }
@@ -268,33 +280,33 @@ fn bands_and_lines(ui: &Ui, slots: &[egui::layers::ShapeIdx], cells: &[Vec<egui:
             .fold(f32::NEG_INFINITY, f32::max)
     };
 
-    let top = row_top(&cells[0]);
-    let bottom = row_bottom(&cells[cells.len() - 1]);
-    let left = (0..columns).map(column_left).fold(f32::INFINITY, f32::min);
-    let right = (0..columns)
-        .map(column_right)
-        .fold(f32::NEG_INFINITY, f32::max);
-    if !top.is_finite() || bottom <= top || !left.is_finite() {
+    let top_of_rows = row_top(&cells[0]);
+    let bottom_of_rows = row_bottom(&cells[cells.len() - 1]);
+    if !top_of_rows.is_finite() || bottom_of_rows <= top_of_rows {
         return;
     }
+    // A hair inside the frame, so that a line and the frame do not draw over each other.
+    let left = frame.left() + 0.5;
+    let right = frame.right() - 0.5;
+    let top = frame.top() + 0.5;
+    let bottom = frame.bottom() - 0.5;
     // Where one row ends and the next begins, and where the table begins and ends.
     let mut edge: Vec<f32> = Vec::with_capacity(cells.len() + 1);
-    edge.push(top);
+    edge.push(top_of_rows);
     for index in 0..cells.len().saturating_sub(1) {
         edge.push((row_bottom(&cells[index]) + row_top(&cells[index + 1])) * 0.5);
     }
-    edge.push(bottom);
+    edge.push(bottom_of_rows);
 
     // A band on every other row, from one edge to the next: the same edges the lines are
     // drawn on, so a band never reaches past the line into the words of the row below it.
-    let margin = ui.spacing().item_spacing.x * 0.5;
     for (slot, index) in slots.iter().zip((1..cells.len()).step_by(2)) {
         ui.painter().set(
             *slot,
             egui::Shape::rect_filled(
                 egui::Rect::from_min_max(
-                    egui::pos2(left - margin, edge[index]),
-                    egui::pos2(right + margin, edge[index + 1]),
+                    egui::pos2(left, edge[index]),
+                    egui::pos2(right, edge[index + 1]),
                 ),
                 0.0,
                 ui.visuals().faint_bg_color,
