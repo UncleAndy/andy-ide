@@ -13,6 +13,14 @@ use egui::Ui;
 use egui_commonmark::CommonMarkCache;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
+/// The room a cell keeps above and below its words.
+///
+/// A line between two rows is drawn halfway across the gap the table leaves between them
+/// (`item_spacing.y`, three points), so without this room the line sits a point and a half
+/// under the words of one row and over the words of the next — close enough to read as a
+/// stroke through the text rather than a boundary under it.
+const CELL_PAD: f32 = 2.0;
+
 /// Draws the Markdown of one answer, under an id of its own.
 pub fn answer(ui: &mut Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str) {
     for (index, part) in split(text).into_iter().enumerate() {
@@ -159,6 +167,10 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.push_id((index, column), |ui| {
+                                // The words stand clear of the line above and the line below
+                                // them: the cell is taller than its words by this much at each
+                                // end, and the rows keep their distance from each other.
+                                ui.add_space(CELL_PAD);
                                 if cell.trim().is_empty() {
                                     ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
                                 } else if table.heading && index == 0 && plain(cell) {
@@ -167,6 +179,7 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
                                 } else {
                                     render(ui, cache, cell);
                                 }
+                                ui.add_space(CELL_PAD);
                             });
                         },
                     );

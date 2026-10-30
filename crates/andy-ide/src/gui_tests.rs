@@ -6750,6 +6750,16 @@ mod the_agent_panel {
     }
 
     /// Whether a y is within the rows of the table, give or take the room around them.
+    /// Whether a piece of the panel — a line, a band — belongs to this table.
+    ///
+    /// A part of the table runs inside the table's own frame; the panel's own lines (a rule
+    /// above its foot, the edge of a card) run past it, and one of them crossing the words of
+    /// a table is not a defect of the table.
+    fn a_part_of_the_table(parts: &TableParts, x0: f32, x1: f32) -> bool {
+        let (left, right) = parts.frame;
+        x1 - x0 > 60.0 && x0 >= left - 2.0 && x1 <= right + 2.0
+    }
+
     fn within_the_rows(parts: &TableParts, y: f32) -> bool {
         let first = parts
             .words
@@ -6805,7 +6815,7 @@ mod the_agent_panel {
         );
         let mut lines = 0;
         for (y, x0, x1) in &parts.lines {
-            if !within_the_rows(&parts, *y) {
+            if !a_part_of_the_table(&parts, *x0, *x1) {
                 continue;
             }
             lines += 1;
@@ -6815,9 +6825,18 @@ mod the_agent_panel {
             );
         }
         assert!(lines >= 2, "the table has {lines} lines of its own");
+        // A band of this table is bounded by two of its lines; the band of a button of the
+        // panel around it is bounded by nothing, and a button is a hundred points wide.
+        let of_the_table: Vec<f32> = parts
+            .lines
+            .iter()
+            .filter(|(_, x0, x1)| *x0 >= left - 2.0 && *x1 <= right + 2.0)
+            .map(|(y, ..)| *y)
+            .collect();
         let mut bands = 0;
         for (top, bottom, x0, x1) in &parts.bands {
-            if !within_the_rows(&parts, *top) {
+            let bounded = |y: f32| of_the_table.iter().any(|line| (*line - y).abs() < 1.5);
+            if !bounded(*top) || !bounded(*bottom) {
                 continue;
             }
             bands += 1;
@@ -6828,6 +6847,71 @@ mod the_agent_panel {
         }
         assert!(bands >= 1, "the table has no bands of its own");
         gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
+    fn a_tables_lines_keep_their_distance_from_the_words() {
+        // A line between two rows is drawn halfway across the gap the table leaves between
+        // them, and that gap is three points: a point and a half from the words of the row
+        // above and the row below, close enough to read as a stroke through the text rather
+        // than a boundary between two rows. Each cell therefore keeps room of its own at both
+        // ends, and the line stands clear of every word it passes.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words in it to wrap onto two lines and a bit more of them for certain |\n| second row | two |\n| third row | another cell long enough that it wraps as well, twice over and then once more |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        let mut parts = table_parts(&gui);
+        let mine = |word: &str| word == "what" || word == "why" || word.contains("row");
+        parts.words.retain(|(_, _, _, _, word)| mine(word));
+        let (frame_left, frame_right) = parts.frame;
+        // The lines of this table, told apart from the lines of the panel around it by running
+        // from one upright of the table's frame to the other.
+        let lines: Vec<f32> = parts
+            .lines
+            .iter()
+            .filter(|(_, left, right)| {
+                (*left - frame_left).abs() <= 2.0 && (*right - frame_right).abs() <= 2.0
+            })
+            .map(|(y, _, _)| *y)
+            .collect();
+        assert!(
+            parts.words.len() >= 6 && lines.len() >= 3,
+            "the table is not drawn: {} pieces of text, {} lines",
+            parts.words.len(),
+            lines.len()
+        );
+
+        // How close any line of the table comes to any word of it.
+        let mut closest = f32::INFINITY;
+        for line in &lines {
+            for (top, bottom, ..) in &parts.words {
+                if *bottom <= *line {
+                    closest = closest.min(line - bottom);
+                } else if *top >= *line {
+                    closest = closest.min(top - line);
+                }
+            }
+        }
+        assert!(
+            closest >= 3.0,
+            "a line of the table stands {closest:.1} points from the words beside it"
+        );
     }
 
     #[test]
@@ -6892,8 +6976,8 @@ mod the_agent_panel {
                 .iter()
                 .any(|(top, bottom, _, _, _)| y > *top && y < *bottom)
         };
-        for (y, ..) in &parts.lines {
-            if within_the_rows(&parts, *y) {
+        for (y, x0, x1) in &parts.lines {
+            if a_part_of_the_table(&parts, *x0, *x1) {
                 assert!(
                     !crossing(*y),
                     "a line at {y:.1} is drawn across the words of a row"
