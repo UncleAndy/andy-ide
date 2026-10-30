@@ -6509,6 +6509,47 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn two_tables_in_one_answer_do_not_share_a_grid_id() {
+        // An answer may carry more than one table, and each is a grid of its own: one id for
+        // both is what egui answers with "Second use of GRID ID …" over the block, and the
+        // rows of one table shuffle into the other.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let answer = "| what | why |\n| --- | --- |\n| first table | one |\n\n| how | when |\n| --- | --- |\n| second table | two |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(answer.to_owned()));
+        gui.settle();
+
+        assert!(
+            warnings_of(&gui).is_empty(),
+            "egui is warning about the tables: {:?}",
+            warnings_of(&gui)
+        );
+        let drawn = |needle: &str| {
+            gui.harness.output().shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Text(text)
+                    if text.galley.job.text.contains(needle))
+            })
+        };
+        assert!(drawn("first table"), "the first table is not drawn");
+        assert!(drawn("second table"), "the second table is not drawn");
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
     fn two_answers_with_a_table_do_not_share_a_grid_id() {
         // An answer's Markdown is drawn by a renderer that puts a Grid under the panel's
         // ui, and every answer in a conversation shares that ui: two answers carrying a

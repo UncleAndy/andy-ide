@@ -1,11 +1,13 @@
 //! Drawing an answer: its Markdown, tables and all.
 //!
-//! The renderer draws a table by putting every cell in a horizontal container, and a
-//! horizontal container never wraps: three cells of one sentence each came out 240 px wider
-//! than the panel, and egui put a horizontal bar under a table with nothing wide in it. A
-//! table is drawn here instead — every cell takes a share of the panel's width and the cell's
-//! own Markdown is drawn inside that share, so a line wraps and the table is as wide as the
-//! panel and no wider.
+//! The renderer draws a table as `Grid::new(id).striped(true)` and nothing else, and a grid
+//! whose columns have no ceiling does not wrap the text inside a cell at all — egui decides
+//! by `Grid::wrap_text`, which is `max_cell_size.x.is_finite()` — so three cells of one
+//! sentence each came out 240 px wider than the panel, and egui put a horizontal bar under a
+//! table with nothing wide in it. `Grid::max_col_width` is that ceiling, and it is what
+//! `draw_table` sets: the table is egui's own grid, striped as before, with every cell's
+//! Markdown rendered inside its column and wrapping there. Only the table is drawn here;
+//! everything else in an answer goes to the renderer as it did before.
 
 use egui::Ui;
 use egui_commonmark::CommonMarkCache;
@@ -118,53 +120,36 @@ fn render(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
     egui_commonmark::CommonMarkViewer::new().show(ui, cache, markdown);
 }
 
-/// Draws a table: a share of the panel's width to each cell, wrapping inside it.
+/// Draws a table through egui's own grid, with the columns given a ceiling.
 fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        // The room inside the frame, which is what the cells have to share: taken after the
-        // frame's own margin, the table comes out exactly as wide as the panel.
         let gap = ui.spacing().item_spacing.x;
         let room = ui.available_width();
         let share = ((room - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
-        for (index, row) in table.rows.iter().enumerate() {
-            ui.horizontal_top(|ui| {
-                for column in 0..columns {
-                    let cell = ui.allocate_ui_with_layout(
-                        egui::vec2(share, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            // An id per cell: several cells share the ui's id, and a Grid
-                            // under a shared id is what egui warns about over the block.
-                            ui.push_id((index, column), |ui| {
-                                let cell = row.get(column).map(String::as_str).unwrap_or_default();
-                                if cell.trim().is_empty() {
-                                    // An empty cell keeps its place and draws nothing.
-                                    ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
-                                } else if table.heading && index == 0 && plain(cell) {
-                                    super::agent::bold_label(ui, cell);
-                                } else {
-                                    render(ui, cache, cell);
-                                }
-                            });
-                        },
-                    );
-                    // A container shrinks to what was drawn in it, and a cell that says little
-                    // would let the next one sit right against it: the rest of the share is
-                    // left as room, so the columns line up for every row. Only what the row
-                    // still has is given away — the share of the last column is not left over
-                    // past the panel's edge.
-                    if column + 1 < columns {
-                        let used = cell.response.rect.width().min(share);
-                        let left = ui.available_width();
-                        ui.add_space((share - used).min(left));
+        // The id of the piece the table is drawn in: two tables in one answer are two
+        // pieces, and a grid under a shared id is what egui warns about over the table.
+        egui::Grid::new(ui.id())
+            .striped(true)
+            .num_columns(columns)
+            .max_col_width(share)
+            .show(ui, |ui| {
+                for (index, row) in table.rows.iter().enumerate() {
+                    for column in 0..columns {
+                        let cell = row.get(column).map(String::as_str).unwrap_or_default();
+                        ui.push_id((index, column), |ui| {
+                            if cell.trim().is_empty() {
+                                ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
+                            } else if table.heading && index == 0 && plain(cell) {
+                                super::agent::bold_label(ui, cell);
+                            } else {
+                                render(ui, cache, cell);
+                            }
+                        });
                     }
+                    ui.end_row();
                 }
             });
-            if index + 1 < table.rows.len() {
-                ui.separator();
-            }
-        }
     });
 }
 
