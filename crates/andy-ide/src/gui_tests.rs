@@ -2475,8 +2475,25 @@ mod opening_a_panel {
 
     #[test]
     fn the_view_menu_names_both_panels() {
-        let gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
+
+        // Every panel the window has is a line of the menu, on or off: a panel that is not
+        // listed by name can only be reached by remembering its shortcut, and visibility that
+        // is a shortcut for some and a blank for the rest is not a visibility at all.
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        for tab in Tab::ALL {
+            let label = match tab.shortcut() {
+                Some(key) => format!("{}\t{key}", tab.title()),
+                None => tab.title().to_owned(),
+            };
+            assert!(
+                gui.harness.query_by_label(&label).is_some(),
+                "the View menu has no line for {}",
+                tab.title()
+            );
+        }
     }
 }
 
@@ -3379,6 +3396,60 @@ mod the_panels {
         // frame after that is where the dock has tidied the leaf it left behind.
         gui.settle();
         gui.settle();
+    }
+
+    #[test]
+    fn a_panel_put_away_keeps_everything_it_was_saying() {
+        // The cross means "out of the window", never "forget it". A panel does not own its
+        // thinking — the shell, the conversation, the repository all belong to the project —
+        // so putting a panel away must not be able to lose a word of it. The agent panel is
+        // the plainest proof: a half-written message and a conversation stay exactly as they
+        // were, and come back with the panel.
+        let mut gui = on_a_project();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::You(
+                "a question that was asked".to_owned(),
+            ));
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(
+                "an answer that was given".to_owned(),
+            ));
+        gui.app_mut().state.agent.input = "a half-written message".to_owned();
+        gui.settle();
+
+        put_away_with_the_cross(&mut gui, Tab::Agent);
+        assert!(gui.app().dock.find_tab(&Tab::Agent).is_none());
+
+        // The menu is the door it was put away from.
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Agent\tAlt+0").click();
+        gui.settle();
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+
+        assert!(gui.app().dock.find_tab(&Tab::Agent).is_some());
+        assert_eq!(
+            gui.app().state.agent.input,
+            "a half-written message",
+            "the field came back empty"
+        );
+        assert_eq!(
+            gui.app().state.agent.transcript.len(),
+            2,
+            "the conversation lost a line: {:?}",
+            gui.app().state.agent.transcript
+        );
+        assert_eq!(
+            gui.app().state.agent.transcript[1],
+            crate::agent::Line::Agent("an answer that was given".to_owned())
+        );
     }
 
     #[test]
@@ -6337,7 +6408,8 @@ mod the_agent_panel {
         gui.settle();
         let said = gui.app().state.agent.transcript.clone();
         assert!(
-            said.iter().any(|line| matches!(line, crate::agent::Line::You(_))),
+            said.iter()
+                .any(|line| matches!(line, crate::agent::Line::You(_))),
             "the request is not part of the conversation: {said:?}"
         );
 
