@@ -1026,6 +1026,7 @@ mod layout_persistence_tests {
                 layout: Some(layout.clone()),
                 hidden: None,
                 agent: None,
+                carets: Default::default(),
             })
             .unwrap();
 
@@ -1049,6 +1050,55 @@ mod layout_persistence_tests {
     }
 
     #[test]
+    fn the_carets_of_the_open_tabs_come_back() {
+        // Every tab keeps its own caret: the session comes back with both files where the
+        // person left them, not merely with both tabs.
+        let (project, config, mut app) = drawn_app();
+        std::fs::write(project.path().join("b.rs"), "fn other() {}\n").unwrap();
+        app.state.open_file(std::path::Path::new("b.rs"));
+
+        let a_id = buffer_id(&app, "a.rs");
+        let b_id = buffer_id(&app, "b.rs");
+        app.state.buffers.get_mut(&a_id).expect("a.rs").set_caret(4);
+        app.state.buffers.get_mut(&b_id).expect("b.rs").set_caret(7);
+        let wanted = (
+            app.state.buffers[&a_id].line_col(),
+            app.state.buffers[&b_id].line_col(),
+        );
+
+        // The window closes, and the workspace is written.
+        app.state.save_workspace(None, 100.0, true);
+
+        let restored = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        let a_id = buffer_id(&restored, "a.rs");
+        let b_id = buffer_id(&restored, "b.rs");
+        assert_eq!(
+            restored.state.buffers[&a_id].line_col(),
+            wanted.0,
+            "the caret of a.rs did not come back"
+        );
+        assert_eq!(
+            restored.state.buffers[&b_id].line_col(),
+            wanted.1,
+            "the caret of b.rs did not come back"
+        );
+    }
+
+    /// The identifier of the buffer behind a tab, by the name of the file.
+    fn buffer_id(app: &App, path: &str) -> usize {
+        let index = app
+            .state
+            .tabs
+            .find(std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("{path} is not open"));
+        app.state.tabs.items()[index].buffer_id
+    }
+
+    #[test]
     fn a_panel_put_away_is_still_away_after_a_restart() {
         let (project, config, mut app) = drawn_app();
         hide_panel(&mut app.dock, &mut app.state, Tab::Terminal);
@@ -1065,6 +1115,7 @@ mod layout_persistence_tests {
                 layout: Some(serde_json::to_string(&app.dock).unwrap()),
                 hidden: Some(vec![Tab::Terminal.slug().to_owned()]),
                 agent: None,
+                carets: Default::default(),
             })
             .unwrap();
 
@@ -1096,6 +1147,7 @@ mod layout_persistence_tests {
                 layout: Some("{\"nonsense\": true}".to_owned()),
                 hidden: None,
                 agent: None,
+                carets: Default::default(),
             })
             .unwrap();
 

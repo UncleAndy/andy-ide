@@ -999,10 +999,29 @@ impl AppState {
         for path in state.tabs {
             if root.join(&path).is_file() {
                 self.open_file(&path);
+                // The caret of the tab comes back with it: a tab restored to the top of the
+                // file is not where the person was.
+                if let Some((line, column)) = state.carets.get(&path).copied()
+                    && let Some(index) = self.tabs.find(&path)
+                    && let Some(item) = self.tabs.items().get(index)
+                    && let Some(buffer) = self.buffers.get_mut(&item.buffer_id)
+                {
+                    let caret = buffer.char_index(line, column);
+                    buffer.set_caret(caret);
+                }
             }
         }
         if let Some(active) = state.active {
             self.tabs.set_active(active);
+        }
+        // And the tab in front comes back with its caret on the screen, not merely in the file.
+        if let Some(item) = self
+            .tabs
+            .active()
+            .and_then(|index| self.tabs.items().get(index))
+            && let Some(buffer) = self.buffers.get_mut(&item.buffer_id)
+        {
+            buffer.request_reveal();
         }
         if !self.tabs.is_empty() {
             self.status = format!("{} tabs restored", self.tabs.len());
@@ -1085,6 +1104,14 @@ impl AppState {
             // agent that has actually been opened counts: a fresh project has not chosen
             // one, and the panel's default name is not a duty to resume.
             agent: self.agent.has_connected().then(|| self.agent.name.clone()),
+            // Where each open file was left. Taken from the buffers rather than from the tab in
+            // front: every tab has its own caret, and every one of them is what a person comes
+            // back to.
+            carets: self
+                .buffers
+                .values()
+                .map(|buffer| (buffer.path.clone(), buffer.line_col()))
+                .collect(),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

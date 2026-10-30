@@ -3,6 +3,7 @@
 //! Layout and open files live in `.andy-ide/workspace.json`, caches in
 //! `.andy-ide/cache/`, which is git-ignored on creation.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -51,6 +52,13 @@ pub struct WorkspaceState {
     /// rather than an empty one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Where the caret stood in each open file, by line and column — both counted from zero, in
+    /// characters. A line and a column outlive an edit elsewhere in a file better than a
+    /// character index does: a character index points into the middle of another word once
+    /// something above it grows or shrinks. The map is left out of the file when it is empty,
+    /// so a project that has never had a caret open reads as it always did.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub carets: BTreeMap<PathBuf, (usize, usize)>,
 }
 
 impl Workspace {
@@ -133,9 +141,33 @@ mod tests {
             layout: Some("{\"surfaces\":[]}".to_owned()),
             hidden: Some(vec!["diff".to_owned()]),
             agent: Some("stand-in".to_owned()),
+            carets: BTreeMap::from([(PathBuf::from("src/main.rs"), (12, 4))]),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
+    }
+
+    #[test]
+    fn a_workspace_that_never_had_a_caret_has_no_line_for_one() {
+        // The map is left out rather than written empty: an older file and a project that has
+        // only ever been opened read the same way.
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(root.path()).unwrap();
+        workspace
+            .write_state(&WorkspaceState {
+                tabs: vec![PathBuf::from("src/main.rs")],
+                active: Some(0),
+                layout: None,
+                hidden: None,
+                agent: None,
+                carets: BTreeMap::new(),
+            })
+            .unwrap();
+        let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();
+        assert!(
+            !written.contains("carets"),
+            "an empty map of carets was written: {written}"
+        );
     }
 
     #[test]

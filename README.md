@@ -29,11 +29,10 @@ agent is a configuration entry rather than a code change.
 Milestone M1 (framework and editing) is complete: window with dock panels, project tree,
 rope-backed editor with tree-sitter highlighting for twelve languages, tabs, quick open,
 find and replace in the file (`Ctrl+F`, `Ctrl+H`: every match painted, the caret walked
-through them, `Replace all` as one step of undo), a session that comes back — the tabs and the
-layout, though not yet the position of the caret — atomic save, filesystem watching, Markdown
-preview, dark and light themes.
-Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md), whose remainder that
-last item is.
+through them, `Replace all` as one step of undo), a session that comes back — the tabs, the
+layout, and the caret of every open file — atomic save, filesystem watching, Markdown preview,
+dark and light themes.
+Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
 Milestone M2 (navigation through a language server) is under way: the LSP client in
 `ide-lsp` speaks the protocol to a real child process, `F12` and `Ctrl+Click` go to the
