@@ -312,15 +312,20 @@ fn bands_and_lines(
     edge.push(bottom_of_rows);
 
     // A band on every other row, from one edge to the next: the same edges the lines are
-    // drawn on, so a band never reaches past the line into the words of the row below it.
+    // drawn on, so a band never reaches past the line into the words of the row below it —
+    // except at the foot of the table, where there is no line but the frame itself. A frame
+    // keeps a margin of its own around the rows, so a band of the last row that stopped at
+    // the last cell left a strip of bare background between itself and the frame.
     for (slot, index) in slots.iter().zip((1..cells.len()).step_by(2)) {
+        let to = if index + 1 == cells.len() {
+            bottom
+        } else {
+            edge[index + 1]
+        };
         ui.painter().set(
             *slot,
             egui::Shape::rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(left, edge[index]),
-                    egui::pos2(right, edge[index + 1]),
-                ),
+                egui::Rect::from_min_max(egui::pos2(left, edge[index]), egui::pos2(right, to)),
                 0.0,
                 ui.visuals().faint_bg_color,
             ),

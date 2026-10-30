@@ -6642,6 +6642,8 @@ mod the_agent_panel {
     struct TableParts {
         /// The table's own frame: its left and right uprights.
         frame: (f32, f32),
+        /// The foot of that frame.
+        bottom: f32,
         words: Vec<(f32, f32, f32, f32, String)>,
         /// Every horizontal line of the panel: where it is, and where it runs.
         lines: Vec<(f32, f32, f32)>,
@@ -6659,6 +6661,7 @@ mod the_agent_panel {
         let mut frames: Vec<egui::Rect> = Vec::new();
         let mut parts = TableParts {
             frame: (f32::NAN, f32::NAN),
+            bottom: f32::NAN,
             words: Vec::new(),
             lines: Vec::new(),
             bands: Vec::new(),
@@ -6738,6 +6741,7 @@ mod the_agent_panel {
             .max_by_key(|frame| covers(frame))
         {
             parts.frame = (frame.left(), frame.right());
+            parts.bottom = frame.bottom();
         }
         parts
     }
@@ -6847,6 +6851,60 @@ mod the_agent_panel {
         }
         assert!(bands >= 1, "the table has no bands of its own");
         gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
+    fn a_band_of_the_last_row_reaches_the_foot_of_the_table() {
+        // The frame of a table keeps a margin of its own around the rows, so a band that
+        // stopped at the last cell left a strip of bare background between itself and the
+        // frame — the shading of the last row is expected to run to the foot of the table.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words in it to wrap onto two lines and a bit more of them for certain |\n| second row | two |\n| third row | another cell long enough that it wraps as well, twice over and then once more |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        let mut parts = table_parts(&gui);
+        only_the_tables_words(&mut parts);
+        let (left, right) = parts.frame;
+        let foot_of_the_table = parts.bottom;
+        assert!(
+            left.is_finite() && foot_of_the_table.is_finite(),
+            "the table has no frame: {left:?}..{right:?}, foot {foot_of_the_table:?}"
+        );
+        // The bands of this table, told from the bands of the panel around it by running from
+        // one upright of the frame to the other.
+        let mut bands: Vec<(f32, f32)> = parts
+            .bands
+            .iter()
+            .filter(|(_, _, x0, x1)| (*x0 - left).abs() <= 2.0 && (*x1 - right).abs() <= 2.0)
+            .map(|(top, bottom, ..)| (*top, *bottom))
+            .collect();
+        assert!(!bands.is_empty(), "the table has no bands");
+        bands.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let (top, foot) = bands[bands.len() - 1];
+        assert!(
+            foot >= foot_of_the_table - 1.0,
+            "the band of the last row runs {top:.1}..{foot:.1}, and the table ends at {foot_of_the_table:.1}"
+        );
+        assert!(
+            foot <= foot_of_the_table + 0.5,
+            "the band of the last row runs to {foot:.1}, past the table's own foot at {foot_of_the_table:.1}"
+        );
     }
 
     #[test]
