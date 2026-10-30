@@ -6444,13 +6444,64 @@ mod the_agent_panel {
         gui.app_mut().state.agent.stop();
     }
 
+    /// Where a piece of text of the panel was drawn, and how wide it is.
+    fn drawn_at(gui: &Gui, needle: &str) -> Option<(f32, f32)> {
+        let panel = gui.app().state.agent.shown_rect?;
+        for clipped in &gui.harness.output().shapes {
+            if let egui::Shape::Text(text) = &clipped.shape
+                && text.galley.job.text == needle
+                && text.pos.x >= panel.left()
+                && text.pos.y >= panel.top()
+                && text.pos.y <= panel.bottom()
+            {
+                return Some((text.pos.x, text.pos.x + text.galley.size().x));
+            }
+        }
+        None
+    }
+
+    /// The vertical lines of the panel between two x positions.
+    fn vertical_lines_between(gui: &Gui, from: f32, to: f32) -> usize {
+        gui.harness
+            .output()
+            .shapes
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { points, .. } => {
+                    (points[0].x - points[1].x).abs() < 0.5
+                        && (points[0].y - points[1].y).abs() > 10.0
+                        && points[0].x > from
+                        && points[0].x < to
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// The horizontal lines of the panel between two y positions.
+    fn horizontal_lines_between(gui: &Gui, from: f32, to: f32) -> usize {
+        gui.harness
+            .output()
+            .shapes
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { points, .. } => {
+                    (points[0].y - points[1].y).abs() < 0.5
+                        && (points[0].x - points[1].x).abs() > 10.0
+                        && points[0].y > from
+                        && points[0].y < to
+                }
+                _ => false,
+            })
+            .count()
+    }
+
     #[test]
-    fn a_table_keeps_its_columns_apart() {
-        // Every column starts a share of the panel after the one before it, and the rows
-        // line up under the heading. A cell that says little is not squeezed against its
-        // neighbour: a container shrinks to what is drawn in it, and without the rest of the
-        // share being left as room "first cell", "second cell" and "third cell" came out
-        // 8 px apart — one run of words, with no columns to read.
+    fn a_table_takes_only_the_room_its_words_need() {
+        // A cell of a table takes the room its words need, not the whole column it could
+        // have: a heading drawn across its whole column is what makes a column of two short
+        // words as wide as the widest column of the table. The row still lines up under the
+        // heading, and the columns stay apart.
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");
             return;
@@ -6472,38 +6523,42 @@ mod the_agent_panel {
         gui.settle();
 
         let panel = gui.app().state.agent.shown_rect.expect("the panel");
-        let at = |needle: &str| -> Option<f32> {
-            for clipped in &gui.harness.output().shapes {
-                if let egui::Shape::Text(text) = &clipped.shape {
-                    let inside = text.pos.x >= panel.left()
-                        && text.pos.y >= panel.top()
-                        && text.pos.y <= panel.bottom();
-                    if inside && text.galley.job.text == needle {
-                        return Some(text.pos.x);
-                    }
-                }
-            }
-            None
-        };
-        let at = |needle: &str| at(needle);
-        let heading = at("what").expect("the heading is not drawn");
-        let first = at("first cell").expect("the first column is not drawn");
-        let second = at("second cell").expect("the second column is not drawn");
-        let third = at("third cell").expect("the third column is not drawn");
-        let share = panel.width() / 3.0;
+        let heading = drawn_at(&gui, "what").expect("the heading is not drawn");
+        let first = drawn_at(&gui, "first cell").expect("the first column is not drawn");
+        let second = drawn_at(&gui, "second cell").expect("the second column is not drawn");
+        let third = drawn_at(&gui, "third cell").expect("the third column is not drawn");
         assert!(
-            (first - heading).abs() < 8.0,
-            "the row does not line up under the heading: {first:.1} against {heading:.1}"
+            (first.0 - heading.0).abs() < 8.0,
+            "the row does not line up under the heading: {:.1} against {:.1}",
+            first.0,
+            heading.0
         );
         assert!(
-            second - first > share * 0.6,
-            "the second column is squeezed against the first: {:.1} apart, a share is {share:.1}",
-            second - first
+            second.0 >= first.1,
+            "the second column starts inside the first: {:.1} against {:.1}",
+            second.0,
+            first.1
         );
         assert!(
-            third - second > share * 0.6,
-            "the third column is squeezed against the second: {:.1} apart, a share is {share:.1}",
-            third - second
+            third.1 < panel.left() + panel.width() * 0.4,
+            "a table of three short cells takes {:.0} of the panel's {:.0} points",
+            third.1 - panel.left(),
+            panel.width()
+        );
+
+        // And the columns are drawn apart, not only laid out apart.
+        assert!(
+            vertical_lines_between(&gui, first.1, second.0) >= 1,
+            "no line between the first column and the second"
+        );
+        assert!(
+            vertical_lines_between(&gui, second.1, third.0) >= 1,
+            "no line between the second column and the third"
+        );
+        assert!(
+            horizontal_lines_between(&gui, heading.0.max(first.0), heading.0 + 30.0) >= 1
+                || horizontal_lines_between(&gui, heading.0, heading.0 + 60.0) >= 1,
+            "no line between the heading and the row"
         );
         gui.app_mut().state.agent.stop();
     }

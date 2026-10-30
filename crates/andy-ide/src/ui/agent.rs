@@ -78,33 +78,6 @@ fn plain_key(ui: &mut Ui, key: egui::Key) -> bool {
     nothing_held && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key))
 }
 
-/// A line of text as heavy as a bold face would be.
-///
-/// egui's own `strong()` brightens the colour and nothing else: the fonts it ships have no
-/// bold face, and asking for one gets the same light one. So the line is drawn twice, a
-/// fraction of a point apart — which is what a heavier weight is, on the screen, when there
-/// is no heavier weight to be had. The words are announced to the readable tree as they are:
-/// nothing else knows the line is there.
-pub(super) fn bold_label(ui: &mut Ui, text: &str) {
-    /// How far the second pass is shifted: enough to thicken, not enough to smear.
-    const THICKEN: f32 = 0.6;
-
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let colour = ui.visuals().strong_text_color();
-    let galley = ui
-        .painter()
-        .layout(text.to_owned(), font, colour, ui.available_width());
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), galley.size().y),
-        egui::Sense::hover(),
-    );
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
-    ui.painter().galley(rect.left_top(), galley.clone(), colour);
-    ui.painter()
-        .galley(rect.left_top() + egui::vec2(THICKEN, 0.0), galley, colour);
-}
-
 /// What a request of the person's own is drawn in: a shade above the panel, square corners,
 /// so that the question and the answer are two things and not one column of words.
 const REQUEST: egui::Color32 = egui::Color32::from_rgb(34, 38, 45);
@@ -855,7 +828,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                             .inner_margin(egui::Margin::symmetric(8, 5))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                bold_label(ui, text);
+                                super::markdown::bold_label(ui, text, true);
                             });
                         ui.add_space(2.0);
                     }
