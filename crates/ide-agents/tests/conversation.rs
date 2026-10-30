@@ -401,7 +401,7 @@ fn the_client_asks_nothing_of_itself_and_says_files_go_through_the_terminal() {
 /// A session that was told to pick up `id`.
 fn start_resumed(policy: PermissionPolicy, id: &str) -> (tempfile::TempDir, Session) {
     let dir = project();
-    let session = Session::start_with(&stand_in(), dir.path(), policy, Some(id.to_owned()))
+    let session = Session::start_with(&stand_in(), dir.path(), policy, Some(id.to_owned()), None)
         .expect("the agent started");
     (dir, session)
 }
@@ -420,6 +420,29 @@ fn conversation(session: &mut Session) -> String {
         }
     }
     said
+}
+
+#[test]
+fn a_start_says_which_step_it_is_at() {
+    // Between "Start" and "ready" the panel says which step the start is at, and a real
+    // agent can take its time at any of them: naming the step is what keeps a slow start
+    // from looking like a hang. The last step of a start is the one about the models,
+    // since they arrive with the session's own answer.
+    let dir = project();
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let _session = Session::start_with(
+        &stand_in(),
+        dir.path(),
+        PermissionPolicy::Deny,
+        None,
+        Some(std::sync::Arc::clone(&progress)),
+    )
+    .expect("the agent started");
+    let last = progress.lock().unwrap().clone();
+    assert_eq!(
+        last, "Getting model parameters\u{2026}",
+        "the last step of a start is not the one the panel shows: {last:?}"
+    );
 }
 
 #[test]

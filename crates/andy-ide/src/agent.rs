@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ide_agents::{
@@ -158,6 +159,14 @@ pub struct AgentState {
     /// number of points is a promise the field breaks the moment a second line is typed.
     pub field_rect: Option<egui::Rect>,
     pub below: f32,
+    /// Whether a start is in flight: the process is coming up, and the status line says
+    /// which step it is at rather than that it is on its way. The step itself is written
+    /// by the worker through `progress`, so the panel can hold the line while the worker
+    /// is busy starting.
+    pub connecting: bool,
+    /// The step of the start in flight ("Launching\u{2026}", "Getting agent
+    /// parameters\u{2026}", "Getting model parameters\u{2026}"), written by the worker.
+    progress: Arc<Mutex<String>>,
     /// Whether the last line of the transcript is an answer still growing. The pieces of one
     /// streamed answer share a line; the person's own words end it, because what follows them
     /// is the next answer, not another piece of the one before.
@@ -252,6 +261,8 @@ impl Default for AgentState {
             picked: Vec::new(),
             commands: Vec::new(),
             command_pick: 0,
+            connecting: false,
+            progress: Arc::new(Mutex::new(String::new())),
             agent_line_open: false,
             card_text: String::new(),
             card_wants_focus: false,
@@ -432,11 +443,14 @@ impl AgentState {
             .resume
             .clone()
             .filter(|_| self.resumed_from.as_deref() == Some(name.as_str()));
+        self.connecting = true;
+        self.progress = Arc::new(Mutex::new("Launching\u{2026}".to_owned()));
+        let progress = Arc::clone(&self.progress);
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
-            .spawn(move || work(spec, root, resume, jobs, answers));
+            .spawn(move || work(spec, root, resume, progress, jobs, answers));
         match started {
             Ok(_) => {
                 self.worker = Some(Worker { commands, replies });
@@ -706,6 +720,14 @@ impl AgentState {
         self.queued = None;
     }
 
+    /// The step of the start in flight, or nothing when the panel is not starting.
+    pub fn connecting_step(&self) -> String {
+        self.progress
+            .lock()
+            .map(|step| step.clone())
+            .unwrap_or_default()
+    }
+
     /// Whether the panel is waiting to start a crashed agent again.
     pub fn waiting_to_reconnect(&self) -> bool {
         self.retry_at.is_some()
@@ -806,6 +828,7 @@ impl AgentState {
             // on its way out.
             drop(worker.commands);
         }
+        self.connecting = false;
         self.busy = false;
         self.asking = None;
         self.choice = None;
@@ -857,6 +880,7 @@ impl AgentState {
                 // from here on is its own answer, a line of its own, and not another piece of
                 // the last replayed one (`acp_adapter/server.py` replays before responding).
                 self.agent_line_open = false;
+                self.connecting = false;
                 self.status = if resumed {
                     format!("ready, session {session} resumed")
                 } else {
@@ -867,6 +891,7 @@ impl AgentState {
                 self.transcript.push(Line::Note(error.clone()));
                 self.status = error;
                 self.busy = false;
+                self.connecting = false;
             }
             Reply::Event(event) => match event {
                 AgentEvent::Thinking(thought) => {
@@ -981,18 +1006,20 @@ fn work(
     spec: ide_agents::AgentSpec,
     root: PathBuf,
     resume: Option<String>,
+    progress: Arc<Mutex<String>>,
     commands: Receiver<Command>,
     replies: Sender<Reply>,
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
-    let mut session = match Session::start_with(&spec, &root, PermissionPolicy::Ask, resume) {
-        Ok(session) => session,
-        Err(error) => {
-            let _ = replies.send(Reply::Failed(format!("{error}")));
-            return;
-        }
-    };
+    let mut session =
+        match Session::start_with(&spec, &root, PermissionPolicy::Ask, resume, Some(progress)) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = replies.send(Reply::Failed(format!("{error}")));
+                return;
+            }
+        };
     // A load that resumes a session replays the conversation before it answers, and the
     // replay went into the session's own queue while the load's answer was being waited
     // for. It has to reach the panel before the ready line does: a panel that drew "ready"

@@ -167,6 +167,14 @@ fn main() {
 
         match method.as_str() {
             "initialize" => {
+                // A start that is slow on purpose, for the test that watches the panel say
+                // what it is doing while the agent comes up.
+                if let Some(delay) = std::env::var("ACP_TEST_INIT_DELAY_MS")
+                    .ok()
+                    .and_then(|delay| delay.parse::<u64>().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
                 caps = message
                     .get("params")
                     .and_then(|params| params.get("clientCapabilities"))

@@ -4668,6 +4668,82 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_setup_row_makes_room_for_the_conversation_while_the_agent_runs() {
+        // The row of the name and the command is the desk the agent is set up at; a running
+        // agent is not being set up there, and the strip is only a row the conversation did
+        // not ask for. It comes back when the agent stops, because the next setup happens
+        // then.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("Name").is_some(),
+            "the setup row is not there before the start"
+        );
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        assert!(
+            gui.harness.query_by_label("Name").is_none(),
+            "the setup row is still there while the agent runs"
+        );
+        gui.harness.get_by_label("Stop").click();
+        wait(&mut gui, "the agent stopping", |gui| {
+            !gui.app().state.agent.running()
+        });
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("Name").is_some(),
+            "the setup row did not come back after the stop"
+        );
+    }
+
+    #[test]
+    fn the_connection_says_what_it_is_doing() {
+        // A start that is slow is a start the panel has to speak for: between "Start" and
+        // "ready" it says which step it is at, so a person watching does not have to guess
+        // whether the agent is coming up or never going to.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_INIT_DELAY_MS", "600")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait_stepping(&mut gui, "the step about the agent", |gui| {
+            gui.harness
+                .query_by_label_contains("Getting agent parameters")
+                .is_some()
+        });
+        // The step is being held: the agent deliberately answers slowly, and the panel is
+        // still saying it waits for the parameters.
+        gui.settle();
+        assert!(
+            gui.harness
+                .query_by_label_contains("Getting agent parameters")
+                .is_some(),
+            "the step vanished while the agent was still slow: {:?}",
+            gui.app().state.agent.status
+        );
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.settle();
+        assert!(
+            gui.harness
+                .query_by_label_contains("Getting agent parameters")
+                .is_none(),
+            "the step stayed after the start finished"
+        );
+    }
+
+    #[test]
     fn a_restored_session_brings_back_the_words_of_both_sides() {
         // On `session/load` an agent replays the conversation it kept, and the replay carries
         // the person's own words as well as its answers — one chunk per message with the role,

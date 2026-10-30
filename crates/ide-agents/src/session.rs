@@ -165,7 +165,7 @@ impl Session {
     /// `initialize` and `session/new` are done here, so a `Session` that exists is a
     /// session that has answered: every failure to start is a failure to build one.
     pub fn start(spec: &AgentSpec, root: &Path, policy: PermissionPolicy) -> Result<Self> {
-        Self::start_with(spec, root, policy, None)
+        Self::start_with(spec, root, policy, None, None)
     }
 
     /// Starts an agent and asks it to pick up `resume`, if it has such a conversation.
@@ -179,7 +179,9 @@ impl Session {
         root: &Path,
         policy: PermissionPolicy,
         resume: Option<String>,
+        progress: Option<Arc<Mutex<String>>>,
     ) -> Result<Self> {
+        Self::step_said(progress.as_ref(), "Launching\u{2026}");
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
@@ -286,8 +288,19 @@ impl Session {
             usage: None,
         };
 
-        session.hello(resume)?;
+        session.hello(resume, progress)?;
         Ok(session)
+    }
+
+    /// The step a start is at, for a panel to say what is happening while the agent comes
+    /// up: a start that shows nothing between "starting" and "ready" looks stuck, and the
+    /// difference matters at the speed a real agent takes to answer a question.
+    fn step_said(progress: Option<&Arc<Mutex<String>>>, step: &str) {
+        if let Some(progress) = progress
+            && let Ok(mut said) = progress.lock()
+        {
+            *said = step.to_owned();
+        }
     }
 
     /// The id ACP gave this conversation.
@@ -309,7 +322,11 @@ impl Session {
     }
 
     /// `initialize`, then a conversation either resumed or new.
-    fn hello(&mut self, resume: Option<String>) -> Result<()> {
+    fn hello(
+        &mut self,
+        resume: Option<String>,
+        progress: Option<Arc<Mutex<String>>>,
+    ) -> Result<()> {
         // Nothing claimed on the agent's behalf: it has a terminal of its own, the one it
         // was configured with, and files are reached through it. Offering `fs/*` here
         // would invite it to read and write *this* machine's copies of the project, and
@@ -325,6 +342,7 @@ impl Session {
             // or terminal capability is.
             elicitation: Default::default(),
         };
+        Self::step_said(progress.as_ref(), "Getting agent parameters\u{2026}");
         let answer = self.ask("initialize", initialize_params(&capabilities), HELLO)?;
         let _version = answer
             .get("protocolVersion")
@@ -339,6 +357,9 @@ impl Session {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
+        // The models, the modes and the settings the agent offers come with the session's
+        // own answer, which is why this is the step the panel shows while it is coming.
+        Self::step_said(progress.as_ref(), "Getting model parameters\u{2026}");
         let answer = match resume.clone().filter(|_| can_load) {
             Some(session) => {
                 match self.ask(

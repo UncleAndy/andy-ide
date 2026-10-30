@@ -26,6 +26,11 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     if state.agent.waiting_to_reconnect() {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
+    // A start in flight repaints itself, or its "\u{2026}" would sit still and the panel
+    // would look stuck at a step it had finished a moment before.
+    if state.agent.connecting {
+        ui.ctx().request_repaint_after(Duration::from_millis(250));
+    }
     header(ui, state);
     // The card the agent is waiting on is drawn above the conversation, before it: drawn
     // below, it would have to fit into what the conversation left over, and a card taller
@@ -766,13 +771,31 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             state.agent.remember();
         }
         ui.separator();
-        ui.weak(&state.agent.status);
+        if state.agent.connecting {
+            // The steps of a start, and a mark that moves: the step says what is happening,
+            // and the moving mark is the proof that it still is. A line that sits still
+            // while a real agent takes its time to answer looks like a hang.
+            let phase = state.agent.connecting_step();
+            let dots = match (ui.input(|input| input.time) * 2.0) as usize % 3 {
+                0 => "\u{2026}",
+                1 => "..",
+                _ => ".",
+            };
+            ui.weak(format!("{phase}{dots}"));
+        } else {
+            ui.weak(&state.agent.status);
+        }
     });
-    // One row, the way the rest of the panel is: a name to call it by, and the command
-    // that starts it. There is no separate field for the terminal, because the terminal
-    // belongs to the agent — it is configured there, and the editor only has to say where
+    // The row of the name and the command is the desk the agent is set up at; a running
+    // agent is not being set up — the fields are read-only then anyway — and the strip is
+    // only a row the conversation did not ask for. It comes back when the agent stops,
+    // because that is when the next setup happens. There is no separate field for the
+    // terminal: the terminal belongs to the agent, and the editor only has to say where
     // the project is and that files are worked on through it.
     let running = state.agent.running();
+    if running {
+        return;
+    }
     ui.horizontal(|ui| {
         ui.label("Name");
         let name_width = (ui.available_width() * 0.3).max(60.0);
