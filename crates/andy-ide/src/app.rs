@@ -33,7 +33,7 @@ impl App {
         project: Option<PathBuf>,
         file: Option<PathBuf>,
     ) -> Self {
-        let mut state = AppState::with_config_dir(config_dir, project, file);
+        let mut state = AppState::with_config_dir(config_dir.clone(), project, file);
         // What the person put away is part of the project, like the layout: a panel that was left
         // off screen comes back off screen. A project that has never said comes back with the
         // panels this build starts without.
@@ -45,6 +45,28 @@ impl App {
             .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
             .unwrap_or_else(default_layout);
         complete(&mut dock, &state.hidden);
+        // The panel reads its agents from the project on the first frame, and a connection
+        // the window opens before that first frame has to ask for them here.
+        state.agent.follow(
+            state
+                .project
+                .as_ref()
+                .map(|project| project.root())
+                .as_deref(),
+            &config_dir,
+        );
+        // The agent that was on duty when the window closed comes back on duty: the project
+        // keeps its agent the way it keeps its layout, and the connection is opened the way
+        // a person opening the panel and pressing Start would open it. An agent the project
+        // no longer knows is left alone — the file is the source of what can be started.
+        if let Some(name) = state.stored_agent()
+            && let Some(spec) = state.agent.registry.get(&name)
+        {
+            state.agent.chosen = Some(name);
+            state.agent.name = spec.name.clone();
+            state.agent.command = ide_agents::quote_command(spec);
+            state.agent.start();
+        }
         Self {
             state,
             dock,
@@ -962,6 +984,7 @@ mod layout_persistence_tests {
                 active: None,
                 layout: Some(layout.clone()),
                 hidden: None,
+                agent: None,
             })
             .unwrap();
 
@@ -1000,6 +1023,7 @@ mod layout_persistence_tests {
                 active: None,
                 layout: Some(serde_json::to_string(&app.dock).unwrap()),
                 hidden: Some(vec![Tab::Terminal.slug().to_owned()]),
+                agent: None,
             })
             .unwrap();
 
@@ -1030,6 +1054,7 @@ mod layout_persistence_tests {
                 active: None,
                 layout: Some("{\"nonsense\": true}".to_owned()),
                 hidden: None,
+                agent: None,
             })
             .unwrap();
 

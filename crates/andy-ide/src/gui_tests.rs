@@ -4574,6 +4574,76 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_project_keeps_the_agent_that_was_on_duty_and_opens_it_again() {
+        // Who was working belongs to the project, like the layout: the next launch opens
+        // that agent as though the person had pressed Start the moment the panel was in
+        // front of them. An agent the file no longer knows is left alone.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let config = tempfile::tempdir().unwrap();
+        let mut first = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        first.settle();
+        first
+            .harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        first.settle();
+        first.harness.get_by_label("Start").click();
+        wait(&mut first, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        // The window closes: the workspace is written on close, and it says who was on duty.
+        first.app_mut().state.save_workspace(None, 1000.0, true);
+        drop(first);
+
+        // The next launch: the agent is up before a finger is lifted, and it is running
+        // the way the button would be told to.
+        let config = tempfile::tempdir().unwrap();
+        let mut second = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        second
+            .harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        wait_stepping(&mut second, "the agent opening on its own", |gui| {
+            gui.app().state.agent.running() && gui.app().state.agent.status.starts_with("ready")
+        });
+        assert!(
+            second.harness.query_by_label("Stop").is_some(),
+            "the agent did not open on its own"
+        );
+    }
+
+    #[test]
     fn the_project_keeps_the_conversation_and_picks_it_up_next_time() {
         // A conversation is worth keeping: an agent that has read the project once knows
         // it. The id goes into `.andy-ide`, beside the layout, and the next launch asks
@@ -4630,7 +4700,9 @@ mod the_agent_panel {
         );
 
         // The window closes — the agent process goes with it — and the project is opened
-        // again, as on the next launch.
+        // again, as on the next launch. The workspace is written on close, so the closing
+        // window says who was on duty.
+        first.app_mut().state.save_workspace(None, 1000.0, true);
         drop(first);
 
         let mut second = {
@@ -4651,11 +4723,18 @@ mod the_agent_panel {
         second
             .harness
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
-        second.settle();
-        second.harness.get_by_label("Start").click();
-        wait(&mut second, "the conversation coming back", |gui| {
-            gui.app().state.agent.status.contains("resumed")
-        });
+        // Nothing is pressed: the agent that was on duty when the window closed opens on
+        // its own, as though the person had pressed Start the moment the panel was in
+        // front of them, and the conversation it kept comes with it.
+        wait(
+            &mut second,
+            "the conversation coming back on its own",
+            |gui| gui.app().state.agent.status.contains("resumed"),
+        );
+        assert!(
+            second.harness.query_by_label("Stop").is_some(),
+            "the reopened window did not open its agent by itself"
+        );
 
         // And the agent itself agrees: this is the conversation it kept, not a new one.
         second.app_mut().state.agent.input = "session".to_owned();

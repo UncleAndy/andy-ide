@@ -45,6 +45,12 @@ pub struct WorkspaceState {
     /// build's own answer, the second is a person who has shown every panel and means it.
     #[serde(default)]
     pub hidden: Option<Vec<String>>,
+    /// The agent that was on duty when the window closed, by the name the window gives it.
+    /// The connection to it is opened again on the next launch, the way the conversation it
+    /// kept is picked up. A workspace that never connected to one has no line for it at all
+    /// rather than an empty one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl Workspace {
@@ -126,6 +132,7 @@ mod tests {
             active: Some(1),
             layout: Some("{\"surfaces\":[]}".to_owned()),
             hidden: Some(vec!["diff".to_owned()]),
+            agent: Some("stand-in".to_owned()),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);

@@ -1017,6 +1017,12 @@ impl AppState {
         )
     }
 
+    /// The agent that was on duty when the window closed, if the workspace remembers one.
+    pub fn stored_agent(&self) -> Option<String> {
+        let workspace = self.workspace.as_ref()?;
+        workspace.read_state().agent
+    }
+
     /// Puts a panel away: it leaves the dock, and everything behind it — a shell that is still
     /// running, a conversation, the changes of a repository — stays where it was.
     pub fn put_away(&mut self, tab: Tab) {
@@ -1061,6 +1067,11 @@ impl AppState {
                     .map(|tab| tab.slug().to_owned())
                     .collect(),
             ),
+            // The agent that was on duty, so the next launch can open it as though the
+            // person had pressed Start the moment the panel was in front of them. Only an
+            // agent that has actually been opened counts: a fresh project has not chosen
+            // one, and the panel's default name is not a duty to resume.
+            agent: self.agent.has_connected().then(|| self.agent.name.clone()),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

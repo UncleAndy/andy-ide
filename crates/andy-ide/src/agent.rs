@@ -728,6 +728,12 @@ impl AgentState {
             .unwrap_or_default()
     }
 
+    /// Whether an agent has ever been opened in this panel: a `Ready` has been heard at
+    /// least once, which is what makes the project remember who was on duty.
+    pub fn has_connected(&self) -> bool {
+        self.connected_at.is_some()
+    }
+
     /// Whether the panel is waiting to start a crashed agent again.
     pub fn waiting_to_reconnect(&self) -> bool {
         self.retry_at.is_some()
