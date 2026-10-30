@@ -48,11 +48,7 @@ impl App {
         // The panel reads its agents from the project on the first frame, and a connection
         // the window opens before that first frame has to ask for them here.
         state.agent.follow(
-            state
-                .project
-                .as_ref()
-                .map(|project| project.root())
-                .as_deref(),
+            state.project.as_ref().map(|project| project.root()),
             &config_dir,
         );
         // The agent that was on duty when the window closed comes back on duty: the project
@@ -524,6 +520,9 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 .changed()
             {
                 state.status = "markdown preview toggled".to_owned();
+            }
+            if ui.checkbox(&mut state.hints, "Show hints").changed() {
+                state.status = "hints toggled".to_owned();
             }
             if ui.button("quick open	Ctrl+P").clicked() {
                 state.quick_open.open();

@@ -30,13 +30,14 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         .map(|buffer| preview::is_markdown(&buffer.path))
         .unwrap_or(false);
 
-    ui.horizontal(|ui| {
-        ui.toggle_value(&mut state.preview_open, "Preview")
-            .on_hover_text("Ctrl+Shift+M");
-        if !markdown {
-            ui.weak("(Markdown only)");
-        }
-    });
+    // The Preview switch is for Markdown files: for any other file the row is not
+    // drawn at all, and its height belongs to the text.
+    if markdown {
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut state.preview_open, "Preview")
+                .on_hover_text("Ctrl+Shift+M");
+        });
+    }
 
     let palette = Palette::for_theme(state.config.theme);
     // The margin marks are read before the buffer is borrowed: both live in the state,

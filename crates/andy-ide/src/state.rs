@@ -121,6 +121,9 @@ pub struct AppState {
     /// The project-symbol search (`Ctrl+Shift+F12`).
     pub symbols: crate::ui::symbols::SymbolSearch,
     pub hover: crate::ui::hover::Hover,
+    /// Whether the hints that follow the pointer are on: the switch lives in the
+    /// View menu, and with it off the pointer is not watched at all.
+    pub hints: bool,
     /// Whether the editor tab was drawn this frame: the hint belongs to the text under
     /// the pointer, and there is no such text while the panel is off screen.
     pub(crate) editor_drawn: bool,
@@ -206,6 +209,7 @@ impl AppState {
             results: crate::ui::results::Results::new(),
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
+            hints: true,
             editor_drawn: false,
             blame: None,
             rename: crate::ui::rename::Rename::new(),
@@ -468,6 +472,12 @@ impl AppState {
     /// Returns how long the window should wait before the question becomes due,
     /// so an idle window comes back to ask it; `None` means nothing is pending.
     pub fn track_hover(&mut self, now: f64) -> Option<std::time::Duration> {
+        if !self.hints {
+            // The hints are off: the pointer is not watched at all, and a hint that
+            // was on screen when the switch went off is gone with it.
+            self.hover.forget();
+            return None;
+        }
         self.hover.forget_if_modal(self.modal_open());
         // The pointer is on the hint, which floats over the text. The text under it is
         // not what the pointer is on, so nothing is asked about it: asking replaced the

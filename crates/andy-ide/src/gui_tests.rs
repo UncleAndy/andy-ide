@@ -278,9 +278,11 @@ fn a_click_in_the_editor_puts_the_caret_there() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\nthree\n")], Some("a.rs"));
     gui.settle();
 
-    // The editor is the large area to the right of the tree, above the problems
-    // panel; a click at its top-left corner lands on the first character.
-    let pos = egui::pos2(315.0, 125.0);
+    // The editor is the large area to the right of the tree; the click is aimed
+    // at the first character, wherever the rows above the text put it.
+    // (315, 100) is on the first line of this window: the rows above the text
+    // (tab strip, the Preview row when it is drawn) decide where it is.
+    let pos = egui::pos2(315.0, 100.0);
     gui.harness.event(egui::Event::PointerMoved(pos));
     gui.harness.event(egui::Event::PointerButton {
         pos,
@@ -323,7 +325,10 @@ fn click_at(harness: &mut Harness<'static, App>, pos: egui::Pos2) {
 #[test]
 fn typing_changes_the_buffer_and_marks_it_modified() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-    click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+    // (315, 100) is on the first line of this window: the rows above the text
+    // (tab strip, the Preview row when it is drawn) decide where it is.
+    let pos = egui::pos2(315.0, 100.0);
+    click_at(&mut gui.harness, pos);
     gui.settle();
 
     gui.harness.event(egui::Event::Text("X".to_owned()));
@@ -372,6 +377,26 @@ fn ctrl_shift_m_toggles_the_preview_split() {
     );
 }
 
+#[test]
+fn the_preview_switch_is_only_for_markdown_files() {
+    // A file that cannot be previewed is not asked whether it wants one: the switch
+    // is drawn for Markdown and the row is not drawn at all for anything else, so
+    // the height of the row belongs to the text.
+    let mut gui = Gui::new(&[("notes.md", "# A heading\n")], Some("notes.md"));
+    gui.settle();
+    assert!(
+        gui.harness.query_by_label("Preview").is_some(),
+        "the Markdown file has no Preview switch"
+    );
+
+    let mut gui = Gui::new(&[("main.rs", "fn main() {}\n")], Some("main.rs"));
+    gui.settle();
+    assert!(
+        gui.harness.query_by_label("Preview").is_none(),
+        "the plain file still offers a Preview switch"
+    );
+}
+
 /// The window's cross: the question it puts, and the answer that has to stick.
 ///
 /// `ViewportCommand::Close` is delivered back to the application as a fresh close
@@ -416,7 +441,10 @@ mod closing_the_window {
 
     fn dirty_window() -> Gui {
         let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         gui.harness.event(egui::Event::Text("X".to_owned()));
         gui.settle();
@@ -552,7 +580,10 @@ mod navigation_by_mouse {
         let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
         gui.settle();
 
-        ctrl_click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        ctrl_click_at(&mut gui.harness, pos);
 
         assert_eq!(
             gui.app().state.status,
@@ -566,7 +597,10 @@ mod navigation_by_mouse {
         let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
         gui.settle();
 
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
 
         assert_eq!(
@@ -825,6 +859,8 @@ mod jumps {
 
     #[test]
     fn an_external_file_saves_where_it_lives() {
+        // The first line of the external file sits higher than the first line of the
+        // first tab: the click finds it at 52 rather than 80.
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let outside = tempfile::tempdir().unwrap();
         let far = outside.path().join("far.rs");
@@ -848,8 +884,10 @@ mod jumps {
         });
         gui.settle();
 
-        // Type one letter and save with the keyboard.
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // Type one letter and save with the keyboard. The one line of the external
+        // file sits higher than the first tab's: the click finds it at 52.
+        let pos = egui::pos2(315.0, 52.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         gui.harness.event(egui::Event::Text("X".to_owned()));
         gui.settle();
@@ -892,7 +930,10 @@ mod blink {
     #[test]
     fn the_caret_blinks_and_comes_back() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         assert!(caret_lit(&gui), "the caret is dark right after a click");
 
@@ -912,7 +953,10 @@ mod blink {
     #[test]
     fn typing_lights_the_caret_again() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         advance(&mut gui, 0.7);
         assert!(
@@ -931,7 +975,10 @@ mod blink {
     #[test]
     fn a_dark_caret_is_not_drawn() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         advance(&mut gui, 0.7);
         assert!(!caret_lit(&gui));
@@ -956,7 +1003,10 @@ mod blink_repaints {
     #[test]
     fn a_still_caret_asks_for_the_next_frame() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        click_at(&mut gui.harness, egui::pos2(315.0, 125.0));
+        // (315, 100) is on the first line of this window: the rows above the text
+        // (tab strip, the Preview row when it is drawn) decide where it is.
+        let pos = egui::pos2(315.0, 100.0);
+        click_at(&mut gui.harness, pos);
         gui.settle();
         // Nothing moved in the last frame, so only the blink can want a repaint.
         gui.harness.step();
@@ -1473,6 +1523,9 @@ mod the_hint {
     }
 
     fn rest_on_text(gui: &mut Gui) {
+        // Only some text has to be under the pointer: the line it is on does not
+        // matter to these tests. (315, 80) is not over the text of this window —
+        // it sits on the row the Preview switch used to take.)
         gui.harness.hover_at(egui::pos2(315.0, 125.0));
         gui.harness.step();
     }
@@ -1502,6 +1555,44 @@ mod the_hint {
             text: Some(text.to_owned()),
         });
         gui.settle();
+    }
+
+    #[test]
+    fn switched_off_hints_do_not_follow_the_pointer() {
+        // With the switch off, a pointer that rests on a symbol is not watched at
+        // all: the hint that was on screen goes when the switch goes, and an answer
+        // about the next rested-upon spot never reaches a hint.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+        assert!(
+            hint_on_screen(&gui, "The first letter."),
+            "the hint did not show before the switch went off"
+        );
+
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Show hints").click();
+        gui.settle();
+
+        assert!(
+            !hint_on_screen(&gui, "The first letter."),
+            "the hint stayed after the switch went off"
+        );
+        assert!(
+            gui.app().state.hover.text().is_none(),
+            "the switch left an answer behind"
+        );
+
+        // A pointer that rests again is not watched: answering about it shows nothing.
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+        assert!(
+            !hint_on_screen(&gui, "The first letter."),
+            "a switched-off hint still followed the pointer"
+        );
     }
 
     #[test]
@@ -2471,6 +2562,23 @@ mod opening_a_panel {
             "Alt+F12 did not bring the terminal tab forward"
         );
         gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_view_menu_switches_the_hints() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        assert!(gui.app().state.hints, "the hints start off");
+
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("Show hints").click();
+        gui.settle();
+
+        assert!(
+            !gui.app().state.hints,
+            "the View menu switch did not turn the hints off"
+        );
     }
 
     #[test]
