@@ -3094,7 +3094,6 @@ mod the_terminal_paste_chord {
     fn shift_insert_asks_for_the_clipboard_and_types_it_into_the_shell() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         open_terminal(&mut gui);
-        let before = gui.app().state.terminal.contents();
 
         gui.harness.input_mut().events.push(egui::Event::Key {
             key: egui::Key::Insert,
@@ -3115,9 +3114,12 @@ mod the_terminal_paste_chord {
             asked,
             "Shift+Insert did not ask the backend for the clipboard"
         );
-        assert_eq!(
-            gui.app().state.terminal.contents(),
-            before,
+        // The shell writes its prompt on its own, so a whole-content comparison would be
+        // comparing the shell with itself. What the chord must not leave behind is the
+        // Insert key's own sequence (`ESC [ 2 ~`), which is what a key sent to the shell
+        // would look like.
+        assert!(
+            !gui.app().state.terminal.contents().contains("[2~"),
             "the paste chord was typed into the shell as a key sequence"
         );
 
@@ -4658,7 +4660,10 @@ mod the_agent_panel {
         let mut found = Vec::new();
         for clipped in &gui.harness.output().shapes {
             match &clipped.shape {
-                egui::Shape::Text(text) if text.galley.job.text.starts_with('\u{1f525}') => {
+                egui::Shape::Text(text)
+                    if text.galley.job.text.starts_with('\u{1f525}')
+                        || text.galley.job.text.contains("Second use") =>
+                {
                     found.push(text.galley.job.text.clone());
                 }
                 egui::Shape::Rect(rect)
@@ -4713,6 +4718,76 @@ mod the_agent_panel {
             gui.app().state.agent.status.contains("cancelled"),
             "the panel does not say the turn was stopped: {:?}",
             gui.app().state.agent.status
+        );
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
+    fn a_restored_session_that_is_still_working_offers_to_stop_it() {
+        // The agent a person stopped may have been in the middle of a turn: the session
+        // comes back writing, and nothing will announce the end of a turn this panel never
+        // started. The words are the whole account of the work — so the foot's button and
+        // its clock follow the words, and the silence is what ends it. A button that said
+        // "Send" over an answer being written is an offer to talk over it.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_RESUME_WORKS", "1")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // Stopped and started again: the restoration a person does by hand.
+        gui.harness.get_by_label("Stop").click();
+        wait(&mut gui, "the agent stopping", |gui| {
+            !gui.app().state.agent.running()
+        });
+        gui.harness.get_by_label("Start").click();
+
+        // The restored work is writing: the foot offers to stop it, and the clock runs.
+        wait(&mut gui, "the restored work", |gui| {
+            gui.app().state.agent.working()
+        });
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("Cancel").is_some(),
+            "the restored work cannot be stopped from the foot"
+        );
+        let running = gui
+            .app()
+            .state
+            .agent
+            .elapsed()
+            .expect("no clock for the restored work");
+        std::thread::sleep(Duration::from_millis(250));
+        gui.settle();
+        let later = gui.app().state.agent.elapsed().expect("the clock");
+        assert!(
+            later > running,
+            "the clock of the restored work is standing still: {running:?} then {later:?}"
+        );
+
+        // Quiet means the answer is over: the figure is kept and the foot sends again.
+        wait(&mut gui, "the foot going back to Send", |gui| {
+            gui.harness.query_by_label("Send").is_some()
+                && gui.harness.query_by_label("Cancel").is_none()
+        });
+        let done = gui
+            .app()
+            .state
+            .agent
+            .elapsed()
+            .expect("no figure for the finished work");
+        std::thread::sleep(Duration::from_millis(300));
+        gui.settle();
+        assert_eq!(
+            gui.app().state.agent.elapsed().expect("the figure"),
+            done,
+            "the clock of a finished turn kept running"
         );
         gui.app_mut().state.agent.stop();
     }
@@ -6237,6 +6312,29 @@ mod the_agent_panel {
         assert!(
             warnings_of(&gui).is_empty(),
             "egui is warning about the thinking blocks: {:?}",
+            warnings_of(&gui)
+        );
+    }
+
+    #[test]
+    fn two_answers_with_a_table_do_not_share_a_grid_id() {
+        // An answer's Markdown is drawn by a renderer that puts a Grid under the panel's
+        // ui, and every answer in a conversation shares that ui: two answers carrying a
+        // table landed on one Grid id, and egui answered "Second use of GRID ID …" over the
+        // block. An answer's id is its place in the conversation now.
+        let mut gui = Gui::new(&[("a.txt", "one\n")], Some("a.txt"));
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        let table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+        let transcript = &mut gui.app_mut().state.agent.transcript;
+        transcript.push(crate::agent::Line::Agent(table.to_owned()));
+        transcript.push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        assert!(
+            warnings_of(&gui).is_empty(),
+            "egui is warning about the answers: {:?}",
             warnings_of(&gui)
         );
     }

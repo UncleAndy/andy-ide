@@ -863,11 +863,17 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         ui.horizontal(|ui| {
                             ui.strong("Agent");
                         });
-                        egui_commonmark::CommonMarkViewer::new().show(
-                            ui,
-                            &mut state.commonmark,
-                            text,
-                        );
+                        // An id of its own per answer, from its place in the conversation:
+                        // several answers share the panel's ui, and a Grid under a shared
+                        // id is what egui answers with "Second use of GRID ID …" over the
+                        // block.
+                        ui.push_id(("agent-answer", index), |ui| {
+                            egui_commonmark::CommonMarkViewer::new().show(
+                                ui,
+                                &mut state.commonmark,
+                                text,
+                            );
+                        });
                     }
                     Line::Thinking(thought) => {
                         // The id is the block's place in the conversation, not the length
@@ -1017,8 +1023,15 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     const SEND_ROOM: f32 = 88.0;
     let row_height = ui.spacing().interact_size.y;
     // An answer being written is what makes the foot's button a different button: the
-    // person is either sending the next message or finishing with this one.
-    let answering = state.agent.busy;
+    // person is either sending the next message or finishing with this one — and what is
+    // being written is the agent's own account of it, not this panel's memory of asking.
+    let answering = state.agent.working();
+    if answering {
+        // The answer ends while nothing is clicked, and the button has to come back: a
+        // frame is asked for, so the silence is noticed even in an idle window.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
     let mut pressed = false;
     let mut cancels = false;
     ui.horizontal(|ui| {

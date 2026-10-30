@@ -263,6 +263,10 @@ fn main() {
                         }
                     }));
                 }
+                // A session whose work was still running when the agent was stopped
+                // comes back writing: the words arrive with no turn of the client's
+                // asking for them, which is the case the panel reads from what it hears.
+                let working = std::env::var_os("ACP_TEST_RESUME_WORKS").is_some();
                 answer(
                     id,
                     json!({
@@ -282,6 +286,12 @@ fn main() {
                         "configOptions": settings(&effort, &policy)
                     }),
                 );
+                if working {
+                    for word in ["still ", "working", " on it"] {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        chunk(&session_name, word);
+                    }
+                }
                 // The commands it offers, announced once the session is up, the way Hermes
                 // does it (`acp_adapter/commands.py::_send_available_commands_update`): the
                 // names and descriptions of the real ones.

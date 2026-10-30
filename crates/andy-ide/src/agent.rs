@@ -18,6 +18,14 @@ use ide_agents::{
 /// How long the worker waits for the next thing before checking whether it was told to go.
 const PUMP: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long a quiet agent is still taken to be working.
+///
+/// A session restored while a turn was running comes back writing without a turn of the
+/// client's asking, so the words arriving are the whole account of that work — and nothing
+/// will ever say it ended. A moment of silence is the end of it: long enough to cover the
+/// gap between two chunks, short enough that the button is not a lie a second afterwards.
+const SILENCE: Duration = Duration::from_millis(1200);
+
 /// How long the panel waits before starting a crashed agent again.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -218,6 +226,16 @@ pub struct AgentState {
     pub took: Option<Duration>,
     /// Set while a turn is in flight: the panel disables the input rather than queueing.
     pub busy: bool,
+    /// Whether the conversation in hand is up: the load's (or the new session's) answer has
+    /// arrived. Words that arrive before it are a replay, not work.
+    ready: bool,
+    /// When the agent last said something, whatever started it.
+    ///
+    /// A turn the panel asked for is not the only work there is: a session restored while
+    /// something was still running goes on writing, and a panel that watched only its own
+    /// turns would offer to talk over the answer — and its timer would sit at zero, or run
+    /// for ever, because the end of a turn nobody started is never announced.
+    last_word: Option<Instant>,
     /// The question waiting for a person's answer.
     pub asking: Option<(u64, PermissionRequest)>,
     /// The variants waiting for a person's choice, and what the agent called them.
@@ -286,6 +304,8 @@ impl Default for AgentState {
             started: None,
             took: None,
             busy: false,
+            last_word: None,
+            ready: false,
             asking: None,
             choice: None,
             // An agent is a long conversation; a process that dies should not end it.
@@ -409,6 +429,9 @@ impl AgentState {
     /// built. A command that cannot be read — an unclosed quote, an empty line — is
     /// refused in words before anything is spawned.
     pub fn start(&mut self) {
+        // Whatever the last conversation was doing, this one has not started yet.
+        self.ready = false;
+        self.last_word = None;
         if self.worker.is_some() {
             self.status = "an agent is already running".to_owned();
             return;
@@ -573,6 +596,51 @@ impl AgentState {
             return;
         }
         self.status = "stopping…".to_owned();
+    }
+
+    /// The agent said something: a turn is running, whether or not this panel started it.
+    ///
+    /// The clock is started here for work the panel only hears about — a restored session
+    /// that came back mid-turn — because no `send` started it and no ending will stop it.
+    fn heard_the_agent(&mut self) {
+        // A replay is not work. The history of a restored conversation arrives *before* the
+        // load is answered, when there is no conversation to be working in yet; the words
+        // that arrive after it is up are the agent working — a turn nobody here asked for.
+        if !self.ready {
+            return;
+        }
+        let now = Instant::now();
+        self.last_word = Some(now);
+        if self.started.is_none() {
+            self.started = Some(now);
+        }
+    }
+
+    /// Whether the agent is working right now, by its own account as much as by ours.
+    ///
+    /// This is what the foot's button follows: an answer being written can be stopped
+    /// whichever side began it.
+    pub fn working(&self) -> bool {
+        self.busy || self.last_word.is_some_and(|when| when.elapsed() < SILENCE)
+    }
+
+    /// Ends the work only heard about, once the words have stopped coming.
+    ///
+    /// Nothing announces the end of a turn this panel never started, and a timer left
+    /// running would run for ever. The silence is the end, and the figure is kept the way
+    /// a finished turn's is.
+    fn quiet_down(&mut self) {
+        if self.busy || self.started.is_none() {
+            return;
+        }
+        let Some(last) = self.last_word else {
+            return;
+        };
+        if last.elapsed() < SILENCE {
+            return;
+        }
+        self.last_word = None;
+        self.took = self.started.take().map(|started| started.elapsed());
     }
 
     /// How long the turn in flight has been running, or how long the last one took.
@@ -817,6 +885,9 @@ impl AgentState {
 
     /// Takes everything the worker has said since the last frame.
     pub fn pump(&mut self) {
+        // Work the panel only heard about is ended by its silence: no other frame is going
+        // to say that a turn nobody started has finished.
+        self.quiet_down();
         // A crash is answered between frames, on the frame that notices it is due: the
         // panel does not keep a timer thread for a process it is about to start anyway.
         if self.retry_at.is_some_and(|at| Instant::now() >= at) {
@@ -846,6 +917,8 @@ impl AgentState {
 
     /// Ends the conversation.
     pub fn stop(&mut self) {
+        self.last_word = None;
+        self.ready = false;
         if let Some(worker) = self.worker.take() {
             // Dropping the command queue tells the worker to leave; it stops the process
             // on its way out.
@@ -904,6 +977,11 @@ impl AgentState {
                 // the last replayed one (`acp_adapter/server.py` replays before responding).
                 self.agent_line_open = false;
                 self.connecting = false;
+                // The replayed history is not a turn: the clock of the work starts with the
+                // words that come after this, and there are none yet.
+                self.ready = true;
+                self.last_word = None;
+                self.started = None;
                 self.status = if resumed {
                     format!("ready, session {session} resumed")
                 } else {
@@ -918,6 +996,7 @@ impl AgentState {
             }
             Reply::Event(event) => match event {
                 AgentEvent::Thinking(thought) => {
+                    self.heard_the_agent();
                     // One growing line per stretch of reasoning, like the answer below it.
                     if let Some(Line::Thinking(said)) = self.transcript.last_mut() {
                         said.push_str(&thought);
@@ -927,6 +1006,7 @@ impl AgentState {
                     self.agent_line_open = false;
                 }
                 AgentEvent::Text(text) => {
+                    self.heard_the_agent();
                     // Pieces of one answer join the line it is growing into, which is what
                     // makes a stream read as a sentence and not as a column. A line that is
                     // not an answer growing — a replayed message, the person's words — is
@@ -992,6 +1072,7 @@ impl AgentState {
                     self.usage = Some(usage);
                 }
                 AgentEvent::Finished(reason) => {
+                    self.last_word = None;
                     // The timer stops with the turn and keeps its figure: a spinner that
                     // resets to zero tells nobody how long the last answer took.
                     self.took = self.started.take().map(|started| started.elapsed());
