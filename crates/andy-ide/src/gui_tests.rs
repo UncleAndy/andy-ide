@@ -6353,7 +6353,7 @@ mod the_agent_panel {
         gui.settle();
 
         let panel = gui.app().state.agent.shown_rect.expect("the panel");
-        let mut cells = 0;
+        let mut columns: Vec<f32> = Vec::new();
         let mut widest: f32 = 0.0;
         for clipped in &gui.harness.output().shapes {
             if let egui::Shape::Text(text) = &clipped.shape {
@@ -6364,20 +6364,33 @@ mod the_agent_panel {
                     continue;
                 }
                 if text.galley.job.text.contains("Every cell") {
-                    cells += 1;
+                    columns.push(text.pos.x);
                 }
                 widest = widest.max(text.pos.x + text.galley.size().x);
             }
         }
+        columns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        columns.dedup_by(|a, b| (*a - *b).abs() < 1.0);
         assert!(
-            cells >= 3,
-            "the cells of the table are not drawn: {cells} of them are on screen"
+            columns.len() >= 3,
+            "the cells of the table are not drawn: {} of them are on screen",
+            columns.len()
         );
         assert!(
             widest <= panel.right() + 1.0,
             "the table is wider than the panel: {widest:.1} against {:.1}",
             panel.right()
         );
+        // A cell that wraps still keeps its column: the share is what holds the columns
+        // apart, whether the cell fills it or wraps inside it.
+        let share = panel.width() / columns.len() as f32;
+        for pair in columns.windows(2) {
+            assert!(
+                pair[1] - pair[0] > share * 0.6,
+                "two columns are squeezed together: {:.1} apart, a share is {share:.1}",
+                pair[1] - pair[0]
+            );
+        }
         gui.app_mut().state.agent.stop();
     }
 
@@ -6428,6 +6441,70 @@ mod the_agent_panel {
                 panel.right()
             );
         }
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
+    fn a_table_keeps_its_columns_apart() {
+        // Every column starts a share of the panel after the one before it, and the rows
+        // line up under the heading. A cell that says little is not squeezed against its
+        // neighbour: a container shrinks to what is drawn in it, and without the rest of the
+        // share being left as room "first cell", "second cell" and "third cell" came out
+        // 8 px apart — one run of words, with no columns to read.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let table = "| what | why | how |\n| --- | --- | --- |\n| first cell | second cell | third cell |\n";
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table.to_owned()));
+        gui.settle();
+
+        let panel = gui.app().state.agent.shown_rect.expect("the panel");
+        let at = |needle: &str| -> Option<f32> {
+            for clipped in &gui.harness.output().shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    let inside = text.pos.x >= panel.left()
+                        && text.pos.y >= panel.top()
+                        && text.pos.y <= panel.bottom();
+                    if inside && text.galley.job.text == needle {
+                        return Some(text.pos.x);
+                    }
+                }
+            }
+            None
+        };
+        let at = |needle: &str| at(needle);
+        let heading = at("what").expect("the heading is not drawn");
+        let first = at("first cell").expect("the first column is not drawn");
+        let second = at("second cell").expect("the second column is not drawn");
+        let third = at("third cell").expect("the third column is not drawn");
+        let share = panel.width() / 3.0;
+        assert!(
+            (first - heading).abs() < 8.0,
+            "the row does not line up under the heading: {first:.1} against {heading:.1}"
+        );
+        assert!(
+            second - first > share * 0.6,
+            "the second column is squeezed against the first: {:.1} apart, a share is {share:.1}",
+            second - first
+        );
+        assert!(
+            third - second > share * 0.6,
+            "the third column is squeezed against the second: {:.1} apart, a share is {share:.1}",
+            third - second
+        );
         gui.app_mut().state.agent.stop();
     }
 

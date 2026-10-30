@@ -130,7 +130,7 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
         for (index, row) in table.rows.iter().enumerate() {
             ui.horizontal_top(|ui| {
                 for column in 0..columns {
-                    ui.allocate_ui_with_layout(
+                    let cell = ui.allocate_ui_with_layout(
                         egui::vec2(share, 0.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
@@ -149,6 +149,16 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
                             });
                         },
                     );
+                    // A container shrinks to what was drawn in it, and a cell that says little
+                    // would let the next one sit right against it: the rest of the share is
+                    // left as room, so the columns line up for every row. Only what the row
+                    // still has is given away — the share of the last column is not left over
+                    // past the panel's edge.
+                    if column + 1 < columns {
+                        let used = cell.response.rect.width().min(share);
+                        let left = ui.available_width();
+                        ui.add_space((share - used).min(left));
+                    }
                 }
             });
             if index + 1 < table.rows.len() {
