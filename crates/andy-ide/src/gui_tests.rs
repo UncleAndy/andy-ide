@@ -7328,6 +7328,34 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_mark_in_the_transcript_is_a_glyph_the_font_of_the_window_has() {
+        // `↳` came out as an empty box: the fonts egui brings do not have it, and neither do they
+        // have the arrows an editor wants. The window puts DejaVu Sans behind its own fonts, and
+        // the signs are checked against the fonts the window really uses — the ones in its
+        // context, not a page of Unicode and not a fresh default.
+        let mut gui = Gui::new(&[("notes.rs", "let a = 1;\n")], Some("notes.rs"));
+        gui.settle();
+        // The font the transcript is written in: the proportional family at the body size. The
+        // check goes through the window's own context, and `Fonts::has_glyphs` answers for the
+        // font it is given by name — asking it about `TextStyle::Monospace` says no to every
+        // character, `A` included, so only the family this panel is drawn with can be judged here.
+        let font = egui::FontId::new(
+            egui::TextStyle::Body.resolve(&egui::Style::default()).size,
+            egui::FontFamily::Proportional,
+        );
+        for mark in ["↳", "↑", "↓", "←", "→", "×"] {
+            let drawn = gui
+                .harness
+                .ctx
+                .fonts_mut(|fonts| fonts.has_glyphs(&font, mark));
+            assert!(
+                drawn,
+                "the mark {mark:?} is not drawn by the fonts of the window"
+            );
+        }
+    }
+
+    #[test]
     fn an_agent_that_was_on_duty_comes_back_with_another_panel_in_front() {
         // A window draws no panel that is not on screen, and a project that remembers the agent
         // which was on duty opens its connection at start. That connection used to sit

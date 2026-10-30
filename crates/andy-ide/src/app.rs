@@ -176,6 +176,12 @@ impl App {
         // made in the panel is the one the person means. The shortcut is taken here,
         // before any panel is drawn, and handed to the panel below.
         self.state.agent.take_copy_shortcut(ui.ctx());
+        if !self.state.fonts_set {
+            // Once per window: egui rebuilds its atlas when the fonts change, so this belongs to
+            // the first frame and to no other.
+            self.state.fonts_set = true;
+            ui.ctx().set_fonts(crate::ui::fonts_with_fallback());
+        }
         if !self.zoom_applied {
             self.zoom_applied = true;
             let zoom = self.state.config.font_size / DEFAULT_FONT_SIZE;

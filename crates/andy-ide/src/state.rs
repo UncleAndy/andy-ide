@@ -88,6 +88,12 @@ pub struct BlameView {
 }
 
 pub struct AppState {
+    /// Whether the window's fonts have been handed to egui yet.
+    ///
+    /// They are set once, from the first frame: the fonts egui brings carry no `↳` and none of
+    /// the arrows an editor wants, and the window puts DejaVu Sans behind them (see
+    /// [`crate::ui::fonts_with_fallback`]).
+    pub(crate) fonts_set: bool,
     pub config: Config,
     pub recent: Recent,
     pub project: Option<Project>,
@@ -194,6 +200,7 @@ impl AppState {
                 ..TreeState::default()
             },
             config,
+            fonts_set: false,
             recent,
             project: None,
             tabs: Tabs::new(),
