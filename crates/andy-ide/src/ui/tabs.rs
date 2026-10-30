@@ -55,7 +55,8 @@ pub fn strip(ui: &mut Ui, state: &mut AppState) {
         });
 
     if let Some(index) = activate {
-        state.tabs.set_active(index);
+        // Arriving at a tab is arriving at the caret.
+        state.focus_tab(index);
     }
     if let Some(index) = close {
         state.pending.push(Action::CloseTab(index));

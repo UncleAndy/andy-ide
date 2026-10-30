@@ -215,6 +215,13 @@ impl App {
             }
         }
 
+        // The agent is worked every frame of the window, not only on the frames its panel is
+        // drawn: the panel is one of many, and a window that opens with the editor in front
+        // never draws it — an agent whose connection was opened at start (the one that was on
+        // duty when the window closed) used to sit unanswered, its restored conversation and
+        // its replies waiting in the queue for a panel nobody had asked to see.
+        self.state.agent.pump();
+
         egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state, &mut self.dock));
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             crate::ui::status::bar(ui, &self.state);
@@ -1790,6 +1797,149 @@ mod caret_visibility_tests {
                 }
             }
             rows
+        }
+    }
+
+    #[test]
+    fn the_caret_of_a_restored_tab_is_brought_into_sight() {
+        // A caret comes back where it stood, and where it stood may be below the window: a
+        // restored caret that is out of sight is a caret the person cannot see, and the session
+        // is meant to come back the way it was left.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let text: String = (0..5000).map(|n| format!("line number {n}\n")).collect();
+        std::fs::write(project.path().join("a.rs"), text).unwrap();
+
+        // A window that leaves the caret four thousand lines down, far outside anything a
+        // screen can hold and far outside the rows a view draws at once, and closes.
+        let mut first = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        first.state.open_file(std::path::Path::new("a.rs"));
+        let caret = first
+            .state
+            .active_buffer()
+            .expect("a file")
+            .char_index(4000, 0);
+        first
+            .state
+            .active_buffer_mut()
+            .expect("a file")
+            .set_caret(caret);
+        first.state.save_workspace(None, 100.0, true);
+
+        // The next window opens with the same tab, and the caret has to be in sight.
+        let mut harness = Harness {
+            ctx: egui::Context::default(),
+            app: App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            time: 0.0,
+            _project: project,
+            _config: config,
+        };
+        // What the view itself says: where the caret was drawn, and what the person can see.
+        // The drawn shape is not enough — a caret a hundred lines below is still painted, with
+        // a clip rectangle that leaves it out of the window.
+        let mut seen = None;
+        for _ in 0..12 {
+            let _ = harness.frame(Vec::new());
+            let on_screen: Option<(egui::Pos2, egui::Rect)> = harness
+                .ctx
+                .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")));
+            if let Some((caret, clip)) = on_screen
+                && clip.contains(caret)
+            {
+                seen = Some((caret, clip));
+            }
+        }
+        let (caret, clip) = seen.unwrap_or_else(|| {
+            let last: Option<(egui::Pos2, egui::Rect)> = harness
+                .ctx
+                .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")));
+            panic!("the restored caret never came into sight: the view says {last:?}");
+        });
+        assert!(
+            clip.contains(caret),
+            "the caret is at {caret:?} and the window shows {clip:?}"
+        );
+    }
+
+    /// Waits a few frames for the view to bring the caret into sight, and says where it ended.
+    fn caret_comes_into_sight(harness: &mut Harness, frames: usize) -> Result<(), String> {
+        // What the view itself says: where the caret was drawn, and what the person can see.
+        // The drawn shape is not enough — a caret a hundred lines below is still painted, with a
+        // clip rectangle that leaves it out of the window.
+        let mut seen = None;
+        for _ in 0..frames {
+            let _ = harness.frame(Vec::new());
+            let on_screen: Option<(egui::Pos2, egui::Rect)> = harness
+                .ctx
+                .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")));
+            if let Some((caret, clip)) = on_screen
+                && clip.contains(caret)
+            {
+                seen = Some((caret, clip));
+            }
+        }
+        if seen.is_some() {
+            return Ok(());
+        }
+        let last: Option<(egui::Pos2, egui::Rect)> = harness
+            .ctx
+            .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")));
+        Err(format!(
+            "the caret never came into sight: the view says {last:?}"
+        ))
+    }
+
+    #[test]
+    fn a_tab_brought_to_the_front_brings_its_caret_into_sight() {
+        // Two tabs, the second left with its caret four thousand lines down. Coming back to it
+        // has to bring the caret with it: arriving at a tab is arriving at the caret, and a
+        // caret below the fold is a caret the person has to go looking for.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let long: String = (0..5000).map(|n| format!("line number {n}\n")).collect();
+        std::fs::write(project.path().join("a.rs"), "one\ntwo\n").unwrap();
+        std::fs::write(project.path().join("b.rs"), long).unwrap();
+
+        let mut harness = Harness {
+            ctx: egui::Context::default(),
+            app: App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            time: 0.0,
+            _project: project,
+            _config: config,
+        };
+        harness.app.state.open_file(std::path::Path::new("a.rs"));
+        harness.app.state.open_file(std::path::Path::new("b.rs"));
+        let caret = harness
+            .app
+            .state
+            .active_buffer()
+            .expect("a file")
+            .char_index(4000, 0);
+        harness
+            .app
+            .state
+            .active_buffer_mut()
+            .expect("a file")
+            .set_caret(caret);
+
+        // Away to the short tab and back to the long one.
+        harness.app.state.focus_tab(0);
+        let _ = harness.frame(Vec::new());
+        harness.app.state.focus_tab(1);
+        if let Err(where_the_caret_is) = caret_comes_into_sight(&mut harness, 12) {
+            panic!("the caret of the tab in front stayed out of sight: {where_the_caret_is}");
         }
     }
 

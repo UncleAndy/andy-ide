@@ -11,8 +11,10 @@ use ide_agents::{AgentCommand, Model};
 /// The panel.
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // Where the panel was drawn, for the tests that point at it.
+    // Where the panel was drawn, for the tests that point at it. The agent itself is worked by
+    // the window every frame (see `App::draw`): a panel that is not on screen is not drawn, and
+    // its conversation would go unread.
     state.agent.shown_rect = Some(ui.max_rect());
-    state.agent.pump();
     // The copy shortcut was taken before the editor drew, so that it did not copy a line
     // of code instead; here it becomes the event egui's text selection listens for, while
     // the words are being drawn.

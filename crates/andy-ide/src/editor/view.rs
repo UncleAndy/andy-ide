@@ -319,7 +319,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             // A jump the application asked for (a definition, a diagnostic, a
             // reference in the list) has no key press behind it, so it is
             // announced by the buffer: the caret must end up in sight.
-            let reveal = buffer.take_reveal();
+            let reveal = buffer.reveal_wanted();
             // A reveal only relaxes the need for a key press: the view still
             // scrolls just when the caret is out of sight, so a second frame of
             // the same request cannot drag the text further than the first.
@@ -374,6 +374,14 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
                     (caret_pos, ui.clip_rect()),
                 );
             });
+            // The request is done when the caret is really in sight, not after a fixed number
+            // of frames: a scroll area that has appeared this frame swallows the scroll, and a
+            // request counted in frames would be spent while the caret is still off screen.
+            // Until it lands, every later frame asks again — and no frame is forced for it, or
+            // the caret would stop blinking.
+            if ui.clip_rect().contains(caret_pos) {
+                buffer.reveal_done();
+            }
             if pull && !drag_scrolled {
                 // A jump from elsewhere lands the caret in the middle third of the
                 // view: scrolling just enough would leave it on the last row, where

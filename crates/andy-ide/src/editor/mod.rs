@@ -38,11 +38,14 @@ pub struct EditorBuffer {
     /// A Ctrl+Click asked for the definition of the character at this index, and
     /// the application has not answered it yet.
     nav_request: Option<usize>,
-    /// The caret was moved by the application, not by the user: the view has to
-    /// bring it into sight even though no key was pressed. Counted in frames,
-    /// because the first frame of a fresh scroll area may not know its size yet
-    /// and would swallow the scroll.
-    reveal_caret: u8,
+    /// The caret was moved by the application, not by the user, and the view has to bring it
+    /// into sight even though no key was pressed.
+    ///
+    /// A flag and not a count of frames: a scroll area that has appeared this frame does not
+    /// know its content size yet and swallows the scroll, so a request counted in frames could
+    /// be spent while nothing moved — and a caret restored a hundred lines down stayed off
+    /// screen. The view clears it when the caret is really in sight.
+    reveal_caret: bool,
     /// Where the pointer rests in the text, in line and column, with the screen
     /// position of the hint. Set by the view every frame it draws.
     pub hover: Option<(usize, usize, egui::Pos2)>,
@@ -87,9 +90,10 @@ impl EditorBuffer {
             line_ends: Vec::new(),
             max_line_chars: 0,
             nav_request: None,
-            reveal_caret: 0,
+
             hover: None,
             occurrences: Vec::new(),
+            reveal_caret: false,
             needle: None,
             search_hits: Vec::new(),
             search_current: None,
@@ -168,21 +172,20 @@ impl EditorBuffer {
         self.doc.line_col_to_char(line, col)
     }
 
-    /// Asks the view to bring the caret into sight on the next frames.
+    /// Asks the view to bring the caret into sight.
     pub fn request_reveal(&mut self) {
-        // Eight frames, because a scroll area that has just appeared does not
-        // know its content size yet and swallows the first requests; every frame
-        // after the caret is in sight does nothing.
-        self.reveal_caret = 8;
+        self.reveal_caret = true;
     }
 
-    /// Takes one frame of the request: the view may need more than one.
-    pub fn take_reveal(&mut self) -> bool {
-        if self.reveal_caret == 0 {
-            return false;
-        }
-        self.reveal_caret -= 1;
-        true
+    /// Whether the view still owes the caret a scroll into sight.
+    pub fn reveal_wanted(&self) -> bool {
+        self.reveal_caret
+    }
+
+    /// Says the caret is in sight: the request is done, and a later frame does not drag the
+    /// text along after the person has scrolled away.
+    pub fn reveal_done(&mut self) {
+        self.reveal_caret = false;
     }
 
     /// Records that the character at this index was clicked with Ctrl held.

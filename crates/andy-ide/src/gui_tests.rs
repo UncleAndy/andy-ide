@@ -7328,6 +7328,61 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn an_agent_that_was_on_duty_comes_back_with_another_panel_in_front() {
+        // A window draws no panel that is not on screen, and a project that remembers the agent
+        // which was on duty opens its connection at start. That connection used to sit
+        // unanswered, because the only place the replies were read was the panel itself.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(
+            project.path().join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // The agent that was on duty when the window closed.
+        let workspace = ide_core::Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&ide_core::WorkspaceState {
+                tabs: vec![std::path::PathBuf::from("a.txt")],
+                active: Some(0),
+                layout: None,
+                hidden: None,
+                agent: Some("stand-in".to_owned()),
+                carets: Default::default(),
+                view: Default::default(),
+            })
+            .unwrap();
+
+        // The window opens with the editor in front: the panel of the agent is not drawn.
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        assert!(
+            gui.app().state.agent.shown_rect.is_none(),
+            "the panel of the agent was on screen after all"
+        );
+        wait(&mut gui, "the agent coming back on duty", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+    }
+
+    #[test]
     fn a_tables_lines_keep_their_distance_from_the_words() {
         // A line between two rows is drawn halfway across the gap the table leaves between
         // them, and that gap is three points: a point and a half from the words of the row

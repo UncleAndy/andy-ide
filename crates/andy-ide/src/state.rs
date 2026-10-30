@@ -1012,16 +1012,9 @@ impl AppState {
             }
         }
         if let Some(active) = state.active {
-            self.tabs.set_active(active);
-        }
-        // And the tab in front comes back with its caret on the screen, not merely in the file.
-        if let Some(item) = self
-            .tabs
-            .active()
-            .and_then(|index| self.tabs.items().get(index))
-            && let Some(buffer) = self.buffers.get_mut(&item.buffer_id)
-        {
-            buffer.request_reveal();
+            // And the tab in front comes back with its caret on the screen, not merely in the
+            // file.
+            self.focus_tab(active);
         }
         if !self.tabs.is_empty() {
             self.status = format!("{} tabs restored", self.tabs.len());
@@ -1162,10 +1155,26 @@ impl AppState {
         }
     }
 
+    /// Brings a tab to the front, and the view with it.
+    ///
+    /// Arriving at a tab is arriving at the caret: a caret left below the fold is a caret the
+    /// person has to go looking for. Restoring the workspace and opening a file ask the same.
+    pub fn focus_tab(&mut self, index: usize) {
+        self.tabs.set_active(index);
+        let buffer = self
+            .tabs
+            .items()
+            .get(index)
+            .and_then(|item| self.buffers.get_mut(&item.buffer_id));
+        if let Some(buffer) = buffer {
+            buffer.request_reveal();
+        }
+    }
+
     /// Opens a file in a tab and activates it, or focuses its existing tab.
     pub fn open_file(&mut self, rel: &Path) {
         if let Some(index) = self.tabs.find(rel) {
-            self.tabs.set_active(index);
+            self.focus_tab(index);
             self.status = display_name(rel);
             return;
         }
@@ -1186,7 +1195,7 @@ impl AppState {
                 self.next_buffer_id += 1;
                 self.buffers.insert(buffer_id, buffer);
                 let index = self.tabs.open(rel.to_path_buf(), buffer_id);
-                self.tabs.set_active(index);
+                self.focus_tab(index);
                 self.status = display_name(rel);
                 // The project watch does not reach outside the root, so a file from
                 // another crate gets its own directory watched; otherwise the editor
