@@ -484,6 +484,33 @@ fn a_table_in_the_preview_is_drawn_like_a_table_in_an_answer() {
     );
 }
 
+#[test]
+fn every_label_of_the_search_bar_is_a_glyph_the_font_has() {
+    // The bar is drawn with the window's own font, and a character that font does not have
+    // comes out as a box — which is what the arrows of the bar used to be. Every label of the
+    // bar is checked against the font itself, not against a page of Unicode.
+    let mut gui = Gui::new(&[("notes.rs", "let a = 1;\n")], Some("notes.rs"));
+    gui.settle();
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::H);
+    gui.settle();
+
+    // The font of a button: the proportional family at the body size.
+    let font = egui::TextStyle::Body.resolve(&egui::Style::default());
+    // The close button keeps its multiplication sign: the font has that one.
+    let labels = ["Find", "Replace", "Replace all", "<", ">", "Aa", "ab|", "×"];
+    for label in labels {
+        let drawn = gui
+            .harness
+            .ctx
+            .fonts_mut(|fonts| fonts.has_glyphs(&font, label));
+        assert!(
+            drawn,
+            "the label {label:?} is not drawn by the font of the window"
+        );
+    }
+}
+
 /// Types text into whatever holds the keyboard.
 fn type_text(gui: &mut Gui, text: &str) {
     gui.harness

@@ -114,6 +114,8 @@ pub fn bar(ui: &mut Ui, state: &mut AppState) {
     };
 
     ui.horizontal(|ui| {
+        // Plain text on the buttons: the window's font has the letters and the digits, and a
+        // character it does not have comes out as a box.
         ui.label("Find");
         let field = ui.add(
             egui::TextEdit::singleline(&mut state.search.needle.text)
@@ -128,13 +130,13 @@ pub fn bar(ui: &mut Ui, state: &mut AppState) {
             recount_now = true;
         }
         if ui
-            .button("↑")
+            .button("<")
             .on_hover_text("previous  (Shift+Enter)")
             .clicked()
         {
             step_to = Some(false);
         }
-        if ui.button("↓").on_hover_text("next  (Enter)").clicked() {
+        if ui.button(">").on_hover_text("next  (Enter)").clicked() {
             step_to = Some(true);
         }
         ui.toggle_value(&mut state.search.needle.case_sensitive, "Aa")
