@@ -348,15 +348,15 @@ fn typing_changes_the_buffer_and_marks_it_modified() {
 }
 
 #[test]
-fn ctrl_shift_m_toggles_the_preview_split() {
+fn ctrl_shift_m_toggles_the_preview() {
     let mut gui = Gui::new(
         &[("notes.md", "# A heading\n\nsome body text\n")],
         Some("notes.md"),
     );
     gui.settle();
 
-    // The rendered text is painted, not a widget, so it never reaches the tree:
-    // what is checked here is the split itself, and that both modes draw.
+    // The rendered text is painted, not a widget, so it never reaches the tree: what is
+    // checked here is the switch itself, and that both modes draw.
     let before = gui.app().state.preview_open;
     gui.harness
         .key_press_modifiers(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::M);
@@ -373,8 +373,83 @@ fn ctrl_shift_m_toggles_the_preview_split() {
     assert_eq!(
         gui.app().state.preview_open,
         before,
-        "the second Ctrl+Shift+M did not bring the split back"
+        "the second Ctrl+Shift+M did not bring the preview back"
     );
+}
+
+#[test]
+fn the_preview_takes_the_whole_editing_room() {
+    // The preview stands where the source was, across the whole of the editing room: beside
+    // it, every line would appear twice and neither would have the width to be read in. The
+    // heading of the preview is therefore painted near the left edge of the window — in a
+    // split it sat at the middle — and the source is not painted at all.
+    let long = "words that fill the width of the room and then some more of them to be sure";
+    let mut gui = Gui::new(
+        &[(
+            "notes.md",
+            &format!("# A heading\n\n{long} {long} {long}\n"),
+        )],
+        Some("notes.md"),
+    );
+    gui.settle();
+    let width = gui.harness.ctx.viewport_rect().width();
+
+    assert!(
+        painted_text(&gui, "# A heading"),
+        "the source is not painted before the preview is switched on"
+    );
+
+    gui.app_mut().state.preview_open = true;
+    gui.settle();
+
+    let heading = painted_at(&gui, "A heading").expect("the preview does not draw its heading");
+    assert!(
+        heading < width * 0.4,
+        "the preview starts at {heading:.0} of {width:.0}: it is drawn beside the source, not in its place"
+    );
+    assert!(
+        !painted_text(&gui, "# A heading"),
+        "the source is still painted under the preview"
+    );
+    let right = painted_right(&gui).expect("nothing is painted at all");
+    assert!(
+        right > width * 0.6,
+        "the preview stops at {right:.0} of {width:.0}: it does not use the room it has"
+    );
+}
+
+/// Where a piece of painted text starts, if it is on screen.
+fn painted_at(gui: &Gui, needle: &str) -> Option<f32> {
+    gui.harness.output().shapes.iter().find_map(|clipped| {
+        if let egui::Shape::Text(text) = &clipped.shape
+            && text.galley.job.text == needle
+        {
+            return Some(text.pos.x);
+        }
+        None
+    })
+}
+
+/// Whether some painted text says exactly this.
+fn painted_text(gui: &Gui, needle: &str) -> bool {
+    gui.harness.output().shapes.iter().any(|clipped| {
+        matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.job.text == needle)
+    })
+}
+
+/// How far to the right any painted text reaches.
+fn painted_right(gui: &Gui) -> Option<f32> {
+    gui.harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.pos.x + text.galley.size().x),
+            _ => None,
+        })
+        .fold(None, |best: Option<f32>, right| {
+            Some(best.map_or(right, |best| best.max(right)))
+        })
 }
 
 #[test]
