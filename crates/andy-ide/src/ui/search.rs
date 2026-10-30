@@ -34,7 +34,9 @@ pub struct Search {
 /// Opens the bar over the file in front, and looks for what it already holds.
 pub fn open(state: &mut AppState, replace: bool) {
     state.search.open = true;
-    state.search.replace |= replace;
+    // What the bar shows is what the key asked for, not what the last visit left behind: a
+    // `Ctrl+H` that was closed must not leave the replacement field in a later `Ctrl+F`.
+    state.search.replace = replace;
     state.search.field = Find;
     state.search.focus = true;
     recount(state);

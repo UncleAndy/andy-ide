@@ -566,6 +566,47 @@ fn ctrl_f_finds_the_text_of_the_open_file_as_it_is_typed() {
 }
 
 #[test]
+fn ctrl_f_after_ctrl_h_does_not_bring_the_replacement_field_back() {
+    // The two keys open the same bar, and each says which fields it has: `Ctrl+H` with the
+    // replacement, `Ctrl+F` with the search alone. A replacement looked at once and closed
+    // leaves nothing behind.
+    let mut gui = Gui::new(&[("notes.rs", "let a = 1;\n")], Some("notes.rs"));
+    gui.settle();
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::H);
+    gui.settle();
+    assert!(
+        gui.app().state.search.replace,
+        "Ctrl+H did not bring the replacement field"
+    );
+
+    gui.harness.key_press(egui::Key::Escape);
+    gui.settle();
+    assert!(!gui.app().state.search.open, "Escape did not close the bar");
+
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
+    gui.settle();
+    assert!(gui.app().state.search.open, "Ctrl+F did not open the bar");
+    assert!(
+        !gui.app().state.search.replace,
+        "Ctrl+F brought the replacement field back"
+    );
+    assert!(
+        !painted_text(&gui, "Replace all"),
+        "the replacement is on screen after Ctrl+F"
+    );
+    // And `Ctrl+H` still brings it when it is asked for.
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::H);
+    gui.settle();
+    assert!(
+        gui.app().state.search.replace && painted_text(&gui, "Replace all"),
+        "Ctrl+H did not bring the replacement field back"
+    );
+}
+
+#[test]
 fn the_matches_of_the_search_are_painted_in_the_text() {
     // A search with matches to look at paints them: the highlight is what tells a person where
     // the other matches are.
