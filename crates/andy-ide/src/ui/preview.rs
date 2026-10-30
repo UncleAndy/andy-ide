@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use egui::Ui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::CommonMarkCache;
 
 /// How long the source may keep changing before the preview catches up.
 pub const PREVIEW_DELAY: Duration = Duration::from_millis(300);
@@ -60,12 +60,21 @@ impl Preview {
     }
 
     /// Draws the last accepted text.
+    ///
+    /// Through the same module the answers of the agent are drawn with: a table in a file is
+    /// a table in an answer, and the renderer would lay it out by a measurement of its own
+    /// (a cell measured in the room it had the frame before, and columns that never wrap).
     pub fn show(&mut self, ui: &mut Ui, cache: &mut CommonMarkCache) {
         egui::ScrollArea::vertical()
             .id_salt("markdown-preview")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                CommonMarkViewer::new().show(ui, cache, &self.shown);
+                super::markdown::answer(
+                    ui,
+                    cache,
+                    egui::Id::new("markdown-preview-text"),
+                    &self.shown,
+                );
             });
     }
 }

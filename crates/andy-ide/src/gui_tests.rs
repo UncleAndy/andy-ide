@@ -418,6 +418,72 @@ fn the_preview_takes_the_whole_editing_room() {
     );
 }
 
+#[test]
+fn the_preview_does_not_repeat_the_word_preview() {
+    // The switch above the page is already lit and says whose page it is: the page itself
+    // says the word once, and once only.
+    let mut gui = Gui::new(
+        &[("notes.md", "# A heading\n\nsome body text\n")],
+        Some("notes.md"),
+    );
+    gui.settle();
+    gui.app_mut().state.preview_open = true;
+    gui.settle();
+
+    let painted = gui
+        .harness
+        .output()
+        .shapes
+        .iter()
+        .filter(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.job.text == "Preview")
+        })
+        .count();
+    assert_eq!(painted, 1, "the word Preview is painted {painted} times");
+}
+
+#[test]
+fn a_table_in_the_preview_is_drawn_like_a_table_in_an_answer() {
+    // A table in a file is a table in an answer: the same module draws it, so its columns are
+    // measured and it stays inside the room rather than running off the edge — the renderer
+    // lays a cell out by the room that cell had the frame before, which is how columns come
+    // out narrow and the table wide.
+    let sentence =
+        "Every cell here is a phrase long enough to need wrapping somewhere in the line, twice";
+    let md = format!(
+        "| what | why | how |\n| --- | --- | --- |\n| {s} | {s} | {s} |\n",
+        s = sentence
+    );
+    let mut gui = Gui::new(&[("notes.md", &md)], Some("notes.md"));
+    gui.settle();
+    gui.app_mut().state.preview_open = true;
+    gui.settle();
+
+    let width = gui.harness.ctx.viewport_rect().width();
+    let mut cells = 0;
+    let mut widest: f32 = 0.0;
+    let mut columns: Vec<f32> = Vec::new();
+    for clipped in &gui.harness.output().shapes {
+        if let egui::Shape::Text(text) = &clipped.shape
+            && text.galley.job.text.contains("Every cell")
+        {
+            cells += 1;
+            columns.push(text.pos.x);
+            widest = widest.max(text.pos.x + text.galley.size().x);
+        }
+    }
+    assert!(cells >= 3, "the cells of the table are not drawn: {cells}");
+    assert!(
+        widest <= width,
+        "the table runs past the window: {widest:.1} of a window {width:.1} wide"
+    );
+    columns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(
+        columns.len() >= 3 && columns[2] - columns[0] > 100.0,
+        "the columns are not laid out: {columns:?}"
+    );
+}
+
 /// Where a piece of painted text starts, if it is on screen.
 fn painted_at(gui: &Gui, needle: &str) -> Option<f32> {
     gui.harness.output().shapes.iter().find_map(|clipped| {

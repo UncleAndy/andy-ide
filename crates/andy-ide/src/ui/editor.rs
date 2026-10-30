@@ -61,13 +61,11 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         // The preview follows the text with the delay it decides on itself, and says so while
         // it waits.
         state.preview.update(&text, now);
-        let behind = state.preview.shown() != text;
-        ui.horizontal(|ui| {
-            ui.weak("Preview");
-            if behind {
-                ui.weak("(updating)");
-            }
-        });
+        // Only the wait is worth saying: the switch above is already lit and says whose
+        // page this is.
+        if state.preview.shown() != text {
+            ui.weak("(updating)");
+        }
         state.preview.show(ui, &mut state.commonmark);
         return;
     }
