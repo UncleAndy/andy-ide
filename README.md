@@ -51,7 +51,9 @@ Plan and state:
 Milestone M3 (terminal) is done: `ide-term` runs a shell on a real pseudo-terminal
 (`portable-pty`) and emulates the screen (`vt100`, 2000 lines of scrollback); the bottom
 strip of the window is one row of tabs, so `Terminal` and `Problems` share it and whichever
-tab is in front uses the whole width. Keys go to the panel that was clicked last, arrows
+tab is in front uses the whole width. Keys go to the panel that was clicked last, and a
+terminal that has just come to the front takes them without being clicked first — coming
+to a terminal is coming to the keyboard; a click elsewhere gives them back. Arrows
 and `Home`/`End` follow the cursor-key mode the program asked for, and `F1`..`F12` are
 sent as xterm sends them, and clicks reach a program that asked for the mouse
 (`mc` selects the file under the pointer). With `Shift` held the mouse works for the
@@ -180,8 +182,12 @@ id offered to a different agent asks a stranger to remember somebody else's afte
 
 The foot of the panel is the field, and one row under it: the facts about the turn on the left —
 how long it is taking, which model is answering, how hard it is thinking, how much of its context
-window is spent — and the button that sends on the right. All three choices among the facts are
-menus, and all three are answered by the agent, not by us. Anything the agent does not report is a
+window is spent — and the button on the right, which is `Send`, or `Cancel` while an answer is
+being written: the person is then either sending the next message or finishing with this one.
+`Cancel` ends the turn and not the agent — it is asked to stop through ACP (`session/cancel`),
+the answer ends with the turn's own `cancelled`, and the process stays where it is. `Stop`, in
+the row above, is the other door: that one ends the session. All three choices among the facts
+are menus, and all three are answered by the agent, not by us. Anything the agent does not report is a
 dash rather than a guess. The facts share the button's row and never wrap: a row that wraps is a
 second row, and the second row is the height of the foot, which belongs to the field alone — a
 figure gaining a character (the timer does it several times a second) would otherwise make the foot
