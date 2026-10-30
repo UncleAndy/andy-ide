@@ -1898,6 +1898,64 @@ mod caret_visibility_tests {
     }
 
     #[test]
+    fn the_caret_of_a_restored_tab_stands_in_the_middle_of_the_window() {
+        // Bringing the caret into sight is not enough: a caret that has just crawled over the
+        // bottom edge is in sight and still not where a person looks after a session comes back.
+        // A restored caret stands in the middle of the window.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let text: String = (0..5000).map(|n| format!("line number {n}\n")).collect();
+        std::fs::write(project.path().join("a.rs"), text).unwrap();
+
+        let mut first = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        first.state.open_file(std::path::Path::new("a.rs"));
+        let caret = first
+            .state
+            .active_buffer()
+            .expect("a file")
+            .char_index(4000, 0);
+        first
+            .state
+            .active_buffer_mut()
+            .expect("a file")
+            .set_caret(caret);
+        first.state.save_workspace(None, 100.0, true);
+
+        let mut harness = Harness {
+            ctx: egui::Context::default(),
+            app: App::with_config_dir(
+                config.path().to_path_buf(),
+                Some(project.path().to_path_buf()),
+                None,
+            ),
+            time: 0.0,
+            _project: project,
+            _config: config,
+        };
+        let mut last = None;
+        for _ in 0..12 {
+            let _ = harness.frame(Vec::new());
+            let on_screen: Option<(egui::Pos2, egui::Rect)> = harness
+                .ctx
+                .data(|data| data.get_temp(egui::Id::new("andy-ide-caret-on-screen")));
+            if let Some(pair) = on_screen {
+                last = Some(pair);
+            }
+        }
+        let (caret, clip) = last.expect("the caret was never painted");
+        let off = (caret.y - clip.center().y).abs();
+        assert!(
+            off <= clip.height() / 6.0,
+            "the caret stands {off:.1} points from the middle of a {} point window",
+            clip.height()
+        );
+    }
+
+    #[test]
     fn a_tab_brought_to_the_front_brings_its_caret_into_sight() {
         // Two tabs, the second left with its caret four thousand lines down. Coming back to it
         // has to bring the caret with it: arriving at a tab is arriving at the caret, and a

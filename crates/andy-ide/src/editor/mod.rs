@@ -172,7 +172,7 @@ impl EditorBuffer {
         self.doc.line_col_to_char(line, col)
     }
 
-    /// Asks the view to bring the caret into sight.
+    /// Asks the view to bring the caret into the middle of the window.
     pub fn request_reveal(&mut self) {
         self.reveal_caret = true;
     }
@@ -182,8 +182,8 @@ impl EditorBuffer {
         self.reveal_caret
     }
 
-    /// Says the caret is in sight: the request is done, and a later frame does not drag the
-    /// text along after the person has scrolled away.
+    /// Says the caret stands where it was asked to stand: the request is done, and a later frame
+    /// does not drag the text along after the person has scrolled away.
     pub fn reveal_done(&mut self) {
         self.reveal_caret = false;
     }

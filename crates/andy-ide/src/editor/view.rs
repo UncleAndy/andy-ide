@@ -145,263 +145,283 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         (line_count as f32) * row_h,
     );
 
-    egui::ScrollArea::both()
+    // A request to put the caret in the middle of the window is answered with the offset the
+    // scroll area starts from. `scroll_to_rect` was the natural way to say it, but it only brings
+    // an asked rectangle into sight and stops as soon as the caret has crawled over the edge: a
+    // restored caret four thousand lines down stayed far below the window, and asking for the
+    // caret's own row only nudged the view by a line.
+    let reveal_offset = buffer.reveal_wanted().then(|| {
+        let line = buffer.line_col().0 as f32;
+        (line * row_h - ui.available_height() / 2.0).max(0.0)
+    });
+    let mut scroll = egui::ScrollArea::both()
         .id_salt(("editor_scroll", buffer.path.clone()))
-        .auto_shrink([false, false])
-        .show_viewport(ui, |ui, viewport| {
-            let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(
-                    content.x.max(ui.available_width()),
-                    content.y.max(ui.available_height()),
-                ),
-                Sense::click_and_drag(),
-            );
-            let origin = rect.min;
-            let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
-            let gutter_width = digits as f32 * char_w + 8.0;
-            let text_origin = Pos2::new(origin.x + gutter_width, origin.y);
+        .auto_shrink([false, false]);
+    if let Some(offset) = reveal_offset {
+        scroll = scroll.vertical_scroll_offset(offset);
+    }
+    scroll.show_viewport(ui, |ui, viewport| {
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(
+                content.x.max(ui.available_width()),
+                content.y.max(ui.available_height()),
+            ),
+            Sense::click_and_drag(),
+        );
+        let origin = rect.min;
+        let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
+        let gutter_width = digits as f32 * char_w + 8.0;
+        let text_origin = Pos2::new(origin.x + gutter_width, origin.y);
 
-            if response.clicked() || response.dragged() {
-                response.request_focus();
-            }
+        if response.clicked() || response.dragged() {
+            response.request_focus();
+        }
 
-            // egui turns arrow keys and Tab into focus navigation unless the
-            // focused widget claims them, so the editor claims every key it
-            // handles. Without this, Up/Down jump between panels.
-            if response.has_focus() {
-                ui.memory_mut(|memory| {
-                    memory.set_focus_lock_filter(
-                        response.id,
-                        egui::EventFilter {
-                            tab: true,
-                            horizontal_arrows: true,
-                            vertical_arrows: true,
-                            escape: true,
-                        },
-                    );
-                });
-            }
-            // Typing should work as soon as the editor is on screen.
-            if !response.has_focus() && ui.memory(|memory| memory.focused().is_none()) {
-                response.request_focus();
-            }
-
-            let painter = ui.painter_at(rect);
-
-            let first_line = ((viewport.min.y / row_h).floor().max(0.0) as usize).saturating_sub(1);
-            let last_line =
-                (((viewport.max.y / row_h).ceil().max(0.0) as usize) + 2).min(line_count);
-
-            let spans = buffer
-                .highlighter
-                .as_ref()
-                .map(|highlighter| highlighter.spans_for_lines(first_line, last_line))
-                .unwrap_or_default();
-            let layouts =
-                LineLayouts::build(ui, buffer, &spans, &font, palette, first_line, last_line);
-
-            // Input comes before painting: the caret this frame is the one the
-            // key press asked for, so it is drawn where it belongs and the view
-            // can follow it in the same frame.
-            let mut drag_scrolled = false;
-            if (response.clicked() || response.dragged())
-                && let Some(pos) = response.interact_pointer_pos()
-            {
-                let mut y = pos.y - rect.min.y;
-                // Dragging past the edge scrolls one row at a time, so the
-                // selection keeps growing while the button is held even though
-                // the pointer has nowhere left to go. The scroll area takes its
-                // delta negated: a negative y scrolls down.
-                if response.dragged() {
-                    let step = auto_scroll_step(y, viewport, row_h);
-                    if step != 0.0 {
-                        ui.scroll_with_delta_animation(
-                            Vec2::new(0.0, step),
-                            egui::style::ScrollAnimation::none(),
-                        );
-                        ui.ctx().request_repaint();
-                        drag_scrolled = true;
-                        // Aim one row past the edge that is being revealed.
-                        y = if step < 0.0 {
-                            viewport.max.y + row_h
-                        } else {
-                            viewport.min.y - row_h
-                        };
-                    }
-                }
-                let target = Pos2::new(pos.x, rect.min.y + y);
-                let (line, col) =
-                    position_to_line_col(buffer, &layouts, text_origin, target, row_h);
-                let index = buffer.char_index(line, col);
-                // Ctrl+Click is "go to the definition", as in every other editor:
-                // the caret follows the symbol, and the definition is asked for.
-                let navigation = response.clicked()
-                    && ui.input(|input| input.modifiers.ctrl && !input.modifiers.shift);
-                if response.dragged() {
-                    buffer.set_drag_caret(index);
-                } else {
-                    buffer.set_caret(index);
-                    if navigation {
-                        buffer.request_navigation(index);
-                    }
-                }
-            }
-
-            // A pointer that rests on the text asks what is under it. Published
-            // every frame rather than as an event, so a pointer that leaves the
-            // text (or the window) leaves nothing behind.
-            //
-            // `rect` is as tall as the whole document and as wide as the longest
-            // line: a pointer over the panel *below* the code is, geometrically,
-            // inside it, and the text under it was a symbol from a line that was
-            // not even on screen — the hint about a `use` fifty lines down,
-            // following the pointer across the agent panel. The text the pointer
-            // can be over is the part that was drawn: the allocated rect cut
-            // down by what the scroll area actually shows.
-            let shown = rect.intersect(ui.clip_rect());
-            buffer.hover = ui
-                .input(|input| input.pointer.hover_pos())
-                .filter(|pos| shown.contains(*pos) && !response.dragged())
-                .map(|pos| {
-                    let (line, col) =
-                        position_to_line_col(buffer, &layouts, text_origin, pos, row_h);
-                    (line, col, pos)
-                });
-
-            let mut navigated = false;
-            let mut typed = false;
-            // A widget that takes the keyboard in *this* frame gets no input from it: a
-            // single-line field gives the focus up when Enter commits it, and the key
-            // that closed the field is still in this frame's event queue — reading it
-            // here is how a message meant for the agent put a newline in the editor.
-            if response.has_focus() && !response.gained_focus() {
-                let (text_changed, moved) = handle_input(ui, buffer);
-                changed |= text_changed;
-                typed = text_changed;
-                navigated = moved;
-            }
-
-            paint_gutter(
-                ui,
-                &painter,
-                palette,
-                buffer,
-                rect,
-                origin,
-                gutter_width,
-                row_h,
-                first_line,
-                last_line,
-                marks,
-            );
-            let paint_ctx = || PaintCtx {
-                painter: &painter,
-                palette,
-                origin: text_origin,
-                char_w,
-                row_h,
-            };
-            paint_occurrences(paint_ctx(), buffer, &layouts, first_line, last_line);
-            paint_search(paint_ctx(), buffer, &layouts, first_line, last_line);
-            paint_selection(paint_ctx(), buffer, &layouts, first_line, last_line);
-            paint_galleys(&painter, palette, &layouts, text_origin, row_h);
-            let (caret_line, _) = buffer.line_col();
-            let caret_galley = layouts
-                .galley(caret_line)
-                .cloned()
-                .or_else(|| line_galley(ui, buffer, &spans, &font, palette, caret_line));
-            // A caret that is always drawn is easy to lose in the text: the bar blends
-            // with the glyphs next to it. It blinks instead, and a move or a letter
-            // lights it at once so the user sees where the text went.
-            let tracked = response.id.with("last_caret");
-            let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
-            let caret = buffer.caret();
-            // A jump the application asked for (a definition, a diagnostic, a
-            // reference in the list) has no key press behind it, so it is
-            // announced by the buffer: the caret must end up in sight.
-            let reveal = buffer.reveal_wanted();
-            // A reveal only relaxes the need for a key press: the view still
-            // scrolls just when the caret is out of sight, so a second frame of
-            // the same request cannot drag the text further than the first.
-            let moved = typed || navigated || reveal || previous != Some(caret);
-            let blinking = response.id.with("caret-blink");
-            let now = ui.input(|input| input.time);
-            // A caret that just moved is lit: it blinks from the moment the user
-            // stops, not from the moment the window opened.
-            let since: f64 = if moved {
-                ui.data_mut(|data| data.insert_temp(blinking, now));
-                now
-            } else {
-                ui.data(|data| data.get_temp(blinking)).unwrap_or(now)
-            };
-            let lit = moved || caret_lit(now - since);
-            ui.data_mut(|data| data.insert_temp(Id::new("andy-ide-caret-lit"), lit));
-            // A window that is otherwise idle does not repaint, so the caret has to
-            // ask for the frame in which its state turns over.
-            let interval = if moved {
-                CARET_BLINK
-            } else {
-                CARET_BLINK - (now - since).rem_euclid(CARET_BLINK)
-            };
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(interval));
-
-            let caret_pos = paint_caret(paint_ctx(), buffer, caret_galley.as_ref(), lit);
-
-            // The view followed the caret in the same frame, so the caret is where
-            // it was asked to be, and the scroll target is in screen coordinates:
-            // the scroll area compares it with its clip rect.
-            let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
-            let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
-            let (remember, outside) = caret_follow(previous, caret, viewport, row);
-            if remember {
-                ui.data_mut(|data| data.insert_temp(tracked, caret));
-            }
-            // A wheel scroll moves the view and leaves the caret alone: chasing
-            // it then would fight the wheel. Only a caret move or an explicit
-            // navigation key pulls the view.
-            // A reveal only relaxes the need for a key press: the view still
-            // scrolls just when the caret is out of sight, so a second frame of
-            // the same request cannot drag the text further than the first.
-            let pull = outside && (reveal || navigated || previous.is_none());
-            // Where the caret was drawn, for the tests: the only way to check
-            // that a jump scrolled the view is to look at this.
-            // The clip rect is what the user can actually see: the allocated rect
-            // spans the whole content and would make any caret look visible.
-            ui.data_mut(|data| {
-                data.insert_temp(
-                    Id::new("andy-ide-caret-on-screen"),
-                    (caret_pos, ui.clip_rect()),
+        // egui turns arrow keys and Tab into focus navigation unless the
+        // focused widget claims them, so the editor claims every key it
+        // handles. Without this, Up/Down jump between panels.
+        if response.has_focus() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
                 );
             });
-            // The request is done when the caret is really in sight, not after a fixed number
-            // of frames: a scroll area that has appeared this frame swallows the scroll, and a
-            // request counted in frames would be spent while the caret is still off screen.
-            // Until it lands, every later frame asks again — and no frame is forced for it, or
-            // the caret would stop blinking.
-            if ui.clip_rect().contains(caret_pos) {
+        }
+        // Typing should work as soon as the editor is on screen.
+        if !response.has_focus() && ui.memory(|memory| memory.focused().is_none()) {
+            response.request_focus();
+        }
+
+        let painter = ui.painter_at(rect);
+
+        let first_line = ((viewport.min.y / row_h).floor().max(0.0) as usize).saturating_sub(1);
+        let last_line = (((viewport.max.y / row_h).ceil().max(0.0) as usize) + 2).min(line_count);
+
+        let spans = buffer
+            .highlighter
+            .as_ref()
+            .map(|highlighter| highlighter.spans_for_lines(first_line, last_line))
+            .unwrap_or_default();
+        let layouts = LineLayouts::build(ui, buffer, &spans, &font, palette, first_line, last_line);
+
+        // Input comes before painting: the caret this frame is the one the
+        // key press asked for, so it is drawn where it belongs and the view
+        // can follow it in the same frame.
+        let mut drag_scrolled = false;
+        if (response.clicked() || response.dragged())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let mut y = pos.y - rect.min.y;
+            // Dragging past the edge scrolls one row at a time, so the
+            // selection keeps growing while the button is held even though
+            // the pointer has nowhere left to go. The scroll area takes its
+            // delta negated: a negative y scrolls down.
+            if response.dragged() {
+                let step = auto_scroll_step(y, viewport, row_h);
+                if step != 0.0 {
+                    ui.scroll_with_delta_animation(
+                        Vec2::new(0.0, step),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                    ui.ctx().request_repaint();
+                    drag_scrolled = true;
+                    // Aim one row past the edge that is being revealed.
+                    y = if step < 0.0 {
+                        viewport.max.y + row_h
+                    } else {
+                        viewport.min.y - row_h
+                    };
+                }
+            }
+            let target = Pos2::new(pos.x, rect.min.y + y);
+            let (line, col) = position_to_line_col(buffer, &layouts, text_origin, target, row_h);
+            let index = buffer.char_index(line, col);
+            // Ctrl+Click is "go to the definition", as in every other editor:
+            // the caret follows the symbol, and the definition is asked for.
+            let navigation = response.clicked()
+                && ui.input(|input| input.modifiers.ctrl && !input.modifiers.shift);
+            if response.dragged() {
+                buffer.set_drag_caret(index);
+            } else {
+                buffer.set_caret(index);
+                if navigation {
+                    buffer.request_navigation(index);
+                }
+            }
+        }
+
+        // A pointer that rests on the text asks what is under it. Published
+        // every frame rather than as an event, so a pointer that leaves the
+        // text (or the window) leaves nothing behind.
+        //
+        // `rect` is as tall as the whole document and as wide as the longest
+        // line: a pointer over the panel *below* the code is, geometrically,
+        // inside it, and the text under it was a symbol from a line that was
+        // not even on screen — the hint about a `use` fifty lines down,
+        // following the pointer across the agent panel. The text the pointer
+        // can be over is the part that was drawn: the allocated rect cut
+        // down by what the scroll area actually shows.
+        let shown = rect.intersect(ui.clip_rect());
+        buffer.hover = ui
+            .input(|input| input.pointer.hover_pos())
+            .filter(|pos| shown.contains(*pos) && !response.dragged())
+            .map(|pos| {
+                let (line, col) = position_to_line_col(buffer, &layouts, text_origin, pos, row_h);
+                (line, col, pos)
+            });
+
+        let mut navigated = false;
+        let mut typed = false;
+        // A widget that takes the keyboard in *this* frame gets no input from it: a
+        // single-line field gives the focus up when Enter commits it, and the key
+        // that closed the field is still in this frame's event queue — reading it
+        // here is how a message meant for the agent put a newline in the editor.
+        if response.has_focus() && !response.gained_focus() {
+            let (text_changed, moved) = handle_input(ui, buffer);
+            changed |= text_changed;
+            typed = text_changed;
+            navigated = moved;
+        }
+
+        paint_gutter(
+            ui,
+            &painter,
+            palette,
+            buffer,
+            rect,
+            origin,
+            gutter_width,
+            row_h,
+            first_line,
+            last_line,
+            marks,
+        );
+        let paint_ctx = || PaintCtx {
+            painter: &painter,
+            palette,
+            origin: text_origin,
+            char_w,
+            row_h,
+        };
+        paint_occurrences(paint_ctx(), buffer, &layouts, first_line, last_line);
+        paint_search(paint_ctx(), buffer, &layouts, first_line, last_line);
+        paint_selection(paint_ctx(), buffer, &layouts, first_line, last_line);
+        paint_galleys(&painter, palette, &layouts, text_origin, row_h);
+        let (caret_line, _) = buffer.line_col();
+        let caret_galley = layouts
+            .galley(caret_line)
+            .cloned()
+            .or_else(|| line_galley(ui, buffer, &spans, &font, palette, caret_line));
+        // A caret that is always drawn is easy to lose in the text: the bar blends
+        // with the glyphs next to it. It blinks instead, and a move or a letter
+        // lights it at once so the user sees where the text went.
+        let tracked = response.id.with("last_caret");
+        let previous: Option<usize> = ui.data(|data| data.get_temp(tracked));
+        let caret = buffer.caret();
+        // A jump the application asked for (a definition, a diagnostic, a
+        // reference in the list) has no key press behind it, so it is
+        // announced by the buffer: the caret must end up in sight.
+        let reveal = buffer.reveal_wanted();
+        // A reveal only relaxes the need for a key press: the view still
+        // scrolls just when the caret is out of sight, so a second frame of
+        // the same request cannot drag the text further than the first.
+        let moved = typed || navigated || reveal || previous != Some(caret);
+        let blinking = response.id.with("caret-blink");
+        let now = ui.input(|input| input.time);
+        // A caret that just moved is lit: it blinks from the moment the user
+        // stops, not from the moment the window opened.
+        let since: f64 = if moved {
+            ui.data_mut(|data| data.insert_temp(blinking, now));
+            now
+        } else {
+            ui.data(|data| data.get_temp(blinking)).unwrap_or(now)
+        };
+        let lit = moved || caret_lit(now - since);
+        ui.data_mut(|data| data.insert_temp(Id::new("andy-ide-caret-lit"), lit));
+        // A window that is otherwise idle does not repaint, so the caret has to
+        // ask for the frame in which its state turns over.
+        let interval = if moved {
+            CARET_BLINK
+        } else {
+            CARET_BLINK - (now - since).rem_euclid(CARET_BLINK)
+        };
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(interval));
+
+        let caret_pos = paint_caret(paint_ctx(), buffer, caret_galley.as_ref(), lit);
+
+        // The view followed the caret in the same frame, so the caret is where
+        // it was asked to be, and the scroll target is in screen coordinates:
+        // the scroll area compares it with its clip rect.
+        let caret_content = Pos2::new(caret_pos.x - rect.min.x, caret_pos.y - rect.min.y);
+        let row = Rect::from_min_size(caret_content, Vec2::new(1.0, row_h));
+        let (remember, outside) = caret_follow(previous, caret, viewport, row);
+        if remember {
+            ui.data_mut(|data| data.insert_temp(tracked, caret));
+        }
+        // A wheel scroll moves the view and leaves the caret alone: chasing
+        // it then would fight the wheel. Only a caret move or an explicit
+        // navigation key pulls the view.
+        // A reveal only relaxes the need for a key press: the view still
+        // scrolls just when the caret is out of sight, so a second frame of
+        // the same request cannot drag the text further than the first.
+        // A request from the application is answered with a scroll offset, not from here
+        // (see above): what is left to pull is a caret the view is following by itself.
+        let pull = outside && (navigated || previous.is_none());
+        // Where the caret was drawn, for the tests: the only way to check
+        // that a jump scrolled the view is to look at this.
+        // The clip rect is what the user can actually see: the allocated rect
+        // spans the whole content and would make any caret look visible.
+        ui.data_mut(|data| {
+            data.insert_temp(
+                Id::new("andy-ide-caret-on-screen"),
+                (caret_pos, ui.clip_rect()),
+            );
+        });
+        // The request is done when the caret stands in the middle of the window, where the
+        // person was told to look — not after a fixed number of frames, and not merely when
+        // the caret is anywhere inside the clip: a caret that has just crawled over the
+        // bottom edge is in sight and still not where it was asked to be.
+        //
+        // The wheel ends the request as well: chasing a caret after the person has scrolled
+        // away fights them. No frame is forced for the request, or the caret stops blinking.
+        // The request lives until the caret stands in the middle of the window — and a
+        // partial scroll is not the end of it either: the first frames of a fresh scroll area
+        // are scrolled with the height it knows so far, which is how a restored caret ended
+        // up far below the window even though the view had asked. Two ways out: the person
+        // takes the wheel, or the text stops moving (a caret at the top of the file can never
+        // reach the middle) — then asking again would only stop the caret blinking.
+        if reveal {
+            let clip = ui.clip_rect();
+            let centred = clip.contains(caret_pos)
+                && (caret_pos.y - clip.center().y).abs() <= clip.height() / 6.0;
+            let was_y: Option<f32> = ui.data(|data| data.get_temp(Id::new("andy-ide-reveal-last")));
+            let stuck = was_y.is_some_and(|y| (y - caret_pos.y).abs() < 0.5);
+            let scrolled_away =
+                drag_scrolled || ui.input(|input| input.smooth_scroll_delta != egui::Vec2::ZERO);
+            if centred || stuck || scrolled_away {
                 buffer.reveal_done();
             }
-            if pull && !drag_scrolled {
-                // A jump from elsewhere lands the caret in the middle third of the
-                // view: scrolling just enough would leave it on the last row, where
-                // it is easy to miss and can be clipped by the edge of the window.
-                // A key press only scrolls as far as it must, or every arrow would
-                // re-centre the text.
-                let target = if reveal {
-                    let margin = Vec2::new(0.0, ui.clip_rect().height() / 3.0);
-                    Rect::from_min_max(
-                        caret_pos - margin,
-                        caret_pos + Vec2::new(1.0, row_h) + margin,
-                    )
-                } else {
-                    Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0)
-                };
-                // Instant, like an editor: a smooth animation would leave the
-                // caret off screen for a moment after Ctrl+Home.
-                ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
-            }
-        });
+            ui.data_mut(|data| data.insert_temp(Id::new("andy-ide-reveal-last"), caret_pos.y));
+        }
+        if pull && !drag_scrolled {
+            // A jump from elsewhere lands the caret in the middle third of the
+            // view: scrolling just enough would leave it on the last row, where
+            // it is easy to miss and can be clipped by the edge of the window.
+            // A key press only scrolls as far as it must, or every arrow would
+            // re-centre the text.
+            let target = Rect::from_min_size(caret_pos, Vec2::new(1.0, row_h)).expand(3.0);
+            // Instant, like an editor: a smooth animation would leave the
+            // caret off screen for a moment after Ctrl+Home.
+            ui.scroll_to_rect_animation(target, None, egui::style::ScrollAnimation::none());
+        }
+    });
 
     changed
 }
