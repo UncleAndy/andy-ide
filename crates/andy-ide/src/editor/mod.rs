@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ide_buffer::{Cursor, Document};
+use ide_buffer::{Cursor, Document, search};
 use ide_syntax::{Highlighter, Language};
 
 /// Spaces per indent level; also how wide a tab is drawn.
@@ -49,6 +49,14 @@ pub struct EditorBuffer {
     /// Byte ranges of every use of the symbol under the caret, in this file.
     /// Emptied by every edit: the offsets stop meaning anything.
     pub occurrences: Vec<(usize, usize)>,
+    /// What the search bar is looking for, kept so the matches follow the text as it is
+    /// edited: a highlight that stopped at the first keystroke would be a picture of a file
+    /// that is no longer there.
+    needle: Option<search::Needle>,
+    /// Byte ranges of every match of that needle, in the order they appear.
+    pub search_hits: Vec<(usize, usize)>,
+    /// The match the caret was last taken to.
+    pub search_current: Option<usize>,
 }
 
 impl EditorBuffer {
@@ -82,6 +90,9 @@ impl EditorBuffer {
             reveal_caret: 0,
             hover: None,
             occurrences: Vec::new(),
+            needle: None,
+            search_hits: Vec::new(),
+            search_current: None,
         };
         buffer.refresh();
         buffer
@@ -422,6 +433,149 @@ impl EditorBuffer {
         self.refresh();
     }
 
+    /// Looks for `needle` in the whole text and remembers where the matches are.
+    ///
+    /// Returns how many matches there are. The needle is kept: every later edit rebuilds the
+    /// matches, so the highlight follows the text.
+    pub fn search(&mut self, needle: &search::Needle) -> usize {
+        self.needle = match needle.is_empty() {
+            true => None,
+            false => Some(needle.clone()),
+        };
+        self.collect_hits();
+        self.search_hits.len()
+    }
+
+    /// Forgets the search and its highlight.
+    pub fn end_search(&mut self) {
+        self.needle = None;
+        self.search_hits.clear();
+        self.search_current = None;
+    }
+
+    /// Rebuilds the list of matches from the text as it stands now.
+    fn collect_hits(&mut self) {
+        self.search_hits = match &self.needle {
+            Some(needle) => search::all(&self.text, needle)
+                .into_iter()
+                .map(|hit| (hit.start, hit.end))
+                .collect(),
+            None => Vec::new(),
+        };
+        // A match that used to be current may have been edited away.
+        self.search_current = self
+            .search_current
+            .filter(|index| *index < self.search_hits.len());
+    }
+
+    /// Takes the caret to the match nearest the caret, at or after it.
+    ///
+    /// This is what opening the bar does: with `Ctrl+F` the nearest match is looked for, not the
+    /// one after the match the caret happens to stand in.
+    pub fn search_nearest(&mut self) -> bool {
+        if self.search_hits.is_empty() {
+            return false;
+        }
+        let caret = self.caret_byte();
+        let index = self
+            .search_hits
+            .iter()
+            .position(|(_, end)| *end > caret)
+            .unwrap_or(0);
+        self.go_to_hit(index)
+    }
+
+    /// Takes the caret to the next match, or to the one before, wrapping at the ends.
+    ///
+    /// A match the caret stands in is stepped over rather than landed on again: the button says
+    /// *next*, and the match under the caret is not the next one.
+    pub fn search_step(&mut self, forward: bool) -> bool {
+        if self.search_hits.is_empty() {
+            return false;
+        }
+        let caret = self.caret_byte();
+        let inside = self
+            .search_hits
+            .iter()
+            .position(|(start, end)| *start <= caret && caret <= *end);
+        let index = if forward {
+            let after = inside.map_or(caret, |index| self.search_hits[index].0 + 1);
+            self.search_hits
+                .iter()
+                .position(|(start, _)| *start >= after)
+                .unwrap_or(0)
+        } else {
+            // Backwards the match under the caret is left behind whole: the one being looked
+            // for is the last that ends before this match begins.
+            let before = inside.map_or(caret, |index| self.search_hits[index].0);
+            self.search_hits
+                .iter()
+                .rposition(|(_, end)| *end <= before)
+                .unwrap_or(self.search_hits.len() - 1)
+        };
+        self.go_to_hit(index)
+    }
+
+    /// Puts the caret on the match and selects it, bringing it into sight.
+    fn go_to_hit(&mut self, index: usize) -> bool {
+        let Some(&(start, end)) = self.search_hits.get(index) else {
+            return false;
+        };
+        self.search_current = Some(index);
+        self.set_caret_byte(start);
+        self.set_drag_caret(self.text[..end].chars().count());
+        self.request_reveal();
+        true
+    }
+
+    /// Replaces the match the caret stands in, then goes to the next one.
+    pub fn replace_at_caret(&mut self, replacement: &str) -> bool {
+        let caret = self.caret_byte();
+        let Some(&(start, end)) = self
+            .search_hits
+            .iter()
+            .find(|(start, end)| *start <= caret && caret <= *end)
+        else {
+            return false;
+        };
+        let from = self.byte_to_char(start);
+        self.doc
+            .replace_range(from..self.byte_to_char(end), replacement);
+        self.cursor = Cursor::caret(from + replacement.chars().count());
+        self.refresh();
+        // The caret now stands just past what was written, so the next match is the one
+        // after it.
+        self.search_step(true);
+        true
+    }
+
+    /// Replaces every match, as one step of the history. Returns how many places were replaced.
+    pub fn replace_all(&mut self, replacement: &str) -> usize {
+        let Some(needle) = self.needle.clone() else {
+            return 0;
+        };
+        let hits = search::all(&self.text, &needle);
+        let (Some(first), Some(last)) = (hits.first(), hits.last()) else {
+            return 0;
+        };
+        // One range, from the first match to the last: what lies between them is rewritten as
+        // it stands, so the whole change is one step of the history and one press of undo.
+        let from = self.byte_to_char(first.start);
+        let to = self.byte_to_char(last.end);
+        let (written, count) =
+            search::replace_all(&self.text[first.start..last.end], &needle, replacement);
+        self.doc.replace_range(from..to, &written);
+        self.cursor = Cursor::caret(from);
+        self.refresh();
+        count
+    }
+
+    /// The character index of a byte offset.
+    fn byte_to_char(&self, byte: usize) -> usize {
+        let byte = byte.min(self.text.len());
+        self.text[..byte].chars().count()
+    }
+
     /// Rebuilds the flat mirror, the line table and the highlight spans.
     fn refresh(&mut self) {
         // The offsets of the last highlight belong to the old text.
@@ -441,6 +595,94 @@ impl EditorBuffer {
         {
             highlighter.edit(start, old_end, new_end, &self.text[start..new_end]);
         }
+
+        // The matches of an open search belong to the old offset space as much as the
+        // highlight does.
+        self.collect_hits();
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn buffer(text: &str) -> EditorBuffer {
+        EditorBuffer::from_text(PathBuf::from("test.rs"), text.to_owned())
+    }
+
+    #[test]
+    fn a_search_counts_its_matches_and_remembers_them() {
+        let mut buf = buffer("one two one\nthree one\n");
+        assert_eq!(buf.search(&search::Needle::new("one")), 3);
+        assert_eq!(buf.search_hits.len(), 3);
+        // Byte offsets into the whole text, as the highlighter gives them.
+        assert_eq!(buf.search_hits[0], (0, 3));
+        assert_eq!(buf.search_hits[2], (18, 21));
+    }
+
+    #[test]
+    fn stepping_goes_forward_and_back_and_wraps() {
+        let mut buf = buffer("one two one");
+        buf.search(&search::Needle::new("one"));
+        // Opening the bar looks for the nearest match at or after the caret.
+        buf.set_caret(0);
+        assert!(buf.search_nearest());
+        assert_eq!(buf.selection(), 0..3);
+        // Stepping goes to the next one, and past the last it starts again at the first.
+        assert!(buf.search_step(true));
+        assert_eq!(buf.selection(), 8..11);
+        assert!(buf.search_step(true));
+        assert_eq!(buf.selection(), 0..3);
+        // Backwards from the first match it goes to the last.
+        assert!(buf.search_step(false));
+        assert_eq!(buf.selection(), 8..11);
+        assert!(buf.search_step(false));
+        assert_eq!(buf.selection(), 0..3);
+    }
+
+    #[test]
+    fn the_matches_follow_the_text_as_it_is_edited() {
+        let mut buf = buffer("one two");
+        assert_eq!(buf.search(&search::Needle::new("one")), 1);
+        buf.set_caret(0);
+        buf.insert_text("X");
+        assert_eq!(buf.text(), "Xone two");
+        assert_eq!(buf.search_hits, vec![(1, 4)]);
+        // A search with nothing in it draws nothing.
+        assert_eq!(buf.search(&search::Needle::new("")), 0);
+        assert!(
+            buf.search_hits.is_empty(),
+            "a needle of nothing drew matches"
+        );
+    }
+
+    #[test]
+    fn replacing_at_the_caret_takes_one_match_and_moves_on() {
+        let mut buf = buffer("one two one");
+        buf.search(&search::Needle::new("one"));
+        buf.set_caret(0);
+        assert!(buf.replace_at_caret("1"));
+        assert_eq!(buf.text(), "1 two one");
+        assert_eq!(buf.search_hits, vec![(6, 9)]);
+        assert_eq!(buf.selection(), 6..9);
+        assert!(buf.replace_at_caret("1"));
+        assert_eq!(buf.text(), "1 two 1");
+        // Nothing left under the caret: the second replacement of the same word is asked for
+        // again by stepping, not by replacing where the caret happens to stand.
+        assert!(buf.undo());
+        assert_eq!(buf.text(), "1 two one");
+    }
+
+    #[test]
+    fn replacing_everything_is_one_step_of_the_history() {
+        let mut buf = buffer("one two one\none");
+        buf.search(&search::Needle::new("one"));
+        assert_eq!(buf.replace_all("1"), 3);
+        assert_eq!(buf.text(), "1 two 1\n1");
+        assert!(buf.undo());
+        assert_eq!(buf.text(), "one two one\none");
+        assert!(buf.redo());
+        assert_eq!(buf.text(), "1 two 1\n1");
     }
 }
 

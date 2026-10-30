@@ -13,6 +13,7 @@ pub mod prompt;
 pub mod quick_open;
 pub mod rename;
 pub mod results;
+pub mod search;
 pub mod status;
 pub mod symbols;
 pub mod tabs;

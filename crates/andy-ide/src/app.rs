@@ -420,6 +420,34 @@ impl App {
         if close_pressed && let Some(index) = self.state.tabs.active() {
             self.state.close_tab(index);
         }
+        // Find and replace in the file, on the keys every editor gives them.
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::F))
+        {
+            crate::ui::search::open(&mut self.state, false);
+        }
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::H))
+        {
+            crate::ui::search::open(&mut self.state, true);
+        }
+        // F3 walks the matches of the search that is already in the bar. Shift+F3 is read
+        // first: `consume_key` treats a modifier it was not asked about as irrelevant, so a
+        // plain F3 would swallow the one with Shift.
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3))
+        {
+            crate::ui::search::step(&mut self.state, false);
+        }
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F3))
+        {
+            crate::ui::search::step(&mut self.state, true);
+        }
         // The project symbols keep the key the spec gives them. IntelliJ puts
         // the file structure on Ctrl+F12 and the project search on
         // Ctrl+Alt+Shift+N, and so does this editor.
@@ -531,6 +559,12 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             }
             if ui.checkbox(&mut state.hints, "Show hints").changed() {
                 state.status = "hints toggled".to_owned();
+            }
+            if ui.button("find in file	Ctrl+F").clicked() {
+                crate::ui::search::open(state, false);
+            }
+            if ui.button("replace in file	Ctrl+H").clicked() {
+                crate::ui::search::open(state, true);
             }
             if ui.button("quick open	Ctrl+P").clicked() {
                 state.quick_open.open();

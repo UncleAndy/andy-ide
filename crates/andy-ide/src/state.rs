@@ -158,6 +158,8 @@ pub struct AppState {
     /// Diagnostics per file, as the problems panel shows them.
     pub diagnostics: std::collections::BTreeMap<PathBuf, Vec<crate::lsp::DiagnosticLine>>,
     /// Layout cache of the Markdown preview.
+    /// The find-and-replace bar of the editor.
+    pub search: crate::ui::search::Search,
     pub preview: crate::ui::preview::Preview,
     pub commonmark: egui_commonmark::CommonMarkCache,
     /// Keeps the watch alive; dropping it stops the events.
@@ -229,6 +231,7 @@ impl AppState {
             diagnostics: std::collections::BTreeMap::new(),
             preview: crate::ui::preview::Preview::new(),
             commonmark: egui_commonmark::CommonMarkCache::default(),
+            search: crate::ui::search::Search::default(),
             watcher: None,
             fs_events: None,
             next_buffer_id: 1,

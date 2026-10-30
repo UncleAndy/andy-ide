@@ -37,6 +37,10 @@ pub struct Palette {
     /// Behind a use of the symbol under the caret, dimmer than a selection: it is
     /// context, not a choice the user made.
     pub occurrence: Color32,
+    /// Behind every match of the search in the bar, dimmer than the one the caret is on.
+    pub search: Color32,
+    /// Behind the match the caret stands on.
+    pub search_current: Color32,
     pub caret: Color32,
     pub gutter_bg: Color32,
     pub gutter_fg: Color32,
@@ -53,6 +57,8 @@ impl Palette {
     pub const DARK: Palette = Palette {
         selection: Color32::from_rgb(38, 79, 120),
         occurrence: Color32::from_rgba_premultiplied(46, 74, 46, 90),
+        search: Color32::from_rgba_premultiplied(120, 96, 24, 120),
+        search_current: Color32::from_rgba_premultiplied(196, 150, 30, 190),
         caret: Color32::from_rgb(220, 220, 220),
         gutter_bg: Color32::from_rgb(30, 30, 30),
         gutter_fg: Color32::from_rgb(110, 110, 110),
@@ -66,6 +72,8 @@ impl Palette {
     pub const LIGHT: Palette = Palette {
         selection: Color32::from_rgb(181, 213, 255),
         occurrence: Color32::from_rgba_premultiplied(180, 214, 180, 120),
+        search: Color32::from_rgba_premultiplied(255, 232, 150, 160),
+        search_current: Color32::from_rgba_premultiplied(255, 196, 60, 220),
         caret: Color32::from_rgb(20, 20, 20),
         gutter_bg: Color32::from_rgb(240, 240, 240),
         gutter_fg: Color32::from_rgb(140, 140, 140),
@@ -294,6 +302,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
                 row_h,
             };
             paint_occurrences(paint_ctx(), buffer, &layouts, first_line, last_line);
+            paint_search(paint_ctx(), buffer, &layouts, first_line, last_line);
             paint_selection(paint_ctx(), buffer, &layouts, first_line, last_line);
             paint_galleys(&painter, palette, &layouts, text_origin, row_h);
             let (caret_line, _) = buffer.line_col();
@@ -448,6 +457,54 @@ fn paint_occurrences(
         );
         ctx.painter
             .rect_filled(rect, CornerRadius::from(2), ctx.palette.occurrence);
+    }
+}
+
+/// The matches of the search in the bar: every one of them dim, the one the caret stands on
+/// brighter than the rest.
+fn paint_search(
+    ctx: PaintCtx,
+    buffer: &EditorBuffer,
+    layouts: &LineLayouts,
+    first_line: usize,
+    last_line: usize,
+) {
+    if buffer.search_hits.is_empty() {
+        return;
+    }
+    let starts = buffer.line_starts();
+    for (index, &(start, end)) in buffer.search_hits.iter().enumerate() {
+        // A match that belongs to another line is not painted here: most of them are out of
+        // sight, and the list is one entry per match.
+        let Some(line) = starts
+            .iter()
+            .rposition(|line_start| *line_start <= start)
+            .filter(|line| *line >= first_line && *line < last_line)
+        else {
+            continue;
+        };
+        let line_start = starts[line];
+        let text = buffer.line_text(line);
+        let line_end = line_start + text.len();
+        let from = start.max(line_start);
+        let to = end.min(line_end);
+        if from >= to {
+            continue;
+        }
+        let first = text[..from - line_start].chars().count();
+        let last = text[..to - line_start].chars().count();
+        let y = ctx.origin.y + (line as f32) * ctx.row_h;
+        let x1 = ctx.origin.x + x_for_col(layouts, text, line, first, ctx.char_w);
+        let x2 = ctx.origin.x + x_for_col(layouts, text, line, last, ctx.char_w);
+        let rect = Rect::from_min_max(
+            Pos2::new(x1, y),
+            Pos2::new((x2 - 1.0).max(x1 + 2.0), y + ctx.row_h),
+        );
+        let colour = match buffer.search_current {
+            Some(current) if current == index => ctx.palette.search_current,
+            _ => ctx.palette.search,
+        };
+        ctx.painter.rect_filled(rect, CornerRadius::from(2), colour);
     }
 }
 

@@ -39,6 +39,12 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         });
     }
 
+    // The find-and-replace bar stands above the text, and above the preview as well: it
+    // belongs to the file, whichever way the file is being shown.
+    if state.search.open {
+        crate::ui::search::bar(ui, state);
+    }
+
     let palette = Palette::for_theme(state.config.theme);
     // The margin marks are read before the buffer is borrowed: both live in the state,
     // and a file being edited has both.

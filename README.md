@@ -28,8 +28,10 @@ agent is a configuration entry rather than a code change.
 
 Milestone M1 (framework and editing) is complete: window with dock panels, project tree,
 rope-backed editor with tree-sitter highlighting for twelve languages, tabs, quick open,
-a session that comes back — the tabs and the layout, though not yet the position of the
-caret — atomic save, filesystem watching, Markdown preview, dark and light themes.
+find and replace in the file (`Ctrl+F`, `Ctrl+H`: every match painted, the caret walked
+through them, `Replace all` as one step of undo), a session that comes back — the tabs and the
+layout, though not yet the position of the caret — atomic save, filesystem watching, Markdown
+preview, dark and light themes.
 Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md), whose remainder that
 last item is.
 

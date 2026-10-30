@@ -484,6 +484,165 @@ fn a_table_in_the_preview_is_drawn_like_a_table_in_an_answer() {
     );
 }
 
+/// Types text into whatever holds the keyboard.
+fn type_text(gui: &mut Gui, text: &str) {
+    gui.harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text(text.to_owned()));
+    gui.settle();
+}
+
+#[test]
+fn ctrl_f_finds_the_text_of_the_open_file_as_it_is_typed() {
+    // The bar opens on Ctrl+F, takes the keyboard, and looks for what is typed into it: the
+    // matches are counted, and the caret goes to the nearest one.
+    let mut gui = Gui::new(
+        &[("notes.rs", "let a = 1;\nlet b = 2;\nlet c = 3;\n")],
+        Some("notes.rs"),
+    );
+    gui.settle();
+    assert!(!gui.app().state.search.open, "the bar starts closed");
+
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
+    gui.settle();
+    assert!(gui.app().state.search.open, "Ctrl+F did not open the bar");
+
+    type_text(&mut gui, "let");
+    let buffer = gui.app().state.active_buffer().expect("a file is open");
+    assert_eq!(
+        buffer.search_hits.len(),
+        3,
+        "the three words were not found"
+    );
+    assert_eq!(
+        buffer.selection(),
+        0..3,
+        "the caret did not go to the first match"
+    );
+
+    // Enter walks to the next match, Shift+Enter to the one before it.
+    gui.harness.key_press(egui::Key::Enter);
+    gui.settle();
+    let buffer = gui.app().state.active_buffer().expect("a file is open");
+    assert_eq!(
+        buffer.selection(),
+        11..14,
+        "Enter did not go to the second match"
+    );
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    gui.settle();
+    let buffer = gui.app().state.active_buffer().expect("a file is open");
+    assert_eq!(buffer.selection(), 0..3, "Shift+Enter did not come back");
+}
+
+#[test]
+fn the_matches_of_the_search_are_painted_in_the_text() {
+    // A search with matches to look at paints them: the highlight is what tells a person where
+    // the other matches are.
+    let mut gui = Gui::new(
+        &[("notes.rs", "let a = 1;\nlet b = 2;\n")],
+        Some("notes.rs"),
+    );
+    gui.settle();
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
+    gui.settle();
+    type_text(&mut gui, "let");
+
+    // Every match is dim, the one the caret stands on is bright: both are the search's own
+    // colours, told apart from the highlight of the symbol under the caret.
+    let (dim, bright) = (
+        crate::editor::view::Palette::DARK.search,
+        crate::editor::view::Palette::DARK.search_current,
+    );
+    let mut painted = 0;
+    for clipped in &gui.harness.output().shapes {
+        if let egui::Shape::Rect(rect) = &clipped.shape
+            && (rect.fill == dim || rect.fill == bright)
+        {
+            painted += 1;
+        }
+    }
+    assert!(
+        painted >= 2,
+        "the matches of the search are not painted: {painted} rectangles"
+    );
+}
+
+#[test]
+fn replace_all_writes_the_text_and_one_undo_takes_it_back() {
+    // Ctrl+H brings the replacement field, `Replace all` writes every place, and the whole
+    // change is one step of the history.
+    let mut gui = Gui::new(
+        &[("notes.rs", "let a = 1;\nlet b = 2;\n")],
+        Some("notes.rs"),
+    );
+    gui.settle();
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::H);
+    gui.settle();
+    assert!(
+        gui.app().state.search.replace,
+        "Ctrl+H did not bring the replacement field"
+    );
+    type_text(&mut gui, "let");
+    gui.app_mut().state.search.replacement = "var".to_owned();
+    gui.settle();
+
+    gui.harness.get_by_label("Replace all").click();
+    gui.settle();
+    let buffer = gui.app().state.active_buffer().expect("a file is open");
+    assert_eq!(buffer.text(), "var a = 1;\nvar b = 2;\n");
+    assert!(buffer.is_dirty(), "the change was not marked");
+
+    // One undo, and the file is as it was.
+    let buffer = gui
+        .app_mut()
+        .state
+        .active_buffer_mut()
+        .expect("a file is open");
+    assert!(buffer.undo(), "there is nothing to undo");
+    assert_eq!(buffer.text(), "let a = 1;\nlet b = 2;\n");
+}
+
+#[test]
+fn escape_closes_the_bar_and_takes_its_highlight_away() {
+    let mut gui = Gui::new(
+        &[("notes.rs", "let a = 1;\nlet b = 2;\n")],
+        Some("notes.rs"),
+    );
+    gui.settle();
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F);
+    gui.settle();
+    type_text(&mut gui, "let");
+    assert!(
+        !gui.app()
+            .state
+            .active_buffer()
+            .expect("a file")
+            .search_hits
+            .is_empty(),
+        "the search found nothing"
+    );
+
+    gui.harness.key_press(egui::Key::Escape);
+    gui.settle();
+    assert!(!gui.app().state.search.open, "Escape did not close the bar");
+    assert!(
+        gui.app()
+            .state
+            .active_buffer()
+            .expect("a file")
+            .search_hits
+            .is_empty(),
+        "the matches are still painted after the bar closed"
+    );
+}
+
 /// Where a piece of painted text starts, if it is on screen.
 fn painted_at(gui: &Gui, needle: &str) -> Option<f32> {
     gui.harness.output().shapes.iter().find_map(|clipped| {
