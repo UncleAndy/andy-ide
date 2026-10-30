@@ -231,6 +231,14 @@ pub struct Model {
 
 /// Reads the settings an agent offers out of a session answer, or out of the reply to a
 /// change: ACP puts the whole list in `configOptions` either way.
+/// The notification that asks the agent to stop the turn in flight.
+///
+/// A notification, not a request: ACP has no answer to it — a stopped turn ends with
+/// `stopReason: cancelled`, and that arrives as the turn's own ending.
+pub fn cancel_params(session: &str) -> Value {
+    json!({ "sessionId": session })
+}
+
 pub fn options_of(answer: &Value) -> Vec<ConfigOption> {
     answer
         .get("configOptions")

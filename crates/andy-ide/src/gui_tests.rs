@@ -2193,6 +2193,20 @@ mod the_terminal_owns_its_keys {
     }
 
     #[test]
+    fn the_terminal_takes_the_keys_the_moment_its_tab_comes_up() {
+        // Coming to the terminal is coming to the keyboard: the tab that has just come to
+        // the front holds the keys without being clicked first. A person who switches to a
+        // terminal means to type in it, and a frame spent typing into a file instead is a
+        // word in the wrong place.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_tab_active(&mut gui);
+        assert!(
+            gui.app().state.terminal.focused,
+            "the terminal came to the front and did not take the keyboard"
+        );
+    }
+
+    #[test]
     fn a_letter_typed_there_does_not_appear_in_the_editor() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         terminal_tab_active(&mut gui);
@@ -2331,9 +2345,13 @@ mod the_terminal_click {
             .terminal
             .shown_rect
             .expect("the terminal was drawn");
+        // The tab came up holding the keyboard by itself — that is what coming to the
+        // terminal means (`the_terminal_owns_its_keys` walks that road). What the click
+        // proves is the other half: a pointer landing inside the panel leaves the panel in
+        // charge, and typing goes to the shell.
         assert!(
-            !gui.app().state.terminal.focused,
-            "the terminal took the keyboard without being clicked"
+            gui.app().state.terminal.focused,
+            "the terminal came to the front and did not take the keyboard"
         );
 
         gui.harness.event(egui::Event::PointerButton {
@@ -4634,6 +4652,71 @@ mod the_agent_panel {
         );
     }
 
+    /// What egui drew to warn about two widgets sharing an id: a red box, or a line of text
+    /// marked with a flame.
+    fn warnings_of(gui: &Gui) -> Vec<String> {
+        let mut found = Vec::new();
+        for clipped in &gui.harness.output().shapes {
+            match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.job.text.starts_with('\u{1f525}') => {
+                    found.push(text.galley.job.text.clone());
+                }
+                egui::Shape::Rect(rect)
+                    if rect.stroke.color == egui::Color32::from_rgb(255, 0, 0) =>
+                {
+                    found.push(format!("a red box at {:?}", rect.rect));
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_foots_button_stops_the_answer_and_not_the_agent() {
+        // If the answer is not worth waiting for, the answer is what is stopped. The agent
+        // stays running: a session is not thrown away because one turn was.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // The stand-in thinks for five seconds on this word: a turn with time to be stopped.
+        gui.app_mut().state.agent.input = "slow".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer being written", |gui| {
+            gui.app().state.agent.busy
+        });
+
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label("Cancel").is_some(),
+            "the foot offers no way to stop the answer"
+        );
+        gui.harness.get_by_label("Cancel").click();
+        wait(&mut gui, "the answer stopping", |gui| {
+            !gui.app().state.agent.busy
+        });
+        assert!(
+            gui.app().state.agent.running(),
+            "stopping the answer stopped the agent as well"
+        );
+        assert!(
+            gui.app().state.agent.status.contains("cancelled"),
+            "the panel does not say the turn was stopped: {:?}",
+            gui.app().state.agent.status
+        );
+        gui.app_mut().state.agent.stop();
+    }
+
     fn answer(gui: &Gui) -> String {
         gui.app()
             .state
@@ -6117,6 +6200,44 @@ mod the_agent_panel {
             warnings(&gui).is_empty(),
             "egui is warning about the panel: {:?}",
             warnings(&gui)
+        );
+    }
+
+    #[test]
+    fn two_thoughts_of_one_length_do_not_share_an_id() {
+        // Every block of thinking is named "Thinking…", and their id used to be built from
+        // the length of what was thought. Two thoughts of equal length therefore landed on
+        // one id, and egui drew its warning box over them — the red frames that covered the
+        // whole transcript the moment a session was restored. A thought being written also
+        // changed length with every chunk, which is the box that flickers while an answer
+        // streams.
+        let mut gui = Gui::new(&[("a.txt", "one\n")], Some("a.txt"));
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        // Two thoughts of one length and different in their words: that is what a restored
+        // conversation holds, and what one id for both would put a warning box over.
+        let words = [
+            "first", "thought", "about", "the", "parser", "in", "the", "file",
+        ];
+        let mut other = words;
+        other[0] = "other";
+        let first = words.join(" ");
+        let second = other.join(" ");
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "the two thoughts of this check have to be one length"
+        );
+        let transcript = &mut gui.app_mut().state.agent.transcript;
+        transcript.push(crate::agent::Line::Thinking(first.to_owned()));
+        transcript.push(crate::agent::Line::Thinking(second.to_owned()));
+        gui.settle();
+
+        assert!(
+            warnings_of(&gui).is_empty(),
+            "egui is warning about the thinking blocks: {:?}",
+            warnings_of(&gui)
         );
     }
 

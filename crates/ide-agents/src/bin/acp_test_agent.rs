@@ -11,13 +11,22 @@
 //! - `choose` — offers three variants and says which one the person picked.
 //! - `read` — asks the client for `a.txt`, and answers with what it was given.
 //! - `write` — asks the client to write `written.txt`, and says whether it could.
-//! - `slow` — waits five seconds before answering.
+//! - `slow` — waits five seconds before answering, and answers `cancelled` instead if
+//!   `session/cancel` arrives while it waits.
 //! - `die` — leaves without answering, the way a crashed agent does.
 //! - anything else — echoes the words back as a single chunk.
 
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
+
+/// Whether the person stopped the turn being written.
+///
+/// An agent is not a request-and-answer pair: `session/cancel` arrives as a
+/// notification *while* a turn is running, so it can only be noticed by a turn that
+/// looks, and only a turn that looks can end as `cancelled` rather than `end_turn`.
+static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Ends a turn, saying how much of the window it used: ACP has no field for this, so the
 /// figure rides in `_meta`, the way a real agent would send it.
@@ -35,6 +44,12 @@ fn turn_answer(session: &str, id: Option<u64>) {
         }
     }));
     answer(id, json!({"stopReason": "end_turn"}));
+}
+
+/// Ends a turn the person stopped: the agent's own word for it, and nothing else.
+fn turn_cancelled(session: &str, id: Option<u64>) {
+    let _ = session;
+    answer(id, json!({"stopReason": "cancelled"}));
 }
 
 /// The models the stand-in offers.
@@ -135,8 +150,19 @@ fn main() {
     // One reader for the whole program: two `lines()` iterators over the same input
     // each keep a buffer of their own, and the answer to a request of ours can land in
     // the buffer nobody is looking at.
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock().lines();
+    // The input is read on a thread of its own, into a queue the turn can look at while it
+    // runs. A stand-in that blocked on its input until the answer was written could never
+    // be stopped: `session/cancel` is a notification, and it arrives *while* the turn is
+    // running (`acp_adapter` reads it in its own loop for the same reason).
+    let (lines_tx, lines_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut next_id = 100;
     // What the conversation is set to, so a test can see a switch reach the agent.
     let mut model = "small".to_owned();
@@ -151,7 +177,7 @@ fn main() {
     // The conversation it is in, and whether it was resumed rather than started.
     let mut session_name = "stand-in-session".to_owned();
     let mut resumed = false;
-    while let Some(Ok(line)) = input.next() {
+    while let Ok(line) = lines_rx.recv() {
         if line.trim().is_empty() {
             continue;
         }
@@ -392,6 +418,8 @@ fn main() {
                 answer(id, json!({}));
             }
             "session/prompt" => {
+                // A new turn is not a stopped one, whatever the last one ended as.
+                CANCELLED.store(false, Ordering::SeqCst);
                 let text = message
                     .get("params")
                     .and_then(|params| params.get("prompt"))
@@ -433,7 +461,7 @@ fn main() {
                                 ]
                             }),
                         );
-                        let allowed = wait_for_answer(&mut input, asked);
+                        let allowed = wait_for_answer(&lines_rx, asked);
                         let allowed = allowed
                             .and_then(|value| value.get("outcome").cloned())
                             .and_then(|outcome| outcome.get("optionId").cloned())
@@ -463,7 +491,7 @@ fn main() {
                                 }
                             }),
                         );
-                        let written = wait_for_answer(&mut input, asked)
+                        let written = wait_for_answer(&lines_rx, asked)
                             .and_then(|value| value.get("content").cloned())
                             .and_then(|content| content.get("answer").cloned())
                             .and_then(|answer| answer.as_str().map(str::to_owned))
@@ -499,7 +527,7 @@ fn main() {
                                 }
                             }),
                         );
-                        let picked = wait_for_answer(&mut input, asked)
+                        let picked = wait_for_answer(&lines_rx, asked)
                             .and_then(|value| value.get("content").cloned())
                             .and_then(|content| content.get("answer").cloned())
                             .and_then(|answer| answer.as_array().cloned())
@@ -561,7 +589,7 @@ fn main() {
                                 }
                             }),
                         );
-                        let chosen = wait_for_answer(&mut input, asked)
+                        let chosen = wait_for_answer(&lines_rx, asked)
                             .and_then(|value| value.get("content").cloned())
                             .and_then(|content| content.get("variant").cloned())
                             .and_then(|variant| variant.as_str().map(str::to_owned))
@@ -577,7 +605,7 @@ fn main() {
                             "fs/read_text_file",
                             json!({"sessionId": session, "path": "a.txt"}),
                         );
-                        let content = wait_for_answer(&mut input, asked)
+                        let content = wait_for_answer(&lines_rx, asked)
                             .and_then(|value| value.get("content").cloned())
                             .and_then(|content| content.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "nothing".to_owned());
@@ -596,7 +624,7 @@ fn main() {
                                 "content": "from the agent\n"
                             }),
                         );
-                        let written = wait_for_answer(&mut input, asked)
+                        let written = wait_for_answer(&lines_rx, asked)
                             .map(|value| !value.is_null())
                             .unwrap_or(false);
                         chunk(&session, if written { "written" } else { "write refused" });
@@ -626,8 +654,39 @@ fn main() {
                         turn_answer(&session, id);
                     }
                     "slow" => {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        turn_answer(&session, id);
+                        // Five seconds of thinking, unless the person stops it. The stop is
+                        // heard while the turn runs — it comes as a notification, and a turn
+                        // that only looks after its answer is a turn that cannot be stopped.
+                        // Nothing else is asked of the stand-in mid-turn; anything else that
+                        // arrives while it thinks is dropped, which is its licence.
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while std::time::Instant::now() < deadline
+                            && !CANCELLED.load(Ordering::SeqCst)
+                        {
+                            match lines_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                                Ok(line) => {
+                                    let method = serde_json::from_str::<Value>(&line)
+                                        .ok()
+                                        .and_then(|message| {
+                                            message
+                                                .get("method")
+                                                .and_then(Value::as_str)
+                                                .map(str::to_owned)
+                                        });
+                                    if method.as_deref() == Some("session/cancel") {
+                                        CANCELLED.store(true, Ordering::SeqCst);
+                                    }
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        if CANCELLED.swap(false, Ordering::SeqCst) {
+                            turn_cancelled(&session, id);
+                        } else {
+                            turn_answer(&session, id);
+                        }
                     }
                     "die" => {
                         std::process::exit(3);
@@ -637,6 +696,11 @@ fn main() {
                         turn_answer(&session, id);
                     }
                 }
+            }
+            // The person stopped the answer: the turn ends as the agent's own word for
+            // it, and the session goes on being a session.
+            "session/cancel" => {
+                CANCELLED.store(true, Ordering::SeqCst);
             }
             _ => {
                 if let Some(id) = id {
@@ -687,9 +751,12 @@ fn request(id: u64, method: &str, params: Value) {
 }
 
 /// The answer to request `id`, reading and ignoring whatever else arrives meanwhile.
-fn wait_for_answer(input: &mut std::io::Lines<std::io::StdinLock<'_>>, id: u64) -> Option<Value> {
-    for line in input.by_ref() {
-        let Ok(line) = line else { return None };
+/// Waits for the client's answer to a question of ours.
+///
+/// The queue is the one the reading thread fills — the same queue a running turn listens
+/// to — so a question asked mid-turn is answered mid-turn rather than after it.
+fn wait_for_answer(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> Option<Value> {
+    while let Ok(line) = lines.recv() {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

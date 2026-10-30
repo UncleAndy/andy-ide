@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 
 use crate::protocol::{
     AgentCommand, ChoiceRequest, ClientCapabilities, ConfigOption, FsCapabilities, Message,
-    PermissionRequest, SessionState, Update, Usage, choice_answer, config_option_params,
-    initialize_params, load_session_params, new_session_params, options_of, permission_answer,
-    prompt_params, session_state, set_mode_params, set_model_params, usage_of,
+    PermissionRequest, SessionState, Update, Usage, cancel_params, choice_answer,
+    config_option_params, initialize_params, load_session_params, new_session_params, options_of,
+    permission_answer, prompt_params, session_state, set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -467,6 +467,16 @@ impl Session {
         ))?;
         self.turn = Some(request);
         Ok(())
+    }
+
+    /// Asks the agent to stop the turn in flight, keeping the session.
+    ///
+    /// Nothing is waited for: the answer to a stopped turn is the turn's own ending —
+    /// `stopReason: cancelled` — and it arrives through [`Session::next_event`] like any
+    /// other. [`Session::stop`] is the other door, the one that ends the session itself.
+    pub fn cancel(&mut self) -> Result<()> {
+        let id = self.session_id.clone();
+        self.send(Message::notification("session/cancel", cancel_params(&id)))
     }
 
     /// Sends a prompt and waits for the turn to end, keeping every update on the way.

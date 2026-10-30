@@ -112,6 +112,8 @@ enum Command {
     Mode(String),
     /// Change one of the settings the agent offers: the level of thinking, in this panel.
     Setting { config: String, value: String },
+    /// Stop the answer being written. The session stays: this ends the turn, not the agent.
+    Cancel,
 }
 
 /// What the worker tells the panel.
@@ -556,6 +558,21 @@ impl AgentState {
         self.started = Some(Instant::now());
         self.took = None;
         self.status = "answering…".to_owned();
+    }
+
+    /// Asks the agent to stop the answer it is writing.
+    ///
+    /// The agent itself stays: this is the door that ends the turn. [`AgentState::stop`] is
+    /// the other one — it ends the session and the process with it.
+    pub fn cancel(&mut self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        if worker.commands.send(Command::Cancel).is_err() {
+            self.status = "the agent is gone".to_owned();
+            return;
+        }
+        self.status = "stopping…".to_owned();
     }
 
     /// How long the turn in flight has been running, or how long the last one took.
@@ -1096,6 +1113,11 @@ fn work(
                     return;
                 }
                 let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+            }
+            Ok(Command::Cancel) => {
+                // Nothing is waited for: the answer to a stopped turn is the turn's own
+                // ending (`cancelled`), and it arrives through the event loop like any other.
+                let _ = session.cancel();
             }
             Ok(Command::Mode(mode)) => {
                 if let Err(error) = session.set_mode(&mode)

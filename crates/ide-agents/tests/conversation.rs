@@ -47,6 +47,44 @@ fn text_of(events: &[Event]) -> String {
 }
 
 #[test]
+fn a_turn_can_be_stopped_without_ending_the_session() {
+    // The person stops the answer, not the agent. The turn ends with the agent's own
+    // word for it, and the conversation is still there to be used afterwards — which is
+    // the whole difference between stopping a turn and stopping the session.
+    let (_dir, mut session) = start(PermissionPolicy::Deny);
+    session.start_turn("slow").expect("the turn started");
+    // The stand-in thinks for five seconds; the stop is asked for while it thinks.
+    std::thread::sleep(Duration::from_millis(300));
+    session.cancel().expect("the agent was asked to stop");
+
+    let mut reason = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && reason.is_none() {
+        if let Some(event) = session.next_event(Duration::from_millis(100))
+            && let Event::Finished(why) = event
+        {
+            reason = Some(why);
+        }
+    }
+    assert_eq!(
+        reason.as_deref(),
+        Some("cancelled"),
+        "the turn did not end as the agent's own word for a stopped turn"
+    );
+
+    // And the session is untouched: the next question is answered as usual.
+    let reason = session
+        .prompt("hello", Duration::from_secs(10))
+        .expect("the session is still usable");
+    assert_eq!(reason, "end_turn", "the session did not answer as usual");
+    let said = text_of(&drain(&mut session));
+    assert!(
+        said.contains("Hello"),
+        "the session did not survive the stop: {said:?}"
+    );
+}
+
+#[test]
 fn a_session_says_hello_and_gets_an_id() {
     let (_dir, session) = start(PermissionPolicy::Deny);
     assert_eq!(session.id(), "stand-in-session");

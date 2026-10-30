@@ -231,6 +231,14 @@ impl App {
                 .show_inside(ui, &mut viewer);
         });
 
+        // Coming to the terminal is coming to the keyboard: a tab that has just come to
+        // the front takes the keys without being clicked first. Leaving it gives them back
+        // (above), and a click elsewhere gives them back too — the panel decides that for
+        // itself, and this only says what coming to it means.
+        if self.state.terminal.shown && !terminal_was_shown {
+            self.state.terminal.focused = true;
+        }
+
         // A link clicked in the terminal: the panel knows the text, the application
         // knows the project and the browser.
         if let Some(link) = self.state.terminal.take_link() {

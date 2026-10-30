@@ -842,7 +842,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
         .auto_shrink([false, false])
         .max_height(height)
         .show(ui, |ui| {
-            for line in &lines {
+            for (index, line) in lines.iter().enumerate() {
                 match line {
                     Line::You(text) => {
                         // The request is a block of its own, square and set in bold: an answer
@@ -870,8 +870,14 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         );
                     }
                     Line::Thinking(thought) => {
+                        // The id is the block's place in the conversation, not the length
+                        // of what was thought: a restored conversation holds thoughts of
+                        // equal length, and a thought being written changes length with
+                        // every chunk — two blocks on one id is what egui draws its warning
+                        // box over (red frames over the transcript after a session is
+                        // restored, and a box that flickers while an answer streams).
                         egui::CollapsingHeader::new("Thinking…")
-                            .id_salt(("thinking", thought.len()))
+                            .id_salt(("thinking", index))
                             .default_open(false)
                             .show(ui, |ui| {
                                 ui.weak(thought);
@@ -1008,9 +1014,13 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     // The foot of the panel: one row under the field, the facts about the agent on the left and
     // the button that sends on the right. The height of the foot is then the height of the field
     // plus one row of a fixed height, and the conversation above it cannot change it.
-    const SEND_ROOM: f32 = 72.0;
+    const SEND_ROOM: f32 = 88.0;
     let row_height = ui.spacing().interact_size.y;
+    // An answer being written is what makes the foot's button a different button: the
+    // person is either sending the next message or finishing with this one.
+    let answering = state.agent.busy;
     let mut pressed = false;
+    let mut cancels = false;
     ui.horizontal(|ui| {
         let facts_room = (ui.available_width() - SEND_ROOM).max(0.0);
         ui.allocate_ui_with_layout(
@@ -1022,11 +1032,27 @@ fn input(ui: &mut Ui, state: &mut AppState) {
             egui::vec2(ui.available_width(), row_height),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                pressed = ui.add_enabled(!busy, egui::Button::new("Send")).clicked();
+                if answering {
+                    // Stopping the answer is not stopping the agent. The turn is asked to
+                    // end (ACP `session/cancel`) and the process stays where it is — the
+                    // button is the answer's door, not the session's.
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text("Stop this answer; the agent stays running")
+                        .clicked()
+                    {
+                        cancels = true;
+                    }
+                } else if ui.add_enabled(!busy, egui::Button::new("Send")).clicked() {
+                    pressed = true;
+                }
             },
         );
     });
 
+    if cancels {
+        state.agent.cancel();
+    }
     if enter || pressed {
         state.agent.send();
         // Sending is not leaving the field: the next message is typed here, not into a file.
