@@ -120,52 +120,116 @@ fn render(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
     egui_commonmark::CommonMarkViewer::new().show(ui, cache, markdown);
 }
 
-/// Draws a table through egui's own grid, with a ceiling on its columns, a band on every
-/// other row and lines between the columns and the rows.
+/// Draws a table: the columns a share of their own, a band on every other row, and lines
+/// between the columns and the rows.
+///
+/// The columns are laid out here rather than by `egui::Grid`, and the reason is measured: a
+/// grid measures a cell in the room that cell had *last* frame, and in the first frame that
+/// room is `min_cell_size` — forty odd points wide. A cell with a sentence in it is therefore
+/// measured forty points wide, wrapped into a pillar one word per line (a row 255 points tall,
+/// measured), and the column keeps the narrow width it was born with.
+///
+/// So the room a column wants is remembered from the frame before: what the widest cell of
+/// that column actually took when it was given its share. Until a table has been drawn once,
+/// the columns share the room equally; from then on they are as wide as their words, and only
+/// shrunk — in proportion — when together they want more than they have.
 fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         let gap = ui.spacing().item_spacing.x;
-        let room = ui.available_width();
-        let share = ((room - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
-        // The bands are drawn here rather than by the grid: a grid paints them from the row
-        // heights of the frame before, and with a cell that wraps its bands drift away from
-        // the words they belong to. A place for each band is taken before the words are drawn,
-        // so the bands stay behind the text — a band of every other row, the heading counted.
+        let widths = column_widths(ui, columns, gap);
+
+        // A place for each band is taken before the words are drawn, so the bands stay behind
+        // the text — a band of every other row, the heading counted.
         let slots: Vec<egui::layers::ShapeIdx> = (0..table.rows.len() / 2)
             .map(|_| ui.painter().add(egui::Shape::Noop))
             .collect();
-        let cells = egui::Grid::new(ui.id())
-            .num_columns(columns)
-            .max_col_width(share)
-            .show(ui, |ui| {
-                let mut rows: Vec<Vec<egui::Rect>> = Vec::new();
-                for (index, row) in table.rows.iter().enumerate() {
-                    let mut line: Vec<egui::Rect> = Vec::new();
-                    for column in 0..columns {
-                        let cell = row.get(column).map(String::as_str).unwrap_or_default();
-                        let drawn = ui.push_id((index, column), |ui| {
-                            if cell.trim().is_empty() {
-                                ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
-                            } else if table.heading && index == 0 && plain(cell) {
-                                // A heading takes the room its words need and no more: a cell
-                                // that fills its column is what makes a column of two short
-                                // words as wide as the widest cell in the table.
-                                bold_label(ui, cell, false);
-                            } else {
-                                render(ui, cache, cell);
-                            }
-                        });
-                        line.push(drawn.response.rect);
+
+        let mut rows: Vec<Vec<egui::Rect>> = Vec::new();
+        for (index, row) in table.rows.iter().enumerate() {
+            let mut line: Vec<egui::Rect> = Vec::new();
+            ui.horizontal_top(|ui| {
+                for (column, width) in widths.iter().enumerate().take(columns) {
+                    let cell = row.get(column).map(String::as_str).unwrap_or_default();
+                    let width = *width;
+                    let drawn = ui.allocate_ui_with_layout(
+                        egui::vec2(width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.push_id((index, column), |ui| {
+                                if cell.trim().is_empty() {
+                                    ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
+                                } else if table.heading && index == 0 && plain(cell) {
+                                    // A heading takes the room its words need and no more.
+                                    bold_label(ui, cell, false);
+                                } else {
+                                    render(ui, cache, cell);
+                                }
+                            });
+                        },
+                    );
+                    // What the cell did not use is left as room, so the columns of one row
+                    // line up with the columns of the next.
+                    if column + 1 < columns {
+                        let used = drawn.response.rect.width().min(width);
+                        let left = ui.available_width();
+                        ui.add_space((width - used).min(left));
                     }
-                    rows.push(line);
-                    ui.end_row();
+                    line.push(drawn.response.rect);
                 }
-                rows
-            })
-            .inner;
-        bands_and_lines(ui, &slots, &cells);
+            });
+            rows.push(line);
+        }
+        remember_widths(ui, columns, &rows, &widths);
+        bands_and_lines(ui, &slots, &rows);
     });
+}
+
+/// How wide each column is to be drawn: what it wanted last frame, or an equal share of the
+/// room when the table is drawn for the first time.
+fn column_widths(ui: &Ui, columns: usize, gap: f32) -> Vec<f32> {
+    let usable = (ui.available_width() - gap * columns.saturating_sub(1) as f32).max(1.0);
+    let wanted: Vec<f32> = ui
+        .ctx()
+        .data(|data| data.get_temp(ui.id().with("column-widths")))
+        .unwrap_or_default();
+    if wanted.len() != columns {
+        return vec![usable / columns as f32; columns];
+    }
+    let total: f32 = wanted.iter().sum();
+    if total <= usable || total <= 0.0 {
+        return wanted;
+    }
+    // Together they want more than there is: each keeps its share of what there is.
+    wanted
+        .iter()
+        .map(|width| (width / total * usable).max(24.0))
+        .collect()
+}
+
+/// Remembers how wide the columns turned out, for the next frame to lay out.
+///
+/// A frame is asked for when what the columns took differs from what they were given: the
+/// table is then drawn again with the measured widths, and until it does the first frame's
+/// equal shares are what is on screen.
+fn remember_widths(ui: &Ui, columns: usize, rows: &[Vec<egui::Rect>], given: &[f32]) {
+    let wanted: Vec<f32> = (0..columns)
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|rect| rect.width())
+                .fold(0.0, f32::max)
+        })
+        .collect();
+    let settling = wanted
+        .iter()
+        .zip(given)
+        .any(|(wanted, given)| (wanted - given).abs() > 0.5);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(ui.id().with("column-widths"), wanted));
+    if settling {
+        ui.ctx().request_repaint();
+    }
 }
 
 /// The bands and the lines of a table, placed from what the cells actually took.

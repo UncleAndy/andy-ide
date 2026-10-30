@@ -6506,7 +6506,7 @@ mod the_agent_panel {
 
     fn table_parts(gui: &Gui) -> TableParts {
         let panel = gui.app().state.agent.shown_rect.expect("the panel");
-        let narrow = panel.width() * 0.5;
+        let narrow = panel.width() - 8.0;
         let left = panel.left() + panel.width() * 0.4;
         let mut parts = TableParts {
             words: Vec::new(),
@@ -6582,7 +6582,7 @@ mod the_agent_panel {
         wait(&mut gui, "the agent starting", |gui| {
             gui.app().state.agent.status.starts_with("ready")
         });
-        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words to wrap onto two lines |\n| second row | two |\n| third row | a cell long enough that it wraps as well somewhere |\n";
+        let table = "| what | why |\n| --- | --- |\n| first row | a cell with enough words in it to wrap onto two lines and a bit more of them for certain |\n| second row | two |\n| third row | another cell long enough that it wraps as well, twice over and then once more |\n";
         gui.app_mut().state.agent.transcript.clear();
         gui.app_mut()
             .state
