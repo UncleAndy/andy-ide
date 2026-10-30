@@ -365,11 +365,17 @@ fn bands_and_lines(
 /// A block of its own fills the panel; a cell of a table must not, or a column of two short
 /// words comes out as wide as the widest column of the table.
 pub(super) fn bold_label(ui: &mut Ui, text: &str, fill: bool) {
+    let colour = ui.visuals().strong_text_color();
+    bold_label_in(ui, text, fill, colour);
+}
+
+/// The same line of bold words, in a colour of the caller's choosing: the words of a person are
+/// not the window's own text, and the colour is how the block says so.
+pub(super) fn bold_label_in(ui: &mut Ui, text: &str, fill: bool, colour: egui::Color32) {
     /// How far the second pass is shifted: enough to thicken, not enough to smear.
     const THICKEN: f32 = 0.6;
 
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let colour = ui.visuals().strong_text_color();
     let galley = ui
         .painter()
         .layout(text.to_owned(), font, colour, ui.available_width());

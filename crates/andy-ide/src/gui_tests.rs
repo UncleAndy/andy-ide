@@ -7282,6 +7282,16 @@ mod the_agent_panel {
             let (colour, background) = found.unwrap_or_else(|| {
                 panic!("the words of the person were not drawn in {theme:?}");
             });
+            // A colour of their own, not the window's ordinary text: picking a request out of a
+            // conversation is something done by looking.
+            let plain = match theme {
+                ide_core::Theme::Dark => egui::Visuals::dark().strong_text_color(),
+                ide_core::Theme::Light => egui::Visuals::light().strong_text_color(),
+            };
+            assert_ne!(
+                colour, plain,
+                "in the {theme:?} theme the words of the person are painted like every other word"
+            );
             // What the colours really look like: the block's fill is drawn half-transparent over
             // the window, and the words may be drawn over the block in turn.
             let window = match theme {

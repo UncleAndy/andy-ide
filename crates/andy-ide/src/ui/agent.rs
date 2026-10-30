@@ -63,6 +63,20 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
 const ASKING: egui::Color32 = egui::Color32::from_rgb(226, 192, 96);
 const CHOOSING: egui::Color32 = egui::Color32::from_rgb(140, 190, 220);
 
+/// The colour the words of a person are set in.
+///
+/// Amber in the dark theme, where a warm colour reads as *this is what was asked*, and a dark
+/// amber in the light theme, where the same colour would wash out against the pale block. Chosen
+/// against the block the words stand in — a shade of the theme now — rather than against the
+/// window: a colour that holds up on the panel can still fail on the block.
+fn request_text(ui: &Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(232, 198, 108)
+    } else {
+        egui::Color32::from_rgb(122, 84, 12)
+    }
+}
+
 /// Whether the key was pressed with nothing else held.
 ///
 /// egui's `consume_key` asks for the modifiers a shortcut *needs* and lets others be held
@@ -825,7 +839,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                             .inner_margin(egui::Margin::symmetric(8, 5))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                super::markdown::bold_label(ui, text, true);
+                                super::markdown::bold_label_in(ui, text, true, request_text(ui));
                             });
                         ui.add_space(2.0);
                     }
