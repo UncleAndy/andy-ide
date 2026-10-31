@@ -555,11 +555,22 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             // The row says the name the conversation is known by; the id and the
                             // date are in the hint, where they are read when wanted and take no
                             // room when they are not.
-                            let hint = if when.is_empty() {
-                                id.clone()
-                            } else {
-                                format!("{id}  ·  {when}")
-                            };
+                            // The hint says which conversation this is and where it was had:
+                            // the list now holds every surface, and the id alone does not tell a
+                            // person whether it is the one they remember.
+                            let mut hint = id.clone();
+                            if let Some(where_it_lives) = state
+                                .agent
+                                .sessions
+                                .iter()
+                                .find(|session| session.id == *id)
+                                .and_then(|session| session.cwd.clone())
+                            {
+                                hint.push_str(&format!("  ·  {where_it_lives}"));
+                            }
+                            if !when.is_empty() {
+                                hint.push_str(&format!("  ·  {when}"));
+                            }
                             let button = ui
                                 .add_enabled(
                                     !current,

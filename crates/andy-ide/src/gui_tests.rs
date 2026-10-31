@@ -7381,6 +7381,19 @@ mod the_agent_panel {
         wait(&mut gui, "the conversations to arrive", |gui| {
             painted_text(gui, "renaming a symbol across crates")
         });
+        // The conversations of other places are here as well: the list is not asked for by
+        // directory (Hermes filters by `cwd` when one is named, which hides every conversation had
+        // on another surface — the stand-in answers an empty page to a filtered question, so this
+        // assertion is the one that caught it).
+        assert!(
+            gui.app()
+                .state
+                .agent
+                .sessions
+                .iter()
+                .any(|session| session.cwd.as_deref() == Some("/home/agent/another-project")),
+            "the list came back without the conversations that live elsewhere"
+        );
         // The conversation in front is there too, though the stand-in did not name it: Hermes
         // lists a conversation only once it has history (acp_adapter/session.py skips the ones
         // with none), and the one just opened has none.

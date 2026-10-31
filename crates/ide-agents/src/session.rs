@@ -407,17 +407,24 @@ impl Session {
         Ok(())
     }
 
-    /// The conversations the agent knows of, for this project.
+    /// Every conversation the agent knows of, whichever surface it was had on.
     ///
     /// Asked in pages: an agent with a long history answers with as many as fit and a cursor, and
     /// the panel wants the whole list rather than the first screen of it.
+    ///
+    /// ``cwd`` is deliberately left out. Hermes filters the list by the directory when one is
+    /// named (`acp_adapter/session.py::list_sessions`: `_matches` compares the session's own cwd),
+    /// and it writes a fresh one into a conversation when it is loaded — so asking by directory
+    /// hides every conversation had on another surface (Telegram, the desktop app) and every
+    /// conversation of this project that was opened elsewhere. The person wants the conversations
+    /// they had, not the ones this window happened to start.
     pub fn list_sessions(&mut self) -> Result<Vec<SessionInfo>> {
         let mut all: Vec<SessionInfo> = Vec::new();
         let mut cursor: Option<String> = None;
         while all.len() < SESSIONS_MAX {
             let answer = self.ask(
                 "session/list",
-                list_sessions_params(Some(&self.root), cursor.as_deref()),
+                list_sessions_params(None, cursor.as_deref()),
                 LIST_SESSIONS,
             )?;
             let (mut page, next) = sessions_of(&answer);

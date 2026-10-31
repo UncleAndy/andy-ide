@@ -220,12 +220,17 @@ fn main() {
             // before it picks one. Hermes answers from its own store with the same fields
             // (`acp_adapter/server.py::list_sessions`), two at a time with a cursor.
             "session/list" => {
+                // A directory filter, the way Hermes has one: a session is offered only when its
+                // own cwd is the one asked about. The conversations here were had elsewhere — the
+                // same reason a real list looked empty next to the project's own window.
                 let asked = message
                     .get("params")
                     .and_then(|params| params.get("cwd"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
+                    .and_then(Value::as_str);
+                if asked.is_some() {
+                    answer(id, json!({"sessions": [], "nextCursor": null}));
+                    continue;
+                }
                 let cursor = message
                     .get("params")
                     .and_then(|params| params.get("cursor"))
@@ -254,7 +259,12 @@ fn main() {
                     .skip(start)
                     .take(2)
                     .map(|(id, title, at)| {
-                        json!({"sessionId": id, "cwd": asked, "title": title, "updatedAt": at})
+                        json!({
+                            "sessionId": id,
+                            "cwd": "/home/agent/another-project",
+                            "title": title,
+                            "updatedAt": at
+                        })
                     })
                     .collect();
                 let next = if start + page.len() < kept.len() {
