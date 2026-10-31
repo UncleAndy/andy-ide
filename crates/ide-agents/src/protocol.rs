@@ -602,6 +602,56 @@ pub fn set_mode_params(session: &str, mode: &str) -> Value {
     json!({"sessionId": session, "modeId": mode})
 }
 
+/// The mark Hermes puts on a row it wrote itself, read as the aside it is.
+///
+/// The runtime hands a background-process receipt, a wake-up, a model switch or an internal
+/// note to the model as `role="user"`, so they replay as user chunks, and a panel that drew
+/// them as the words of the person put words in their mouth. `_meta.hermes.notice` is how a
+/// surface is told that the row belongs to Hermes and not to the person
+/// (`acp_adapter/server.py::_history_notice_meta`). The line to draw is the compact text kept
+/// beside the row: the raw text is a wall meant for the model, and a row whose line was not
+/// kept falls back to its own first line, never to the whole of it.
+fn notice(update: &Value, raw: &str) -> Option<Update> {
+    let mark = update.get("_meta")?.get("hermes")?.get("notice")?;
+    let kind = mark
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let kept = mark
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let text = if kept.is_empty() {
+        first_line(raw)
+    } else {
+        kept.to_owned()
+    };
+    Some(Update::Notice { kind, text })
+}
+
+/// The first line of a message, as much of it as one aside can hold.
+///
+/// Public because the panel draws the same fallback for a service row of an agent that did not
+/// mark it.
+pub fn first_line(text: &str) -> String {
+    /// How many characters an aside holds before it stops being one.
+    const ROOM: usize = 160;
+
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= ROOM {
+        return line.to_owned();
+    }
+    let mut cut: String = line.chars().take(ROOM).collect();
+    cut.push('…');
+    cut
+}
+
 /// One thing the agent wants the editor to know during a turn.
 ///
 /// `session/update` carries a tagged union whose tag is `sessionUpdate`, and the variants
@@ -615,6 +665,15 @@ pub enum Update {
     /// conversation belongs in the transcript too: a panel that drew every replay as the
     /// agent's answer would read as a conversation that was all answers.
     You(String),
+    /// A row Hermes wrote itself, replayed with the mark that says so: a background-process
+    /// receipt, a wake-up, an internal note. It belongs to the agent and not to the person,
+    /// and it is drawn as an aside (`from_value`, `notice`).
+    Notice {
+        /// What kind of service row it is, as Hermes names it (`process_complete`, …).
+        kind: String,
+        /// The short line kept for a surface to paint.
+        text: String,
+    },
     /// A piece of the agent's reasoning: shown folded away, because it is the working
     /// out and not the answer.
     Thinking(String),
@@ -678,7 +737,12 @@ impl Update {
                     .and_then(|content| content.get("text"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                Update::You(text.to_owned())
+                // The mark of a row Hermes wrote itself, and the words of the person as
+                // they come without it.
+                match notice(update, text) {
+                    Some(aside) => aside,
+                    None => Update::You(text.to_owned()),
+                }
             }
             "tool_call" | "tool_call_update" => Update::ToolCall {
                 id: update
@@ -1186,6 +1250,47 @@ mod tests {
         assert_eq!(
             agent,
             Update::Text("Because air scatters blue light.".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_row_hermes_wrote_itself_is_read_as_an_aside() {
+        // The runtime hands a background-process receipt to the model as a `role="user"` row,
+        // and Hermes marks it when it replays it
+        // (`acp_adapter/server.py::_history_notice_meta`): the line to draw is the compact
+        // text kept beside the row, and the row itself is a wall meant for the model.
+        let marked = Update::from_value(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text":
+                "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
+            "_meta": {"hermes": {"notice": {
+                "kind": "process_complete", "text": "Background Process Finished: make"
+            }}}
+        }));
+        assert_eq!(
+            marked,
+            Update::Notice {
+                kind: "process_complete".to_owned(),
+                text: "Background Process Finished: make".to_owned(),
+            },
+            "the service row was read as the words of the person"
+        );
+
+        // A row whose short line was not kept falls back to its own first line, never to the
+        // whole of it.
+        let bare = Update::from_value(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text":
+                "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
+            "_meta": {"hermes": {"notice": {"kind": "internal_notification", "text": ""}}}
+        }));
+        assert_eq!(
+            bare,
+            Update::Notice {
+                kind: "internal_notification".to_owned(),
+                text: "[IMPORTANT: Background process proc_1 completed normally (exit code 0)."
+                    .to_owned(),
+            }
         );
     }
 

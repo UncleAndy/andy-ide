@@ -5531,6 +5531,103 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_row_the_agent_wrote_itself_is_an_aside_and_not_the_words_of_the_person() {
+        // The runtime hands a background-process receipt to the model as a `role="user"` row,
+        // so the replay used to send it as an ordinary user chunk: a restored conversation
+        // showed a wall of service text as the words of the person. Hermes marks such a row,
+        // and the panel draws the short line it was given, as an aside of the agent. The
+        // stand-in sends both shapes — the mark of a newer agent and the bare receipt of an
+        // older one — when it is asked for them (`ACP_TEST_NOTICES`).
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n\n\
+                 [agent.env]\nACP_TEST_NOTICES = \"1\"\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            place.join("agent-session.json"),
+            "{\"agent\":\"stand-in\",\"session\":\"kept-42\"}\n",
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the conversation coming back", |gui| {
+            gui.app().state.agent.status.contains("resumed")
+        });
+
+        let lines = gui.app().state.agent.transcript.clone();
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::Notice { kind, text }
+                    if kind == "process_complete" && text == "Background Process Finished: make"
+            )),
+            "the marked service row is not a line of its own: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::Notice { kind, text }
+                    if kind == "notice"
+                        && text == "[IMPORTANT: Background process proc_2 completed normally (exit code 0)."
+            )),
+            "a receipt of an agent that does not mark its rows came back as the words of the \
+person: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::You(text) if text.contains("Background process")
+            )),
+            "the service row came back as the words of the person: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::You(text) if text == "why is the sky blue?"
+            )),
+            "the person lost their own words: {lines:?}"
+        );
+
+        // And it is painted where the conversation is, in the weak line the panel gives the
+        // business of the agent.
+        let panel = gui.app().state.agent.shown_rect.expect("the panel");
+        let drawn = gui.harness.output().shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(text)
+                if text.galley.job.text.contains("Background Process Finished")
+                    && text.pos.x >= panel.left()
+                    && text.pos.y >= panel.top()
+                    && text.pos.y <= panel.bottom())
+        });
+        assert!(drawn, "the aside is not drawn in the panel");
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
     fn a_new_session_does_not_pick_up_the_conversation_the_project_kept() {
         // `Start` resumes what the project saved. "New session" must end that, including
         // the copy on disk: otherwise the next launch brings the old conversation back.

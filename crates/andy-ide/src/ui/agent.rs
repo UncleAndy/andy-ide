@@ -1123,6 +1123,13 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                     Line::Note(text) => {
                         ui.colored_label(egui::Color32::from_rgb(200, 120, 90), text);
                     }
+                    Line::Notice { kind, text } => {
+                        // A service row of the conversation: the weak aside the panel gives
+                        // the business of the agent, with the kind of the row under the
+                        // pointer. Never a block, because it is not the words of the person.
+                        ui.weak(format!("  ↳ {text}"))
+                            .on_hover_text(format!("hermes: {kind}"));
+                    }
                 }
             }
         });

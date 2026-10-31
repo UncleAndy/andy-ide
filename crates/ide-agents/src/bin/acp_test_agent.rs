@@ -363,6 +363,40 @@ fn main() {
                         }
                     }));
                 }
+                // Rows Hermes wrote itself, for the checks that ask for them: an ordinary
+                // replay is what an agent sends, and a check that counts what is painted does
+                // not want extra lines.
+                if std::env::var_os("ACP_TEST_NOTICES").is_some() {
+                    // A row Hermes wrote itself — a background-process receipt — travels with the
+                    // mark that says so, and the panel draws the short line beside it instead of
+                    // the wall of text the model was given
+                    // (`acp_adapter/server.py::_history_notice_meta`).
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_name,
+                            "update": {
+                                "sessionUpdate": "user_message_chunk",
+                                "content": {"type": "text", "text": "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
+                                "_meta": {"hermes": {"notice": {"kind": "process_complete", "text": "Background Process Finished: make"}}}
+                            }
+                        }
+                    }));
+                    // And the shape an agent older than the mark sends: the same receipt as an
+                    // ordinary user chunk, which the panel has only its opening words to go by.
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_name,
+                            "update": {
+                                "sessionUpdate": "user_message_chunk",
+                                "content": {"type": "text", "text": "[IMPORTANT: Background process proc_2 completed normally (exit code 0).\nOutput:\nall good]"}
+                            }
+                        }
+                    }));
+                }
                 // A session whose work was still running when the agent was stopped
                 // comes back writing: the words arrive with no turn of the client's
                 // asking for them, which is the case the panel reads from what it hears.

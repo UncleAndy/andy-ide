@@ -80,6 +80,15 @@ pub enum Event {
     Text(String),
     /// The person's own words from a replayed history, to draw as theirs.
     You(String),
+    /// A row Hermes wrote itself, replayed with the mark that says so: an aside of the
+    /// agent, never the words of the person
+    /// (`acp_adapter/server.py::_history_notice_meta`).
+    Notice {
+        /// What kind of service row it is, as Hermes names it.
+        kind: String,
+        /// The short line kept for a surface to paint.
+        text: String,
+    },
     /// A piece of the agent's reasoning, to be kept apart from the answer and folded
     /// away: a person reading an answer wants the answer, and wants the reasoning to
     /// be there when they ask for it.
@@ -797,6 +806,7 @@ impl Session {
                 match Update::from_value(update) {
                     Update::Text(text) => Some(Event::Text(text)),
                     Update::You(text) => Some(Event::You(text)),
+                    Update::Notice { kind, text } => Some(Event::Notice { kind, text }),
                     Update::Thinking(thought) => Some(Event::Thinking(thought)),
                     Update::ToolCall { id, title, status } => {
                         Some(Event::ToolCall { id, title, status })
