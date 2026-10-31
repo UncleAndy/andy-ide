@@ -6,6 +6,7 @@ mod editor;
 mod git;
 #[cfg(test)]
 mod gui_tests;
+mod log;
 mod lsp;
 mod rename;
 mod state;
@@ -14,8 +15,6 @@ mod test_serial;
 mod ui;
 
 use std::path::PathBuf;
-
-use tracing_subscriber::EnvFilter;
 
 /// Command line of the application.
 #[derive(Debug, Default)]
@@ -56,11 +55,8 @@ fn options(config: &ide_core::Config) -> eframe::NativeOptions {
 }
 
 fn main() -> eframe::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("ANDY_IDE_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // The log of the window: a file that is rotated at ten megabytes, and the standard error.
+    log::init();
 
     let args = Args::parse(std::env::args().skip(1));
     tracing::info!(
