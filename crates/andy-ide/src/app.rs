@@ -375,10 +375,10 @@ impl App {
 
     /// Tells the person, on their desk, whenever the panel has something to say to them.
     ///
-    /// Nothing is kept back for where the person happens to be looking: being told does not depend on
-    /// the window having the keyboard or on the panel standing in front. That the question is already
-    /// on screen is no reason to say nothing — the person asked to be told, and a note held back for a
-    /// moment that has passed would be a notification about the past.
+    /// Nothing is asked first, and nothing is kept back: a want that arrives is sent, every time. No
+    /// setting, no question of where the person is looking, no question of whether the panel is already
+    /// saying it — a notice held back for a moment that has passed would be a notification about the
+    /// past, and deciding for the person what they can see is not the window's business.
     fn tell_the_person(&mut self, ui: &egui::Ui) {
         let wanted = self.state.agent.take_wanted();
         if wanted.is_empty() {
@@ -390,19 +390,13 @@ impl App {
             // The circumstances are written down beside the sending: a notification that surprises
             // the person is otherwise hard to place, and "the notification did not appear" cannot be
             // told from "the agent never asked" without a line that says the want arrived at all.
-            let shown = crate::notify::wanted(self.state.notifications);
             tracing::info!(
                 ?want,
                 %detail,
-                setting = self.state.notifications,
                 focused,
                 panel_in_front,
-                shown,
                 "the panel wants the person"
             );
-            if !shown {
-                continue;
-            }
             let (title, body) = want.message(&detail);
             // What the desk did is said in the window as well as in the log: the person was looking
             // elsewhere when it mattered, so when they come back the only place that can tell them
@@ -752,12 +746,6 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             if ui.checkbox(&mut state.hints, "Show hints").changed() {
                 state.status = "hints toggled".to_owned();
             }
-            if ui
-                .checkbox(&mut state.notifications, "system notifications")
-                .changed()
-            {
-                state.status = "system notifications toggled".to_owned();
-            }
             if ui.button("find in file	Ctrl+F").clicked() {
                 crate::ui::search::open(state, false);
             }
@@ -892,7 +880,7 @@ mod tests {
             written.shown()
         );
         let (title, body) = written.shown().remove(0);
-        assert!(title.contains("waiting"), "the title: {title}");
+        assert_eq!(title, "Ждём вашего ответа", "the title: {title}");
         assert_eq!(body, "Run the tests?", "the body is not what the panel had");
         assert!(
             app.state.agent.wanted.is_empty(),
@@ -925,27 +913,6 @@ mod tests {
             app.state.status.contains("no session bus in reach"),
             "the window did not say why: {:?}",
             app.state.status
-        );
-    }
-
-    #[test]
-    fn the_view_switch_keeps_the_desk_quiet() {
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        let written = app.watch_notifications();
-        app.state.notifications = false;
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
-
-        draw_frame_with_focus(&mut app, false);
-
-        assert!(
-            written.shown().is_empty(),
-            "the switch was off and the desk was told anyway: {:?}",
-            written.shown()
         );
     }
 

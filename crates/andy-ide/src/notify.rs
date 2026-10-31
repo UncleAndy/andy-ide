@@ -23,21 +23,18 @@ pub enum Want {
 impl Want {
     /// What the notification says, with the detail the panel has for it.
     pub fn message(self, detail: &str) -> (String, String) {
+        // Plain words, because the notification is read through a glance at a corner of the screen:
+        // what the turn is over means is carried by the fact that it appeared at all.
         let title = match self {
-            Want::Asks => "andy-ide: the agent is waiting for you",
-            Want::Finished => "andy-ide: the agent has finished",
+            Want::Asks => "Ждём вашего ответа",
+            Want::Finished => "Ответ готов",
         };
-        (title.to_owned(), detail.to_owned())
+        let body = match self {
+            Want::Asks => detail.to_owned(),
+            Want::Finished => String::new(),
+        };
+        (title.to_owned(), body)
     }
-}
-
-/// Whether a want is worth showing at all.
-///
-/// The setting is the person's and nothing else is: a notification is shown when the agent asks or
-/// finishes, wherever the window happens to be and whatever stands in front of it. Asking whether the
-/// panel is already saying it would be deciding for the person what they can see.
-pub fn wanted(setting: bool) -> bool {
-    setting
 }
 
 /// Somewhere a notification can be shown.
@@ -198,22 +195,10 @@ mod tests {
     }
 
     #[test]
-    fn the_setting_is_the_only_thing_that_keeps_a_notice_back() {
-        assert!(
-            !wanted(false),
-            "the setting was off and the notice was shown"
-        );
-        assert!(
-            wanted(true),
-            "the setting was on and the notice was kept back"
-        );
-    }
-
-    #[test]
     fn each_want_says_what_it_is_about() {
         let (title, body) = Want::Asks.message("Run the tests?");
-        assert!(
-            title.contains("waiting"),
+        assert_eq!(
+            title, "Ждём вашего ответа",
             "a question does not say that it waits: {title}"
         );
         assert_eq!(
@@ -221,12 +206,15 @@ mod tests {
             "the question itself is not the body"
         );
 
-        let (title, body) = Want::Finished.message("ready");
-        assert!(
-            title.contains("finished"),
+        let (title, body) = Want::Finished.message("end_turn");
+        assert_eq!(
+            title, "Ответ готов",
             "a finished turn does not say so: {title}"
         );
-        assert_eq!(body, "ready");
+        assert!(
+            body.is_empty(),
+            "the name of the event is not something to read: {body:?}"
+        );
     }
 
     #[test]

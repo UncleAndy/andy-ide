@@ -131,9 +131,6 @@ pub struct AppState {
     /// Whether the hints that follow the pointer are on: the switch lives in the
     /// View menu, and with it off the pointer is not watched at all.
     pub hints: bool,
-    /// Whether the desk is told that the agent waits for an answer or that a turn ended: the switch
-    /// lives in the View menu and is remembered with the project.
-    pub notifications: bool,
     /// Whether the editor tab was drawn this frame: the hint belongs to the text under
     /// the pointer, and there is no such text while the panel is off screen.
     pub(crate) editor_drawn: bool,
@@ -223,7 +220,6 @@ impl AppState {
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
             hints: true,
-            notifications: true,
             editor_drawn: false,
             blame: None,
             rename: crate::ui::rename::Rename::new(),
@@ -1076,7 +1072,6 @@ impl AppState {
             ("hidden-files".to_owned(), self.tree.show_hidden),
             ("preview".to_owned(), self.preview_open),
             ("hints".to_owned(), self.hints),
-            ("notifications".to_owned(), self.notifications),
         ])
     }
 
@@ -1098,9 +1093,6 @@ impl AppState {
         }
         if let Some(value) = view.get("hints") {
             self.hints = *value;
-        }
-        if let Some(value) = view.get("notifications") {
-            self.notifications = *value;
         }
     }
 
