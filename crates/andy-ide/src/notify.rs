@@ -37,6 +37,25 @@ impl Want {
     }
 }
 
+/// Sends one notification from this very process, before anything else is drawn.
+///
+/// Kept for the question the probes from a terminal cannot answer: whether the desk is willing to show
+/// a notification sent by *this* process. The probes appear, the window's own do not, and the two
+/// differ in their sender — so the same call is made here, by the window, at a moment when nothing
+/// else is happening. Run the window with `ANDY_IDE_NOTIFY_PROBE=1` and see whether it appears.
+pub fn probe() {
+    let sent = notify_rust::Notification::new()
+        .summary("ПРОБА из процесса окна")
+        .body("это уведомление отправлено самим andy-ide")
+        .show()
+        .map(|handle| handle.id());
+    tracing::info!(
+        sent = ?sent,
+        bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
+        "the window's own probe was sent"
+    );
+}
+
 /// Somewhere a notification can be shown.
 pub trait Surface: Send {
     /// Show one, or say why it could not be shown.

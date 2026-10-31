@@ -59,6 +59,10 @@ fn main() -> eframe::Result<()> {
     // The log of the window: a file that is rotated at ten megabytes, and the standard error.
     log::init();
 
+    if std::env::var_os("ANDY_IDE_NOTIFY_PROBE").is_some() {
+        crate::notify::probe();
+    }
+
     let args = Args::parse(std::env::args().skip(1));
     // Who this window is and which desk it can reach, said once at the start. A notification the
     // desk takes and never shows is otherwise a mystery: the id it answers with says a daemon heard,
