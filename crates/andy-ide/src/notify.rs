@@ -33,10 +33,11 @@ impl Want {
 
 /// Whether a want is worth showing at all.
 ///
-/// The setting is the person's; the rest is the circumstances. A panel in front of them, in a window
-/// that has the keyboard, is already saying it — a notification then is the same news twice.
-pub fn wanted(setting: bool, focused: bool, panel_in_front: bool) -> bool {
-    setting && !(focused && panel_in_front)
+/// The setting is the person's and nothing else is: a notification is shown when the agent asks or
+/// finishes, wherever the window happens to be and whatever stands in front of it. Asking whether the
+/// panel is already saying it would be deciding for the person what they can see.
+pub fn wanted(setting: bool) -> bool {
+    setting
 }
 
 /// Somewhere a notification can be shown.
@@ -196,30 +197,15 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_in_front_of_a_person_is_its_own_notification() {
+    fn the_setting_is_the_only_thing_that_keeps_a_notice_back() {
         assert!(
-            !wanted(true, true, true),
-            "the panel was in front and the window had the keyboard: the news is already there"
-        );
-    }
-
-    #[test]
-    fn a_person_looking_elsewhere_is_told() {
-        assert!(
-            wanted(true, false, true),
-            "the window does not have the keyboard: this is the case the notifications are for"
+            !wanted(false),
+            "the setting was off and the notice was shown"
         );
         assert!(
-            wanted(true, true, false),
-            "the window is in front but the panel is not: the agent is waiting out of sight"
+            wanted(true),
+            "the setting was on and the notice was kept back"
         );
-    }
-
-    #[test]
-    fn the_setting_turns_the_notifications_off() {
-        assert!(!wanted(false, false, false));
-        assert!(!wanted(false, true, false));
-        assert!(!wanted(false, false, true));
     }
 
     #[test]

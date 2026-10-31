@@ -373,12 +373,12 @@ impl App {
         self.tell_the_person(ui);
     }
 
-    /// Tells the person, on their desk, what the panel would otherwise only say on screen.
+    /// Tells the person, on their desk, whenever the panel has something to say to them.
     ///
-    /// A panel in front of them, in a window that has the keyboard, is already saying it, so nothing
-    /// is shown then: the case this is for is a person reading the editor, or away from the machine.
-    /// What waits to be told is taken even when nothing is shown — a note kept for a moment that has
-    /// passed would be a notification about the past.
+    /// Nothing is kept back for where the person happens to be looking: being told does not depend on
+    /// the window having the keyboard or on the panel standing in front. That the question is already
+    /// on screen is no reason to say nothing — the person asked to be told, and a note held back for a
+    /// moment that has passed would be a notification about the past.
     fn tell_the_person(&mut self, ui: &egui::Ui) {
         let wanted = self.state.agent.take_wanted();
         if wanted.is_empty() {
@@ -387,10 +387,10 @@ impl App {
         let focused = ui.ctx().input(|input| input.focused);
         let panel_in_front = self.panel_in_front();
         for (want, detail) in wanted {
-            // The decision is written down before it is acted on. A want that arrives and is kept
-            // back leaves no other trace — the panel simply says nothing — so "the notification did
-            // not appear" cannot be told from "the agent never asked" without this line.
-            let shown = crate::notify::wanted(self.state.notifications, focused, panel_in_front);
+            // The circumstances are written down beside the sending: a notification that surprises
+            // the person is otherwise hard to place, and "the notification did not appear" cannot be
+            // told from "the agent never asked" without a line that says the want arrived at all.
+            let shown = crate::notify::wanted(self.state.notifications);
             tracing::info!(
                 ?want,
                 %detail,
@@ -843,6 +843,36 @@ mod tests {
     }
 
     #[test]
+    fn a_note_reaches_the_desk_even_with_the_panel_in_front() {
+        // The person asked to be told, and the window is where they are looking: the note goes to the
+        // desk in that case too. Nothing about the window's focus or the panel's place keeps it back,
+        // so the check is the plain one — the want arrives, the desk is told.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        let written = app.watch_notifications();
+        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Finished, "ready".to_owned()));
+
+        draw_frame_with_focus(&mut app, true);
+
+        assert_eq!(
+            written.shown().len(),
+            1,
+            "the panel was in front and nothing was told: {:?}",
+            written.shown()
+        );
+        assert!(
+            app.state.status.contains("told the desk"),
+            "the window did not say it told the desk: {:?}",
+            app.state.status
+        );
+    }
+
+    #[test]
     fn a_note_reaches_the_desk_when_the_window_is_not_looked_at() {
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
@@ -895,79 +925,6 @@ mod tests {
             app.state.status.contains("no session bus in reach"),
             "the window did not say why: {:?}",
             app.state.status
-        );
-    }
-
-    #[test]
-    fn a_panel_behind_another_tab_is_not_saying_it() {
-        // The panel is in the dock, and the person cannot see it: the terminal stands where the
-        // question would be drawn. That is the case the notifications are for, and a check that
-        // counts a tab's presence for its being on screen would keep the desk silent through it.
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        let written = app.watch_notifications();
-        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
-        show_panel(&mut app.dock, &mut app.state, Tab::Terminal);
-        assert!(
-            !app.panel_in_front(),
-            "the panel was put behind the terminal and still counts as being on screen"
-        );
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
-
-        draw_frame_with_focus(&mut app, true);
-
-        assert_eq!(
-            written.shown().len(),
-            1,
-            "the question stood behind the terminal, and the desk was told nothing: {:?}",
-            written.shown()
-        );
-    }
-
-    #[test]
-    fn a_note_is_kept_back_while_the_panel_is_in_front_of_the_person() {
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        let written = app.watch_notifications();
-        // The panel is put on screen: a window that shows it *and* has the keyboard has already
-        // said everything a notification would say.
-        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
-        assert!(
-            app.dock.find_tab(&Tab::Agent).is_some(),
-            "the panel could not be put on screen for the check"
-        );
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Finished, "ready".to_owned()));
-
-        draw_frame_with_focus(&mut app, true);
-        assert!(
-            written.shown().is_empty(),
-            "the panel was in front and the desk was told anyway: {:?}",
-            written.shown()
-        );
-
-        // The same note, with the panel away: the keyboard is not the point, the panel is.
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Finished, "ready".to_owned()));
-        {
-            let dock = &mut app.dock;
-            let state = &mut app.state;
-            hide_panel(dock, state, Tab::Agent);
-        }
-        draw_frame_with_focus(&mut app, true);
-        assert_eq!(
-            written.shown().len(),
-            1,
-            "a panel that is not on screen kept the news to itself"
         );
     }
 
