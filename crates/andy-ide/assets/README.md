@@ -38,6 +38,12 @@ empty boxes before this file was added — 505 of them at U+1F000 and above (the
 the transport, the tools of U+1F9xx), the rest signs such as `🟠 🟡 🟢 🔴 🟣 🟤 🟥 🟦 🟧 🟨 🟩 🟪 🟫`, the
 circles the agent marks its status lines with. In both families alike.
 
+Note the shapes of the block `U+1F780..U+1F7FF` (*Geometric Shapes Extended*), of which this file
+carries 13: the large coloured circles `🟠 🟡 🟢 🟣 🟤`, the large squares `🟥 🟦 🟧 🟨 🟩 🟪 🟫` and
+`🟰` — the circles the agent marks its status lines with. The 90 decorative shapes of that same
+block (the triangles, circles, diamonds, crosses, saltiress and stars of `U+1F780..U+1F7D9`) are not
+in OpenMoji at all, so they stay boxes: a font of symbols, not of emoji, would be the way to them.
+
 Still boxes, and knowingly so: 32 assigned characters the original has and this subset does not — the
 power symbols `⏻ ⏼ ⏽ ⏾` (U+23FB..U+23FE), the stick figures U+1FBC5..U+1FBC9 and 25 invisible tag
 characters — plus its 353 private-use entries, which are not characters in the first place. CJK,
