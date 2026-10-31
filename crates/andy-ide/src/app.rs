@@ -174,6 +174,9 @@ impl App {
         // Nothing has been drawn yet this frame: the editor says so itself when its tab
         // draws, and the hint is only asked about text that was actually on screen.
         self.state.editor_drawn = false;
+        // The worker is given a door into this window: an event that arrives while the window
+        // is away has nobody to read it, and the frame that would read it may never come.
+        self.state.agent.waker.watch(ui.ctx());
         // Copying from the agent panel is the panel's business. The editor holds the
         // keyboard whenever nothing else does, so the copy shortcut arrives at the editor
         // first and it copies its own line out of the file being edited: the selection
@@ -812,6 +815,36 @@ mod tests {
             layout_serialized_at: 0.0,
             notifier: std::sync::Arc::new(crate::notify::Written::default()),
         }
+    }
+
+    #[test]
+    fn the_frame_points_the_worker_at_the_window() {
+        let ctx = egui::Context::default();
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        assert!(
+            !app.state.agent.waker.knows_the_window(),
+            "the worker was given a window before one was drawn"
+        );
+
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
+        output.textures_delta.clear();
+        assert!(
+            app.state.agent.waker.knows_the_window(),
+            "the frame did not point the worker at the window"
+        );
+
+        // And the wake reaches that very window, which is the whole point of the errand.
+        app.state.agent.waker.wake();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
+        output.textures_delta.clear();
+        assert!(
+            ctx.repaint_causes()
+                .iter()
+                .any(|cause| cause.file.ends_with("agent.rs") && cause.line != 0),
+            "the worker asked the window for a frame, and the window did not hear it"
+        );
     }
 
     /// One frame of the window with the keyboard (or without it), drawn by hand: whether the

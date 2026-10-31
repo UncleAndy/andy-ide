@@ -27,6 +27,9 @@ struct Gui {
 ///
 /// A frame a quarter of a second long (the harness default) would put two clicks
 /// 250 ms apart, outside egui's double-click window, so the clock here ticks at
+/// How many frames a window may take to settle: the panel wakes itself whenever the agent speaks.
+const SETTLING_STEPS: u64 = 16;
+
 /// 60 frames a second like a real window.
 fn window(
     project: &Path,
@@ -49,6 +52,9 @@ fn window(
 
     let mut harness = Harness::builder()
         .with_step_dt(1.0 / 60.0)
+        // The panel asks for frames of its own while the agent is talking to it (`agent::Waker`), so a
+        // window with a conversation in it needs more steps to settle than the harness grants by itself.
+        .with_max_steps(SETTLING_STEPS)
         .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
     harness.set_size(egui::vec2(1200.0, 800.0));
     harness.run();

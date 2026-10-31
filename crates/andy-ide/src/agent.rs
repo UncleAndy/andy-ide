@@ -224,6 +224,56 @@ enum Reply {
 }
 
 /// The worker thread, seen from the panel's side.
+/// The window, once it has drawn a frame, so that the worker can ask it for another.
+///
+/// A panel that is not on screen is not drawn: egui draws on demand, so an event that arrives
+/// while the window is hidden sits unread in the channel until something makes a frame — which is
+/// exactly what a person switching back to the window does. A notification arriving at that moment
+/// is a notification nobody needed, so the worker wakes the window itself, the moment it has
+/// something to say.
+#[derive(Clone, Default)]
+pub struct Waker(Arc<Mutex<Option<egui::Context>>>);
+
+impl Waker {
+    /// Points the waker at the window that has just drawn a frame.
+    pub fn watch(&self, ctx: &egui::Context) {
+        if let Ok(mut window) = self.0.lock()
+            && window.is_none()
+        {
+            *window = Some(ctx.clone());
+        }
+    }
+
+    /// Asks the window for a frame, if it has one to ask.
+    pub fn wake(&self) {
+        if let Ok(window) = self.0.lock()
+            && let Some(ctx) = window.as_ref()
+        {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Whether the waker knows the window at all.
+    #[cfg(test)]
+    pub(crate) fn knows_the_window(&self) -> bool {
+        self.0.lock().is_ok_and(|window| window.is_some())
+    }
+}
+
+/// The worker's end of the replies: every reply wakes the window that reads them.
+struct Replies {
+    outlet: Sender<Reply>,
+    pub(crate) waker: Waker,
+}
+
+impl Replies {
+    fn send(&self, reply: Reply) -> Result<(), std::sync::mpsc::SendError<Reply>> {
+        let sent = self.outlet.send(reply);
+        self.waker.wake();
+        sent
+    }
+}
+
 struct Worker {
     commands: Sender<Command>,
     replies: Receiver<Reply>,
@@ -374,6 +424,8 @@ pub struct AgentState {
     /// panel needs it.
     #[cfg(test)]
     connects: u32,
+    /// The window, once it has drawn a frame: the worker wakes it when it has something to say.
+    pub(crate) waker: Waker,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -445,6 +497,7 @@ impl Default for AgentState {
             connected_at: None,
             #[cfg(test)]
             connects: 0,
+            waker: Waker::default(),
             worker: None,
             root: None,
             place: None,
@@ -614,9 +667,22 @@ impl AgentState {
         let progress = Arc::clone(&self.progress);
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
+        let waker = self.waker.clone();
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
-            .spawn(move || work(spec, root, resume, progress, jobs, answers));
+            .spawn(move || {
+                work(
+                    spec,
+                    root,
+                    resume,
+                    progress,
+                    jobs,
+                    Replies {
+                        outlet: answers,
+                        waker,
+                    },
+                )
+            });
         match started {
             Ok(_) => {
                 self.worker = Some(Worker { commands, replies });
@@ -1430,7 +1496,7 @@ fn work(
     resume: Option<String>,
     progress: Arc<Mutex<String>>,
     commands: Receiver<Command>,
-    replies: Sender<Reply>,
+    replies: Replies,
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
@@ -1643,6 +1709,83 @@ mod grouping_tests {
             service_line("see this: [IMPORTANT: Background process proc_1]"),
             None,
             "a line quoting a receipt is still the words of the person"
+        );
+    }
+
+    /// Whether the frame just drawn was asked for by this panel rather than by egui itself.
+    ///
+    /// egui remembers what asked for a frame, file and line of the call, so a wake can be told
+    /// from the reasons egui has of its own.
+    fn the_panel_asked_for_it(ctx: &egui::Context) -> bool {
+        ctx.repaint_causes()
+            .iter()
+            .any(|cause| cause.file.ends_with("agent.rs"))
+    }
+
+    #[test]
+    fn the_worker_wakes_the_window_it_was_told_about() {
+        let ctx = egui::Context::default();
+        let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+        pass.textures_delta.clear();
+        assert!(
+            !the_panel_asked_for_it(&ctx),
+            "nothing has been said, and yet a frame was asked for"
+        );
+
+        // Nobody has drawn a frame: there is no window to wake, and saying so is not an error.
+        let waker = Waker::default();
+        waker.wake();
+
+        waker.watch(&ctx);
+        assert!(
+            waker.knows_the_window(),
+            "the waker was not pointed at the window"
+        );
+
+        waker.wake();
+        let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+        pass.textures_delta.clear();
+        assert!(
+            the_panel_asked_for_it(&ctx),
+            "the window was not asked for a frame, so an event of the agent waits for the person"
+        );
+    }
+
+    #[test]
+    fn every_reply_of_the_worker_wakes_the_window() {
+        let ctx = egui::Context::default();
+        let waker = Waker::default();
+        waker.watch(&ctx);
+        let (outlet, kept) = channel();
+        let worker = Replies { outlet, waker };
+
+        assert!(
+            worker
+                .send(Reply::Failed("nothing to say".to_owned()))
+                .is_ok(),
+            "the reply did not reach the panel"
+        );
+        let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+        pass.textures_delta.clear();
+        assert!(
+            the_panel_asked_for_it(&ctx),
+            "a reply of the agent did not wake the window, so it waits for the person"
+        );
+        drop(kept);
+    }
+
+    #[test]
+    fn a_waker_that_knows_no_window_asks_for_no_frame() {
+        let ctx = egui::Context::default();
+        let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+        pass.textures_delta.clear();
+
+        Waker::default().wake();
+        let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+        pass.textures_delta.clear();
+        assert!(
+            !the_panel_asked_for_it(&ctx),
+            "a wake from a waker that knows no window reached one anyway"
         );
     }
 
