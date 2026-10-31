@@ -29,6 +29,10 @@ const SILENCE: Duration = Duration::from_millis(1200);
 /// How long the panel waits before starting a crashed agent again.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
+/// How many conversations the agent is asked to name. Hermes keeps thousands; a panel shows the
+/// recent ones, and a list nobody can scroll through is not a list.
+const SESSIONS_ASKED_FOR: usize = 200;
+
 /// How many times in a row an agent that keeps dying is started before the panel gives up.
 /// A crash loop is not a conversation, and retrying it forever spends the person's time.
 const RECONNECT_ATTEMPTS: u32 = 5;
@@ -61,6 +65,20 @@ pub fn provider_of(id: &str) -> Option<&str> {
 /// Groups keep the order they first appear in, and a model whose id names no provider
 /// goes to the group that has no name: it is drawn without a header when it is the only
 /// one, and under one when it is not.
+/// The first words of an answer, for a complaint that has to say what came back without pasting a
+/// page of it.
+fn first_words(text: &str) -> String {
+    let trimmed = text.trim();
+    let cut: String = trimmed.chars().take(120).collect();
+    if trimmed.chars().count() > 120 {
+        format!("{cut}\u{2026}")
+    } else if cut.is_empty() {
+        "it said nothing".to_owned()
+    } else {
+        cut
+    }
+}
+
 pub fn grouped(models: &[Model]) -> Vec<(Option<String>, Vec<&Model>)> {
     let mut groups: Vec<(Option<String>, Vec<&Model>)> = Vec::new();
     for model in models {
@@ -125,6 +143,11 @@ enum Command {
     /// List the conversations this agent keeps for this project: the panel shows them, and a
     /// choice among them reopens the session.
     Sessions,
+    /// Ask the agent, in words, for every conversation it keeps — every surface, not only the ones
+    /// this editor started. ACP's own `session/list` is filtered by the adapter that answers it and
+    /// no request widens it, but the agent keeps the store and can read it. The turn is quiet: its
+    /// words are collected and never reach the transcript.
+    AskSessions,
 }
 
 /// What the worker tells the panel.
@@ -223,6 +246,9 @@ pub struct AgentState {
     pub usage: Option<Usage>,
     /// The conversations the agent keeps for this project, as it last listed them.
     pub sessions: Vec<SessionInfo>,
+    /// Whether the words-asked list has already arrived: the ACP list that follows is joined to it
+    /// rather than replacing it, and both arriving leaves the panel to show one list, not two.
+    pub sessions_asked: bool,
     /// Whether the list of conversations is on screen.
     pub sessions_open: bool,
     /// Where the button that asks for the list was drawn: the list floats above it.
@@ -322,6 +348,7 @@ impl Default for AgentState {
             usage: None,
             contexts: std::collections::BTreeMap::new(),
             sessions: Vec::new(),
+            sessions_asked: false,
             sessions_open: false,
             sessions_button: None,
             sessions_loading: false,
@@ -645,18 +672,27 @@ impl AgentState {
     ///
     /// This is what the foot's button follows: an answer being written can be stopped
     /// whichever side began it.
-    /// Asks the agent for the conversations it keeps for this project, and opens the list.
+    /// Asks the agent for the conversations it keeps, and opens the list.
     ///
-    /// The list is asked for every time it is opened: a conversation that was started in another
-    /// window since should be there, and the agent answers from what it already keeps.
+    /// The agent is asked in words rather than through ACP's `session/list`: that one is filtered
+    /// by the adapter that answers it (Hermes' lists only `source="acp"`, so conversations had in
+    /// Telegram or the desktop app never appear) and no request widens it. The question is put to
+    /// the agent itself, which keeps the store; the list is asked for every time it is opened, so a
+    /// conversation started in another window since is there too.
+    ///
+    /// The ACP list is asked for afterwards, and the two are joined: it costs one round trip and
+    /// covers an agent that cannot read its own store — an ACP-only agent would otherwise show an
+    /// empty list.
     pub fn open_sessions(&mut self) {
         self.sessions_open = true;
         self.sessions_loading = true;
+        self.sessions_asked = false;
         let Some(worker) = &self.worker else {
             self.sessions_loading = false;
             return;
         };
-        if worker.commands.send(Command::Sessions).is_err() {
+        let asked = worker.commands.send(Command::AskSessions).is_err();
+        if asked || worker.commands.send(Command::Sessions).is_err() {
             self.sessions_loading = false;
         }
     }
@@ -1152,7 +1188,21 @@ impl AgentState {
                     }
                 }
                 AgentEvent::Sessions(sessions) => {
-                    self.sessions = sessions;
+                    // The two lists are joined, never one replacing the other: the words-asked one
+                    // knows every surface, the ACP one always answers. A conversation in both is
+                    // one row.
+                    if self.sessions_asked {
+                        let mut joined = self.sessions.clone();
+                        for session in sessions {
+                            if !joined.iter().any(|held| held.id == session.id) {
+                                joined.push(session);
+                            }
+                        }
+                        self.sessions = joined;
+                    } else {
+                        self.sessions = sessions;
+                        self.sessions_asked = true;
+                    }
                     self.sessions_loading = false;
                 }
                 AgentEvent::Finished(reason) => {
@@ -1235,6 +1285,11 @@ fn work(
         return;
     }
 
+    // A turn that only asks the agent something for the panel: its words are collected here and
+    // never sent to the transcript, so a question about the agent's own bookkeeping does not become
+    // part of the conversation.
+    let mut quiet: Option<String> = None;
+
     loop {
         match commands.recv_timeout(PUMP) {
             Ok(Command::Prompt(text)) => {
@@ -1279,6 +1334,21 @@ fn work(
                 }
                 let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
+            Ok(Command::AskSessions) => {
+                match session.start_turn(&ide_agents::list_sessions_prompt(SESSIONS_ASKED_FOR)) {
+                    Ok(()) => quiet = Some(String::new()),
+                    Err(error) => {
+                        if replies
+                            .send(Reply::Event(AgentEvent::Failed(format!(
+                                "the agent could not be asked for its conversations: {error}"
+                            ))))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
             Ok(Command::Sessions) => {
                 let answer = match session.list_sessions() {
                     Ok(sessions) => AgentEvent::Sessions(sessions),
@@ -1317,6 +1387,31 @@ fn work(
                 event,
                 AgentEvent::Finished(_) | AgentEvent::Closed | AgentEvent::Failed(_)
             );
+            // A quiet turn keeps its words to itself: the answer to "which conversations do you
+            // keep" is read, not shown, and the question is not part of the conversation either.
+            if let Some(collected) = quiet.as_mut() {
+                if let AgentEvent::Text(text) = &event {
+                    collected.push_str(text);
+                }
+                if finished {
+                    let answer = std::mem::take(collected);
+                    quiet = None;
+                    let sessions = ide_agents::sessions_from_text(&answer);
+                    let said = if sessions.is_empty() {
+                        AgentEvent::Failed(format!(
+                            "the agent named no conversations: {}",
+                            first_words(&answer)
+                        ))
+                    } else {
+                        AgentEvent::Sessions(sessions)
+                    };
+                    if replies.send(Reply::Event(said)).is_err() {
+                        return;
+                    }
+                    break;
+                }
+                continue;
+            }
             if replies.send(Reply::Event(event)).is_err() {
                 return;
             }

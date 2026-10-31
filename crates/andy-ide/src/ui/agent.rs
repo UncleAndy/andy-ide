@@ -571,6 +571,17 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             // the list now holds every surface, and the id alone does not tell a
                             // person whether it is the one they remember.
                             let mut hint = id.clone();
+                            // Where it was had, when the agent said: the list holds every surface
+                            // now, and "telegram" tells a person more than a date does.
+                            if let Some(surface) = state
+                                .agent
+                                .sessions
+                                .iter()
+                                .find(|session| session.id == *id)
+                                .and_then(|session| session.source.clone())
+                            {
+                                hint.push_str(&format!("  ·  {surface}"));
+                            }
                             if let Some(where_it_lives) = state
                                 .agent
                                 .sessions

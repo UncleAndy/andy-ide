@@ -510,6 +510,22 @@ fn main() {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                // The panel asks, in words, for the conversations the agent keeps: a real agent
+                // reads its own store, this one answers from a written-down list. The answer is
+                // JSON, as the question asks, with a sentence of prose around it on purpose — a
+                // real answer often has one, and the reader must find the array in it.
+                if text.contains("Answer with JSON only") {
+                    chunk(&session, "Here is the list.\n");
+                    chunk(
+                        &session,
+                        "```json\n[{\"id\": \"tg-77\", \"title\": \"tables in the terminal\", \
+                         \"updated_at\": \"2026-10-30T21:15:00Z\", \"source\": \"telegram\"},\n \
+                         {\"id\": \"desk-9\", \"title\": \"desktop app, reader layout\", \
+                         \"updated_at\": \"2026-10-30T19:02:00Z\", \"source\": \"desktop\"}]\n```\n",
+                    );
+                    turn_answer(&session, id);
+                    continue;
+                }
                 match text.trim() {
                     "hello" => {
                         thought(&session, "pondering the greeting");
