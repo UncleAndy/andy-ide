@@ -7381,6 +7381,13 @@ mod the_agent_panel {
         wait(&mut gui, "the conversations to arrive", |gui| {
             painted_text(gui, "renaming a symbol across crates")
         });
+        // The conversation in front is there too, though the stand-in did not name it: Hermes
+        // lists a conversation only once it has history (acp_adapter/session.py skips the ones
+        // with none), and the one just opened has none.
+        assert!(
+            painted_text(&gui, "this conversation"),
+            "the conversation in front is missing from the list"
+        );
 
         // And a choice moves the panel to that conversation: the stand-in answers a load with its
         // own history, the way Hermes replays a kept conversation.

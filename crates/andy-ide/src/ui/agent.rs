@@ -493,7 +493,7 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     }
     // What a row says: the name the agent gave the conversation, or its id when it named none,
     // and when it was last touched. The id is what a choice hands back.
-    let rows: Vec<(String, String, String)> = state
+    let mut rows: Vec<(String, String, String)> = state
         .agent
         .sessions
         .iter()
@@ -510,6 +510,16 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
             )
         })
         .collect();
+    // The conversation that is answering is always offered, even when the agent left it out of its
+    // own list. Hermes lists a conversation only once it has history (`acp_adapter/session.py`:
+    // `if not s.history … continue`, and a stored one needs messages), so the one that was just
+    // opened — the one a person is most likely to look for — is missing until something has been
+    // asked in it.
+    if let Some(current) = state.agent.session.clone()
+        && !rows.iter().any(|(id, _, _)| id == &current)
+    {
+        rows.insert(0, (current, "this conversation".to_owned(), String::new()));
+    }
     let mut chosen: Option<String> = None;
     // Never more than part of the window: a list that grew to fill it would cover the
     // conversation it belongs to.
