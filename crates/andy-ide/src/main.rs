@@ -60,9 +60,18 @@ fn main() -> eframe::Result<()> {
     log::init();
 
     let args = Args::parse(std::env::args().skip(1));
+    // Who this window is and which desk it can reach, said once at the start. A notification the
+    // desk takes and never shows is otherwise a mystery: the id it answers with says a daemon heard,
+    // and only the address says whether that daemon is the one drawing the screen in front of the
+    // person. When the two disagree, this line is where the disagreement is legible.
     tracing::info!(
         project = ?args.project,
         file = ?args.file,
+        uid = %std::env::var("UID").unwrap_or_default(),
+        user = %std::env::var("USER").unwrap_or_default(),
+        bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
+        display = %std::env::var("DISPLAY").unwrap_or_default(),
+        wayland = %std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
         "starting andy-ide"
     );
 
