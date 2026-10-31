@@ -395,7 +395,7 @@ impl App {
             // elsewhere when it mattered, so when they come back the only place that can tell them
             // the notification was never shown — and why — is here.
             match self.notifier.show(&title, &body) {
-                Ok(()) => self.state.status = format!("told the desk: {title}"),
+                Ok(id) => self.state.status = format!("told the desk: {title} (id {id})"),
                 Err(reason) => self.state.status = format!("the desk refused: {reason}"),
             }
         }

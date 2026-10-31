@@ -46,7 +46,8 @@ pub trait Surface: Send {
     /// The reason comes back rather than only going to the log, because a notification that was
     /// never shown leaves no other trace: the person is by definition looking elsewhere, so the
     /// window has to be able to say what the desk did when they come back to it.
-    fn show(&self, title: &str, body: &str) -> Result<(), String>;
+    /// Returns the id the desk gave the notification, or why it could not be shown.
+    fn show(&self, title: &str, body: &str) -> Result<u32, String>;
 }
 
 /// The desk's own notifications, through the service the session provides.
@@ -54,13 +55,27 @@ pub trait Surface: Send {
 pub struct System;
 
 impl Surface for System {
-    fn show(&self, title: &str, body: &str) -> Result<(), String> {
+    fn show(&self, title: &str, body: &str) -> Result<u32, String> {
+        // The name is what the desk attributes the notification to, and a notification it cannot
+        // attribute is one it may drop without a word — which is a failure that looks exactly like
+        // success from here, because the call itself returns an id.
         match notify_rust::Notification::new()
+            .appname("andy-ide")
             .summary(title)
             .body(body)
             .show()
         {
-            Ok(_) => Ok(()),
+            Ok(handle) => {
+                // Which bus took it, and under which id: an id means a daemon answered, and a
+                // notification that answered but never appeared means the daemon is not the one
+                // drawing the desk. That difference is invisible without the address.
+                tracing::debug!(
+                    id = handle.id(),
+                    bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
+                    "the desk took the notification"
+                );
+                Ok(handle.id())
+            }
             Err(error) => {
                 tracing::warn!(%error, "the notification could not be shown");
                 Err(error.to_string())
@@ -97,7 +112,7 @@ pub struct Refused;
 
 #[cfg(test)]
 impl Surface for Refused {
-    fn show(&self, _title: &str, _body: &str) -> Result<(), String> {
+    fn show(&self, _title: &str, _body: &str) -> Result<u32, String> {
         Err("no session bus in reach".to_owned())
     }
 }
@@ -123,12 +138,12 @@ impl Written {
 
 #[cfg(test)]
 impl Surface for Written {
-    fn show(&self, title: &str, body: &str) -> Result<(), String> {
+    fn show(&self, title: &str, body: &str) -> Result<u32, String> {
         self.shown
             .lock()
             .expect("the lock over what was shown is not poisoned")
             .push((title.to_owned(), body.to_owned()));
-        Ok(())
+        Ok(1)
     }
 }
 
