@@ -391,7 +391,13 @@ impl App {
                 continue;
             }
             let (title, body) = want.message(&detail);
-            self.notifier.show(&title, &body);
+            // What the desk did is said in the window as well as in the log: the person was looking
+            // elsewhere when it mattered, so when they come back the only place that can tell them
+            // the notification was never shown — and why — is here.
+            match self.notifier.show(&title, &body) {
+                Ok(()) => self.state.status = format!("told the desk: {title}"),
+                Err(reason) => self.state.status = format!("the desk refused: {reason}"),
+            }
         }
     }
 
@@ -833,6 +839,34 @@ mod tests {
         assert!(
             app.state.agent.wanted.is_empty(),
             "the note was kept after it was told"
+        );
+    }
+
+    #[test]
+    fn a_desk_that_refuses_is_said_in_the_window() {
+        // A notification the desk never showed leaves no trace where the person can find it: they
+        // were looking elsewhere by definition. The window has to say what happened instead, or the
+        // only report of a broken desk is silence — which is what brought this check into being.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        app.notifier = std::sync::Arc::new(crate::notify::Refused);
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
+
+        draw_frame_with_focus(&mut app, false);
+
+        assert!(
+            app.state.status.contains("refused"),
+            "the window did not say the desk refused: {:?}",
+            app.state.status
+        );
+        assert!(
+            app.state.status.contains("no session bus in reach"),
+            "the window did not say why: {:?}",
+            app.state.status
         );
     }
 

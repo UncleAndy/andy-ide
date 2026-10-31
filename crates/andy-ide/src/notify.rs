@@ -41,8 +41,12 @@ pub fn wanted(setting: bool, focused: bool, panel_in_front: bool) -> bool {
 
 /// Somewhere a notification can be shown.
 pub trait Surface: Send {
-    /// Show one, or say in the log why it could not be shown.
-    fn show(&self, title: &str, body: &str);
+    /// Show one, or say why it could not be shown.
+    ///
+    /// The reason comes back rather than only going to the log, because a notification that was
+    /// never shown leaves no other trace: the person is by definition looking elsewhere, so the
+    /// window has to be able to say what the desk did when they come back to it.
+    fn show(&self, title: &str, body: &str) -> Result<(), String>;
 }
 
 /// The desk's own notifications, through the service the session provides.
@@ -50,14 +54,51 @@ pub trait Surface: Send {
 pub struct System;
 
 impl Surface for System {
-    fn show(&self, title: &str, body: &str) {
-        if let Err(error) = notify_rust::Notification::new()
+    fn show(&self, title: &str, body: &str) -> Result<(), String> {
+        match notify_rust::Notification::new()
             .summary(title)
             .body(body)
             .show()
         {
-            tracing::warn!(%error, "the notification could not be shown");
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%error, "the notification could not be shown");
+                Err(error.to_string())
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod try_the_desk {
+    /// A real notification, shown on the desktop this check runs under. Not part of the suite: it
+    /// needs a session bus and a person looking at the screen. Run it to learn what the desk does.
+    #[test]
+    #[ignore = "needs the desktop"]
+    fn a_real_notification_reaches_the_desk() {
+        use super::Surface;
+        let shown = notify_rust::Notification::new()
+            .summary("andy-ide: check of the desk")
+            .body("if you can read this, the system notifications work")
+            .show();
+        println!("RESULT: {shown:?}");
+        println!("BUS: {:?}", std::env::var("DBUS_SESSION_BUS_ADDRESS"));
+        println!("RUNTIME: {:?}", std::env::var("XDG_RUNTIME_DIR"));
+        println!(
+            "SURFACE: {:?}",
+            super::System.show("andy-ide: through the surface", "the window's own path")
+        );
+    }
+}
+
+/// A desk that refuses every notification, the way a session with no bus in reach does.
+#[cfg(test)]
+pub struct Refused;
+
+#[cfg(test)]
+impl Surface for Refused {
+    fn show(&self, _title: &str, _body: &str) -> Result<(), String> {
+        Err("no session bus in reach".to_owned())
     }
 }
 
@@ -82,11 +123,12 @@ impl Written {
 
 #[cfg(test)]
 impl Surface for Written {
-    fn show(&self, title: &str, body: &str) {
+    fn show(&self, title: &str, body: &str) -> Result<(), String> {
         self.shown
             .lock()
             .expect("the lock over what was shown is not poisoned")
             .push((title.to_owned(), body.to_owned()));
+        Ok(())
     }
 }
 
@@ -148,7 +190,7 @@ mod tests {
         // and that it does not sit there waiting for a service that is not coming.
         let (title, body) = Want::Finished.message("ready");
         let started = std::time::Instant::now();
-        System.show(&title, &body);
+        let _ = System.show(&title, &body);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "the surface waited {:?} for a service that is not there",
@@ -159,8 +201,8 @@ mod tests {
     #[test]
     fn a_written_surface_keeps_what_it_was_asked_to_show() {
         let surface = Written::default();
-        surface.show("a title", "a body");
-        surface.show("another", "and its body");
+        let _ = surface.show("a title", "a body");
+        let _ = surface.show("another", "and its body");
         assert_eq!(
             surface.shown(),
             vec![
