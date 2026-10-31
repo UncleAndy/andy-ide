@@ -27,6 +27,7 @@ use crate::protocol::{
     new_session_params, options_of, permission_answer, prompt_params, session_state, sessions_of,
     set_mode_params, set_model_params, usage_of,
 };
+use crate::wire::{Silent, Wire};
 
 /// How long the agent gets to start and say hello.
 pub const HELLO: Duration = Duration::from_secs(60);
@@ -179,7 +180,7 @@ impl Session {
     /// `initialize` and `session/new` are done here, so a `Session` that exists is a
     /// session that has answered: every failure to start is a failure to build one.
     pub fn start(spec: &AgentSpec, root: &Path, policy: PermissionPolicy) -> Result<Self> {
-        Self::start_with(spec, root, policy, None, None)
+        Self::start_with(spec, root, policy, None, None, None)
     }
 
     /// Starts an agent and asks it to pick up `resume`, if it has such a conversation.
@@ -188,12 +189,16 @@ impl Session {
     /// and starting from nothing every launch throws that away. The id is the agent's to
     /// keep; an agent that does not know it — or does not offer `loadSession` — is asked
     /// to open a new one instead, and nobody is told about a failure that was expected.
+    /// `wire` is where every line of the conversation is written down as it crosses: the record
+    /// is made by the threads that own the pipes, so it holds what was actually sent and received
+    /// and not what the panel made of it. `None` is a session whose record nobody asked for.
     pub fn start_with(
         spec: &AgentSpec,
         root: &Path,
         policy: PermissionPolicy,
         resume: Option<String>,
         progress: Option<Arc<Mutex<String>>>,
+        wire: Option<Arc<dyn Wire>>,
     ) -> Result<Self> {
         Self::step_said(progress.as_ref(), "Launching\u{2026}");
         let mut command = Command::new(&spec.command);
@@ -218,6 +223,12 @@ impl Session {
 
         let (outgoing, jobs) = channel::<Message>();
         let (lines, incoming) = channel::<Incoming>();
+        // One record, three threads: each takes a handle of its own, so the record outlives none
+        // of them and a session that ends closes its own pipes.
+        let wire: Arc<dyn Wire> = wire.unwrap_or_else(|| Arc::new(Silent));
+        let wire_in = Arc::clone(&wire);
+        let wire_out = Arc::clone(&wire);
+        let wire_err = Arc::clone(&wire);
 
         // Writing: one thread owns the child's input, so a slow agent slows nobody else.
         std::thread::Builder::new()
@@ -226,7 +237,13 @@ impl Session {
                 let mut stdin = stdin;
                 for message in jobs {
                     let line = message.to_line();
+                    wire_in.sent(&line);
                     if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
+                        // The line above was written before the pipe was tried: if the agent is
+                        // gone, the record says which line it never took.
+                        wire_in.note(
+                            "the agent's input closed: the line above is the last one written",
+                        );
                         break;
                     }
                 }
@@ -247,6 +264,9 @@ impl Session {
                     if line.trim().is_empty() {
                         continue;
                     }
+                    // Recorded before it is understood: a line the editor cannot parse is the one
+                    // a person most needs to see, and it is the same line the agent sent.
+                    wire_out.got(&line);
                     match serde_json::from_str::<Message>(&line) {
                         Ok(message) => {
                             if lines.send(Incoming::Line(message)).is_err() {
@@ -272,6 +292,7 @@ impl Session {
             .spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
+                    wire_err.note(&format!("stderr: {line}"));
                     if let Ok(mut text) = written.lock() {
                         text.push_str(&line);
                         text.push('\n');

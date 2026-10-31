@@ -6946,6 +6946,59 @@ mod the_agent_panel {
         );
     }
 
+    /// Everything the record of the wire holds: this run's file, and the one it rotated away.
+    fn the_wire_record() -> String {
+        let path = crate::log::wire_path();
+        let there = |path: std::path::PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+        format!("{}{}", there(path.with_extension("log.1")), there(path))
+    }
+
+    #[test]
+    fn every_line_of_a_session_reaches_the_file_of_the_wire() {
+        // The panel draws its reading of the protocol, and when the two disagree the lines are the
+        // truth — a summary of a compacted context drawn as the words of a person was exactly such
+        // a disagreement. What is asked here is that a session the window started writes both
+        // directions into the file of the wire: a record never opened is no record at all when it
+        // is needed.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // Each session opens its part of the record with a line naming the directory it was started
+        // in, and that directory is this window's own project — so the part of the record after
+        // that line is what *this* session wrote, and no earlier run can be mistaken for it.
+        let started_in = gui._project.path().to_string_lossy().into_owned();
+        let held = the_wire_record();
+        let ours = held
+            .rsplit_once(&format!("in {started_in}, every line of it below"))
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        assert!(
+            !ours.trim().is_empty(),
+            "the record holds nothing from this session: {held:?}"
+        );
+        assert!(
+            ours.contains(r#""method":"initialize""#),
+            "the handshake this window sent is not in the record: {ours:?}"
+        );
+        assert!(
+            ours.contains("-> ") && ours.contains("<- "),
+            "one of the two directions is missing from the record: {ours:?}"
+        );
+        assert!(
+            ours.contains(r#""result""#),
+            "the answers of the agent are missing from the record: {ours:?}"
+        );
+    }
+
     #[test]
     fn a_finished_turn_reaches_the_desk() {
         let Some(mut gui) = with_agent() else {

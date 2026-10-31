@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ide_agents::{AgentSpec, Event, PermissionPolicy, Session};
+use ide_agents::{AgentSpec, Event, Kept, PermissionPolicy, Session, Wire};
 
 /// The stand-in agent, built with the crate and spawned like any other program.
 fn stand_in() -> AgentSpec {
@@ -439,8 +439,15 @@ fn the_client_asks_nothing_of_itself_and_says_files_go_through_the_terminal() {
 /// A session that was told to pick up `id`.
 fn start_resumed(policy: PermissionPolicy, id: &str) -> (tempfile::TempDir, Session) {
     let dir = project();
-    let session = Session::start_with(&stand_in(), dir.path(), policy, Some(id.to_owned()), None)
-        .expect("the agent started");
+    let session = Session::start_with(
+        &stand_in(),
+        dir.path(),
+        policy,
+        Some(id.to_owned()),
+        None,
+        None,
+    )
+    .expect("the agent started");
     (dir, session)
 }
 
@@ -474,6 +481,7 @@ fn a_start_says_which_step_it_is_at() {
         PermissionPolicy::Deny,
         None,
         Some(std::sync::Arc::clone(&progress)),
+        None,
     )
     .expect("the agent started");
     let last = progress.lock().unwrap().clone();
@@ -489,6 +497,66 @@ fn a_kept_conversation_is_picked_up_by_its_id() {
     assert_eq!(session.id(), "kept-42");
     assert!(session.resumed(), "the session was opened anew");
     assert_eq!(conversation(&mut session), "kept-42 loaded");
+}
+
+#[test]
+fn everything_that_crossed_the_wire_is_written_down() {
+    // The record is what a session is read back from: the panel draws its reading of the protocol,
+    // and when the two disagree the lines are the truth. What is asked here is that both
+    // directions are recorded by the threads that move them, in the order they crossed, and that
+    // the lines recorded are the lines the agent sent and not a rendering of them.
+    let dir = project();
+    let wire = std::sync::Arc::new(Kept::default());
+    let mut session = Session::start_with(
+        &stand_in(),
+        dir.path(),
+        PermissionPolicy::Deny,
+        None,
+        None,
+        Some(std::sync::Arc::clone(&wire) as std::sync::Arc<dyn Wire>),
+    )
+    .expect("the agent started");
+
+    session.start_turn("session").expect("the turn started");
+    while session.next_event(Duration::from_secs(5)).is_some() {}
+
+    let sent = wire.of("->");
+    let got = wire.of("<-");
+    assert!(
+        sent.iter()
+            .any(|line| line.contains(r#""method":"initialize""#)),
+        "nothing sent is recorded, or the handshake is missing: {sent:?}"
+    );
+    assert!(
+        got.iter().any(|line| line.contains(r#""result""#)),
+        "nothing received is recorded: {got:?}"
+    );
+    assert!(
+        got.iter().any(|line| line.contains("agent_message_chunk")),
+        "the words of the agent are not in the record: {got:?}"
+    );
+    // Every line of the record is a line the protocol carried: a record that added words of its
+    // own would be a second reading of the session, which is the thing it exists to check.
+    for line in sent.iter().chain(got.iter()) {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "a line of the record is not a frame of the protocol: {line:?}"
+        );
+    }
+    // And in the order they crossed: nothing can be answered before it is asked.
+    let lines = wire.lines();
+    let asked = lines
+        .iter()
+        .position(|line| line.contains(r#""method":"initialize""#))
+        .expect("the handshake is in the record");
+    let answered = lines
+        .iter()
+        .position(|line| line.starts_with("<- "))
+        .expect("an answer is in the record");
+    assert!(
+        asked < answered,
+        "the record has an answer before the question it answers: {lines:?}"
+    );
 }
 
 #[test]

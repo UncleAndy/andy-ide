@@ -16,11 +16,21 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use ide_agents::wire::Wire as _;
 use tracing_subscriber::EnvFilter;
 
 /// The size at which the log is rotated, as the requirements ask: ten megabytes.
 pub const LIMIT: u64 = 10 * 1024 * 1024;
+
+/// The size at which the wire log is rotated.
+///
+/// Larger than the log of the window, because a wire log carries the whole conversation: one prompt
+/// holds the entire context being sent to the model, and the summary of a compacted context alone
+/// has been known to run to a third of a megabyte. Sixty-four megabytes is a session's worth of
+/// traffic with room to spare, and the two files never exceed a hundred and twenty-eight.
+pub const WIRE_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// The name of the file the previous run was written to.
 fn previous_of(path: &Path) -> PathBuf {
@@ -35,6 +45,13 @@ pub fn path() -> PathBuf {
         .join("andy-ide.log")
 }
 
+/// Where the wire log lives: beside the log, and rotated the same way.
+pub fn wire_path() -> PathBuf {
+    state_dir(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+        .join("andy-ide")
+        .join("acp-wire.log")
+}
+
 /// The part of the path that comes from the environment, apart so it can be checked without
 /// touching the environment of a whole process (which the checks in one binary share).
 fn state_dir(
@@ -46,6 +63,105 @@ fn state_dir(
         .filter(|path| path.is_absolute())
         .or_else(|| home.map(|home| PathBuf::from(home).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
+}
+
+/// Whether the wire log is wanted, from `ANDY_IDE_WIRE`: on unless it is turned off.
+///
+/// On by default, because the reason to have it is a session that went differently from what the
+/// panel drew, and that is never known in advance. The traffic is large — every prompt carries the
+/// context — so there is a way out for a run that wants no file at all.
+fn wire_wanted(asked: Option<std::ffi::OsString>) -> bool {
+    match asked {
+        None => true,
+        Some(value) => !matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "0" | "no" | "off" | "false" | "silent"
+        ),
+    }
+}
+
+/// Every line that crossed the wire with one agent, in the order it crossed.
+///
+/// Written by the threads that own the agent's pipes (`ide_agents::session`), not by the panel: it
+/// is the protocol itself, so a line the panel hid, a line it could not parse, and a line it read
+/// as somebody's words are all in here as they went over. The times are counted from the moment the
+/// record was opened, which is what makes the gaps legible — a compaction is a pause of minutes
+/// between a line sent and the first line of its answer.
+pub struct WireLog {
+    log: Log,
+    started: Instant,
+}
+
+impl WireLog {
+    /// Open the record at `path`, making its directory if it is not there.
+    pub fn open(path: PathBuf, limit: u64) -> io::Result<Self> {
+        Ok(Self {
+            log: Log::open(path, limit)?,
+            started: Instant::now(),
+        })
+    }
+
+    /// One line, with the time it crossed and which way it went.
+    ///
+    /// Made into a single string and written in one call: several threads write here, and a line
+    /// split between two of them would be a record that reads as two broken ones.
+    fn line(&self, mark: &str, text: &str) {
+        let mut log = self.log.clone();
+        let at = self.started.elapsed().as_secs_f64();
+        let _ = log.write_all(format!("+{at:09.3} {mark} {text}\n").as_bytes());
+    }
+}
+
+impl ide_agents::wire::Wire for WireLog {
+    fn sent(&self, line: &str) {
+        self.line("->", line);
+    }
+
+    fn got(&self, line: &str) {
+        self.line("<-", line);
+    }
+
+    fn note(&self, text: &str) {
+        self.line("!!", text);
+    }
+}
+
+/// Starts the record for an agent about to be launched, or the record nobody asked for.
+///
+/// A wire log that cannot be opened is not a reason to refuse to talk to an agent: the agent runs,
+/// the lines are not recorded, and the reason is said in the log of the window.
+pub fn wire_start(spec: &ide_agents::AgentSpec, root: &Path) -> Arc<dyn ide_agents::wire::Wire> {
+    if !wire_wanted(std::env::var_os("ANDY_IDE_WIRE")) {
+        return Arc::new(ide_agents::wire::Silent);
+    }
+    let path = wire_path();
+    match WireLog::open(path.clone(), WIRE_LIMIT) {
+        Ok(wire) => {
+            let command = if spec.args.is_empty() {
+                spec.command.clone()
+            } else {
+                format!("{} {}", spec.command, spec.args.join(" "))
+            };
+            wire.note(&format!(
+                "agent {command} in {}, every line of it below",
+                root.display()
+            ));
+            tracing::info!(
+                path = %path.display(),
+                agent = %spec.name,
+                "the lines of this agent are written down as they cross"
+            );
+            Arc::new(wire)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %path.display(),
+                "the wire log cannot be opened: the lines of this agent are not recorded"
+            );
+            Arc::new(ide_agents::wire::Silent)
+        }
+    }
 }
 
 /// The log of this run: one file, rotated by size.
@@ -261,6 +377,77 @@ mod tests {
         // A relative `XDG_STATE_HOME` is not a state home: it counts only when it is absolute.
         let relative = state_dir(Some("state".into()), Some("/home/whoever".into()));
         assert_eq!(relative, PathBuf::from("/home/whoever/.local/state"));
+    }
+
+    #[test]
+    fn the_wire_log_names_its_file() {
+        let named = state_dir(
+            Some("/tmp/state-of-this-check".into()),
+            Some("/home/whoever".into()),
+        )
+        .join("andy-ide")
+        .join("acp-wire.log");
+        assert_eq!(
+            named,
+            PathBuf::from("/tmp/state-of-this-check/andy-ide/acp-wire.log"),
+            "the record of the wire is not beside the log of the window"
+        );
+    }
+
+    #[test]
+    fn the_wire_switch_is_read_from_the_environment() {
+        assert!(
+            wire_wanted(None),
+            "the record of the wire is written unless it is asked not to be"
+        );
+        for off in ["0", "no", "off", "false", "silent", " SILENT "] {
+            assert!(
+                !wire_wanted(Some(off.into())),
+                "{off:?} was not taken for a request to keep no record"
+            );
+        }
+        assert!(wire_wanted(Some("1".into())));
+    }
+
+    #[test]
+    fn both_directions_are_written_down_with_the_time_they_crossed() {
+        use ide_agents::wire::Wire;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acp-wire.log");
+        let wire = WireLog::open(path.clone(), WIRE_LIMIT).unwrap();
+
+        wire.note("agent hermes acp in /tmp/a-project, every line of it below");
+        wire.sent(r#"{"jsonrpc":"2.0","id":1,"method":"session/new"}"#);
+        wire.got(r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"abc"}}"#);
+        wire.note("stderr: something the agent complained about");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains(r#"-> {"jsonrpc":"2.0","id":1,"method":"session/new"}"#),
+            "the line sent to the agent is not in the record: {written:?}"
+        );
+        assert!(
+            written.contains(r#"<- {"jsonrpc":"2.0","id":1,"result":{"sessionId":"abc"}}"#),
+            "the line the agent sent is not in the record: {written:?}"
+        );
+        assert!(
+            written.contains("!! stderr: something the agent complained about"),
+            "the agent's own complaint is not in the record: {written:?}"
+        );
+        let timed: Vec<&str> = written
+            .lines()
+            .filter_map(|line| line.strip_prefix('+'))
+            .collect();
+        assert_eq!(
+            timed.len(),
+            4,
+            "a line of the record has no time: {written:?}"
+        );
+        assert!(
+            timed.iter().all(|line| line.len() > 9),
+            "the time is not written the way the record needs it: {written:?}"
+        );
     }
 
     #[test]

@@ -1434,14 +1434,23 @@ fn work(
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
-    let mut session =
-        match Session::start_with(&spec, &root, PermissionPolicy::Ask, resume, Some(progress)) {
-            Ok(session) => session,
-            Err(error) => {
-                let _ = replies.send(Reply::Failed(format!("{error}")));
-                return;
-            }
-        };
+    // Every line of this agent is written down as it crosses, by the threads that move it: the
+    // protocol is what a session is read back from when the panel has shown something else.
+    let wire = crate::log::wire_start(&spec, &root);
+    let mut session = match Session::start_with(
+        &spec,
+        &root,
+        PermissionPolicy::Ask,
+        resume,
+        Some(progress),
+        Some(wire),
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = replies.send(Reply::Failed(format!("{error}")));
+            return;
+        }
+    };
     // A load that resumes a session replays the conversation before it answers, and the
     // replay went into the session's own queue while the load's answer was being waited
     // for. It has to reach the panel before the ready line does: a panel that drew "ready"

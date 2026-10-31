@@ -19,6 +19,7 @@ pub mod command;
 pub mod protocol;
 pub mod registry;
 pub mod session;
+pub mod wire;
 
 pub use command::{parse as parse_command, parse_named, quote as quote_command};
 pub use protocol::{
@@ -28,6 +29,7 @@ pub use protocol::{
 };
 pub use registry::Registry;
 pub use session::{AgentSpec, Event, PermissionPolicy, Session};
+pub use wire::{Kept, Silent, Wire};
 
 /// Version of the crate, taken from its manifest.
 pub fn version() -> &'static str {
