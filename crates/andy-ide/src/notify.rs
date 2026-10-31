@@ -88,48 +88,43 @@ impl Surface for System {
 
 #[cfg(test)]
 mod try_the_desk {
-    /// Which words the desk refuses to show.
+    /// Four notifications that differ only in their words, and say which is which.
     ///
-    /// The probe that sent the window's own words was taken with an id and never shown, while plain
-    /// ones appeared — so the desk answers, and something about the notification is not to its
-    /// liking. Everything here stands for fifteen seconds, so nothing expires before the next
-    /// arrives, and each one differs from the next in its words alone.
+    /// The probe carrying the window's own words was taken with an id and never shown, while
+    /// plainer ones appeared. Each here carries its own application name, so the desk cannot take
+    /// one for a replacement of another; each stands twenty seconds and comes four seconds after
+    /// the last, long enough for a person to write down what arrived, in order, without guessing.
     #[test]
     #[ignore = "needs the desktop"]
     fn a_real_notification_reaches_the_desk() {
-        let show = |label: &str, summary: &str, body: &str, long: bool| {
-            let mut note = notify_rust::Notification::new();
-            note.appname("andy-ide").summary(summary).body(body);
-            if long {
-                note.timeout(notify_rust::Timeout::Milliseconds(15_000));
-            }
-            println!("{label}: {:?}", note.show().map(|handle| handle.id()));
-            std::thread::sleep(std::time::Duration::from_millis(1_500));
+        let show = |index: u32, summary: &str, body: &str| {
+            println!(
+                "{index}: {:?}",
+                notify_rust::Notification::new()
+                    .appname(&format!("andy-ide-probe-{index}"))
+                    .summary(summary)
+                    .body(body)
+                    .timeout(notify_rust::Timeout::Milliseconds(20_000))
+                    .show()
+                    .map(|handle| handle.id())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(4_000));
         };
-        show("1-ascii", "1-ascii", "1-ascii", true);
+        show(1, "ПРОБА 1: простой заголовок", "простой текст");
         show(
-            "2-the-windows-title",
+            2,
             "andy-ide: the agent is waiting for you",
-            "2 body in ascii",
-            true,
+            "ПРОБА 2: заголовок окна, простой текст",
         );
         show(
-            "3-a-russian-body",
-            "3-a-russian-body",
-            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
-            true,
+            3,
+            "ПРОБА 3: простой заголовок",
+            "Запрос выбора для проверки. Появился ли тост?",
         );
         show(
-            "4-the-windows-words",
+            4,
             "andy-ide: the agent is waiting for you",
-            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
-            true,
-        );
-        show(
-            "5-the-windows-words-short",
-            "andy-ide: the agent is waiting for you",
-            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
-            false,
+            "Запрос выбора для проверки. Появился ли тост?",
         );
     }
 }
