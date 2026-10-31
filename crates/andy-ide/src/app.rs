@@ -385,7 +385,7 @@ impl App {
             return;
         }
         let focused = ui.ctx().input(|input| input.focused);
-        let panel_in_front = self.dock.find_tab(&Tab::Agent).is_some();
+        let panel_in_front = self.panel_in_front();
         for (want, detail) in wanted {
             // The decision is written down before it is acted on. A want that arrives and is kept
             // back leaves no other trace — the panel simply says nothing — so "the notification did
@@ -411,6 +411,21 @@ impl App {
                 Ok(id) => self.state.status = format!("told the desk: {title} (id {id})"),
                 Err(reason) => self.state.status = format!("the desk refused: {reason}"),
             }
+        }
+    }
+
+    /// Whether the agent panel is the thing on screen, and not merely present in the dock.
+    ///
+    /// A tab that stands behind another tab is not saying anything: the person looking at the
+    /// terminal or at the editor cannot see the question waiting for them, so the news is theirs to
+    /// be told. Only the tab that is actually shown, in an uncollapsed leaf, is already saying it.
+    fn panel_in_front(&self) -> bool {
+        let Some(path) = self.dock.find_tab(&Tab::Agent) else {
+            return false;
+        };
+        match self.dock[path.node_path()].get_leaf() {
+            Some(leaf) => !leaf.collapsed && leaf.active == path.tab,
+            None => false,
         }
     }
 
@@ -880,6 +895,36 @@ mod tests {
             app.state.status.contains("no session bus in reach"),
             "the window did not say why: {:?}",
             app.state.status
+        );
+    }
+
+    #[test]
+    fn a_panel_behind_another_tab_is_not_saying_it() {
+        // The panel is in the dock, and the person cannot see it: the terminal stands where the
+        // question would be drawn. That is the case the notifications are for, and a check that
+        // counts a tab's presence for its being on screen would keep the desk silent through it.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        let written = app.watch_notifications();
+        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        show_panel(&mut app.dock, &mut app.state, Tab::Terminal);
+        assert!(
+            !app.panel_in_front(),
+            "the panel was put behind the terminal and still counts as being on screen"
+        );
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
+
+        draw_frame_with_focus(&mut app, true);
+
+        assert_eq!(
+            written.shown().len(),
+            1,
+            "the question stood behind the terminal, and the desk was told nothing: {:?}",
+            written.shown()
         );
     }
 
