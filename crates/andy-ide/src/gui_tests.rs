@@ -8031,6 +8031,95 @@ person: {lines:?}"
     }
 
     #[test]
+    fn the_answer_of_the_agent_is_brighter_than_the_plain_text_of_the_dark_theme() {
+        // The dark theme writes ordinary text in `#8C8C8C` on a `#1B1B1B` panel, which reads as
+        // faint for the thing a person is here to read; the answer is drawn a step brighter.
+        // Headings keep the theme's own strong colour, so the answer sits between plain text and a
+        // heading and never above one, and the light theme is left exactly as the theme has it.
+        //
+        // The colour checked is the one really painted: a markdown paragraph lays its glyphs with
+        // `Color32::PLACEHOLDER` sections, and a placeholder becomes the fallback colour of the
+        // text shape (`epaint/tessellator.rs`), which is the text colour of the ui.
+        for theme in [ide_core::Theme::Dark, ide_core::Theme::Light] {
+            let mut gui = Gui::new(&[("notes.rs", "let a = 1;\n")], Some("notes.rs"));
+            gui.app_mut().state.config.theme = theme;
+            // Alt+0 is the page the agent is on: without it the panel has no rectangle on screen.
+            gui.harness
+                .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+            gui.settle();
+            let answer = "the words of the answer of the agent";
+            gui.app_mut().state.agent.transcript.clear();
+            gui.app_mut()
+                .state
+                .agent
+                .transcript
+                .push(crate::agent::Line::Agent(answer.to_owned()));
+            gui.settle();
+
+            let panel = gui.app().state.agent.shown_rect.expect("the panel");
+            let mut painted = None;
+            for clipped in &gui.harness.output().shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    if text.galley.job.text == answer && panel.contains(text.pos) {
+                        painted = Some(text.fallback_color);
+                    }
+                }
+            }
+            let painted = painted
+                .unwrap_or_else(|| panic!("the answer was not drawn in the {theme:?} theme"));
+
+            let ((plain, strong, fill)) = match theme {
+                ide_core::Theme::Dark => {
+                    let visuals = egui::Visuals::dark();
+                    (
+                        visuals.text_color(),
+                        visuals.strong_text_color(),
+                        visuals.panel_fill,
+                    )
+                }
+                ide_core::Theme::Light => {
+                    let visuals = egui::Visuals::light();
+                    (
+                        visuals.text_color(),
+                        visuals.strong_text_color(),
+                        visuals.panel_fill,
+                    )
+                }
+            };
+            let luma = |colour: egui::Color32| {
+                0.299 * colour.r() as f32 + 0.587 * colour.g() as f32 + 0.114 * colour.b() as f32
+            };
+            let step = luma(painted) - luma(plain);
+            match theme {
+                ide_core::Theme::Dark => {
+                    assert!(
+                        step > 20.0,
+                        "the answer is painted {step:.0} brighter than plain text: too little to \
+                         notice ({painted:?} against {plain:?})"
+                    );
+                    // A heading in this theme is the brightest thing there is, and the answer may
+                    // not take its place. (In the light theme a heading is the *darkest* one, so
+                    // this is a question of the dark theme alone — and there the theme is left as
+                    // it is, which the check below says.)
+                    assert!(
+                        luma(painted) < luma(strong),
+                        "the answer is painted {painted:?}, at or above a heading ({strong:?}): the \
+                         block loses its shape"
+                    );
+                }
+                ide_core::Theme::Light => assert_eq!(
+                    painted, plain,
+                    "the light theme has the answer painted in a colour of its own"
+                ),
+            }
+            assert!(
+                (luma(painted) - luma(fill)).abs() >= 60.0,
+                "the answer is painted {painted:?} on {fill:?}, less than 60 apart"
+            );
+        }
+    }
+
+    #[test]
     fn the_emoji_of_the_service_answers_have_a_font_of_the_window_behind_them() {
         /// The first character of the heading of the context report: the one that was a box.
         const BRAIN: char = '\u{1F9E0}';

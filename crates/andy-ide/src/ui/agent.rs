@@ -81,6 +81,20 @@ fn request_text(ui: &Ui) -> egui::Color32 {
     }
 }
 
+/// The colour the body of an answer is written in.
+///
+/// The dark theme sets ordinary text in `#8C8C8C` on a `#1B1B1B` panel, and the answer is what a
+/// person is here to read: it is drawn a step brighter, while headings keep the theme's own strong
+/// colour (white in the dark theme) and stay the brightest thing of the block. The light theme is
+/// left alone — `#3C3C3C` on a pale panel has nothing to fix.
+fn answer_ink(ui: &Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_gray(170)
+    } else {
+        ui.visuals().text_color()
+    }
+}
+
 /// Whether the key was pressed with nothing else held.
 ///
 /// egui's `consume_key` asks for the modifiers a shortcut *needs* and lets others be held
@@ -1096,12 +1110,22 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         // several answers share the panel's ui, and a Grid under a shared
                         // id is what egui answers with "Second use of GRID ID …" over the
                         // block.
-                        super::markdown::answer(
-                            ui,
-                            &mut state.commonmark,
-                            egui::Id::new(("agent-answer", index)),
-                            text,
-                        );
+                        //
+                        // The body is drawn in `answer_ink`, one step brighter than the theme's
+                        // ordinary text: a markdown paragraph lays its glyphs with
+                        // `Color32::PLACEHOLDER` sections, and what those glyphs look like is
+                        // decided by the text colour of the ui (`epaint/tessellator.rs`: a
+                        // placeholder becomes the fallback colour of the shape).
+                        ui.scope(|ui| {
+                            ui.visuals_mut().widgets.noninteractive.fg_stroke.color =
+                                answer_ink(ui);
+                            super::markdown::answer(
+                                ui,
+                                &mut state.commonmark,
+                                egui::Id::new(("agent-answer", index)),
+                                text,
+                            );
+                        });
                     }
                     Line::Thinking(thought) => {
                         // The id is the block's place in the conversation, not the length
