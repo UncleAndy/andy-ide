@@ -602,35 +602,6 @@ pub fn set_mode_params(session: &str, mode: &str) -> Value {
     json!({"sessionId": session, "modeId": mode})
 }
 
-/// The mark Hermes puts on a row it wrote itself, read as the aside it is.
-///
-/// The runtime hands a background-process receipt, a wake-up, a model switch or an internal
-/// note to the model as `role="user"`, so they replay as user chunks, and a panel that drew
-/// them as the words of the person put words in their mouth. `_meta.hermes.notice` is how a
-/// surface is told that the row belongs to Hermes and not to the person
-/// (`acp_adapter/server.py::_history_notice_meta`). The line to draw is the compact text kept
-/// beside the row: the raw text is a wall meant for the model, and a row whose line was not
-/// kept falls back to its own first line, never to the whole of it.
-fn notice(update: &Value, raw: &str) -> Option<Update> {
-    let mark = update.get("_meta")?.get("hermes")?.get("notice")?;
-    let kind = mark
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let kept = mark
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let text = if kept.is_empty() {
-        first_line(raw)
-    } else {
-        kept.to_owned()
-    };
-    Some(Update::Notice { kind, text })
-}
-
 /// The first line of a message, as much of it as one aside can hold.
 ///
 /// Public because the panel draws the same fallback for a service row of an agent that did not
@@ -661,19 +632,12 @@ pub fn first_line(text: &str) -> String {
 pub enum Update {
     /// A piece of the agent's answer, to be appended as it arrives.
     Text(String),
-    /// The person's own words, as a restored session replays them. The other side of a
-    /// conversation belongs in the transcript too: a panel that drew every replay as the
-    /// agent's answer would read as a conversation that was all answers.
+    /// A replayed `role="user"` row, read as it came. The other side of a conversation
+    /// belongs in the transcript too: a panel that drew every replay as the agent's answer
+    /// would read as a conversation that was all answers. A row the runtime wrote itself — a
+    /// background-process receipt, a note from its gateway, a summary of a compacted context —
+    /// arrives the same way, and is told apart where it is drawn.
     You(String),
-    /// A row Hermes wrote itself, replayed with the mark that says so: a background-process
-    /// receipt, a wake-up, an internal note. It belongs to the agent and not to the person,
-    /// and it is drawn as an aside (`from_value`, `notice`).
-    Notice {
-        /// What kind of service row it is, as Hermes names it (`process_complete`, …).
-        kind: String,
-        /// The short line kept for a surface to paint.
-        text: String,
-    },
     /// A piece of the agent's reasoning: shown folded away, because it is the working
     /// out and not the answer.
     Thinking(String),
@@ -737,12 +701,12 @@ impl Update {
                     .and_then(|content| content.get("text"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                // The mark of a row Hermes wrote itself, and the words of the person as
-                // they come without it.
-                match notice(update, text) {
-                    Some(aside) => aside,
-                    None => Update::You(text.to_owned()),
-                }
+                // Either the words of the person, or a row the runtime wrote itself and
+                // handed to the model as a `role="user"` row. Nothing on the update tells
+                // them apart — Hermes marks no such row — so a row like that is told apart by
+                // the shape of its opening words where it is drawn
+                // (`andy_ide::agent::service_line`).
+                Update::You(text.to_owned())
             }
             "tool_call" | "tool_call_update" => Update::ToolCall {
                 id: update
@@ -1254,43 +1218,32 @@ mod tests {
     }
 
     #[test]
-    fn a_row_hermes_wrote_itself_is_read_as_an_aside() {
-        // The runtime hands a background-process receipt to the model as a `role="user"` row,
-        // and Hermes marks it when it replays it
-        // (`acp_adapter/server.py::_history_notice_meta`): the line to draw is the compact
-        // text kept beside the row, and the row itself is a wall meant for the model.
-        let marked = Update::from_value(&json!({
-            "sessionUpdate": "user_message_chunk",
-            "content": {"type": "text", "text":
-                "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
-            "_meta": {"hermes": {"notice": {
-                "kind": "process_complete", "text": "Background Process Finished: make"
-            }}}
-        }));
+    fn a_replayed_row_is_read_as_the_words_it_came_as() {
+        // A background-process receipt is handed to the model as a `role="user"` row, so it
+        // replays as an ordinary user chunk, and Hermes marks nothing on it. A mark of the
+        // kind another client might send is not read either: such a row is told apart by the
+        // shape of its opening words where it is drawn (`andy_ide::agent::service_line`), and a
+        // field nothing sends is a field nothing should be believed about.
         assert_eq!(
-            marked,
-            Update::Notice {
-                kind: "process_complete".to_owned(),
-                text: "Background Process Finished: make".to_owned(),
-            },
-            "the service row was read as the words of the person"
+            Update::from_value(&json!({
+                "sessionUpdate": "user_message_chunk",
+                "content": {"type": "text", "text": "why is the sky blue?"}
+            })),
+            Update::You("why is the sky blue?".to_owned())
         );
 
-        // A row whose short line was not kept falls back to its own first line, never to the
-        // whole of it.
-        let bare = Update::from_value(&json!({
-            "sessionUpdate": "user_message_chunk",
-            "content": {"type": "text", "text":
-                "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
-            "_meta": {"hermes": {"notice": {"kind": "internal_notification", "text": ""}}}
-        }));
+        let receipt = "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\n\
+                        Output:\nall good]";
         assert_eq!(
-            bare,
-            Update::Notice {
-                kind: "internal_notification".to_owned(),
-                text: "[IMPORTANT: Background process proc_1 completed normally (exit code 0)."
-                    .to_owned(),
-            }
+            Update::from_value(&json!({
+                "sessionUpdate": "user_message_chunk",
+                "content": {"type": "text", "text": receipt},
+                "_meta": {"hermes": {"notice": {
+                    "kind": "process_complete", "text": "Background Process Finished: make"
+                }}}
+            })),
+            Update::You(receipt.to_owned()),
+            "something was read from a mark Hermes does not send"
         );
     }
 

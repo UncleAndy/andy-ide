@@ -5769,11 +5769,12 @@ mod the_agent_panel {
     #[test]
     fn a_row_the_agent_wrote_itself_is_an_aside_and_not_the_words_of_the_person() {
         // The runtime hands a background-process receipt to the model as a `role="user"` row,
-        // so the replay used to send it as an ordinary user chunk: a restored conversation
-        // showed a wall of service text as the words of the person. Hermes marks such a row,
-        // and the panel draws the short line it was given, as an aside of the agent. The
-        // stand-in sends both shapes — the mark of a newer agent and the bare receipt of an
-        // older one — when it is asked for them (`ACP_TEST_NOTICES`).
+        // and the summary of a compacted context the same way, so a replay sends them as
+        // ordinary user chunks: a restored conversation used to show those walls as the words
+        // of the person. Nothing on the row says otherwise — Hermes marks none of them — so the
+        // panel tells them apart by the shape of their opening words, and draws an aside of the
+        // agent instead. The stand-in sends all three kinds when it is asked for them
+        // (`ACP_TEST_NOTICES`).
         let Some(agent) = stand_in() else {
             println!("the stand-in agent is not built: the check was skipped");
             return;
@@ -5820,26 +5821,37 @@ mod the_agent_panel {
             lines.iter().any(|line| matches!(
                 line,
                 crate::agent::Line::Notice { kind, text }
-                    if kind == "process_complete" && text == "Background Process Finished: make"
+                    if kind == "background process"
+                        && text == "[IMPORTANT: Background process proc_1 completed normally (exit code 0)."
             )),
-            "the marked service row is not a line of its own: {lines:?}"
+            "a receipt is not a line of its own: {lines:?}"
         );
         assert!(
             lines.iter().any(|line| matches!(
                 line,
                 crate::agent::Line::Notice { kind, text }
-                    if kind == "notice"
+                    if kind == "background process"
                         && text == "[IMPORTANT: Background process proc_2 completed normally (exit code 0)."
             )),
-            "a receipt of an agent that does not mark its rows came back as the words of the \
-person: {lines:?}"
+            "the second receipt is not a line of its own: {lines:?}"
+        );
+        // And the summary of a compacted context: a wall meant for the model, of which a person
+        // is told that it happened and how much it took.
+        assert!(
+            lines.iter().any(|line| matches!(
+                line,
+                crate::agent::Line::Notice { kind, text }
+                    if kind == "context compaction" && text.contains("lines)")
+            )),
+            "the summary of a compacted context is not a line of its own: {lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| matches!(
-                line,
-                crate::agent::Line::You(text) if text.contains("Background process")
-            )),
-            "the service row came back as the words of the person: {lines:?}"
+            !lines.iter().any(|line| match line {
+                crate::agent::Line::You(text) =>
+                    text.contains("Background process") || text.contains("CONTEXT COMPACTION"),
+                _ => false,
+            }),
+            "a service row came back as the words of the person: {lines:?}"
         );
         assert!(
             lines.iter().any(|line| matches!(
@@ -5854,12 +5866,18 @@ person: {lines:?}"
         let panel = gui.app().state.agent.shown_rect.expect("the panel");
         let drawn = gui.harness.output().shapes.iter().any(|clipped| {
             matches!(&clipped.shape, egui::Shape::Text(text)
-                if text.galley.job.text.contains("Background Process Finished")
+                if text.galley.job.text.contains("context compacted")
                     && text.pos.x >= panel.left()
                     && text.pos.y >= panel.top()
                     && text.pos.y <= panel.bottom())
         });
         assert!(drawn, "the aside is not drawn in the panel");
+        // And the wall itself is nowhere on the screen.
+        let wall = gui.harness.output().shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(text)
+                if text.galley.job.text.contains("Earlier turns were compacted"))
+        });
+        assert!(!wall, "the wall of the summary was drawn into the panel");
         gui.app_mut().state.agent.stop();
     }
 

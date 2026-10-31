@@ -363,14 +363,13 @@ fn main() {
                         }
                     }));
                 }
-                // Rows Hermes wrote itself, for the checks that ask for them: an ordinary
+                // Rows the runtime wrote itself, for the checks that ask for them: an ordinary
                 // replay is what an agent sends, and a check that counts what is painted does
-                // not want extra lines.
+                // not want extra lines. They travel as the `role="user"` rows a real runtime
+                // hands the model, and the panel has only their opening words to go by.
                 if std::env::var_os("ACP_TEST_NOTICES").is_some() {
-                    // A row Hermes wrote itself — a background-process receipt — travels with the
-                    // mark that says so, and the panel draws the short line beside it instead of
-                    // the wall of text the model was given
-                    // (`acp_adapter/server.py::_history_notice_meta`).
+                    // A background-process receipt: the wall is meant for the model, and the
+                    // panel keeps an aside out of its first line.
                     send(json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
@@ -378,13 +377,11 @@ fn main() {
                             "sessionId": session_name,
                             "update": {
                                 "sessionUpdate": "user_message_chunk",
-                                "content": {"type": "text", "text": "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"},
-                                "_meta": {"hermes": {"notice": {"kind": "process_complete", "text": "Background Process Finished: make"}}}
+                                "content": {"type": "text", "text": "[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nOutput:\nall good]"}
                             }
                         }
                     }));
-                    // And the shape an agent older than the mark sends: the same receipt as an
-                    // ordinary user chunk, which the panel has only its opening words to go by.
+                    // The same receipt again, as a row of the run before it.
                     send(json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
@@ -393,6 +390,19 @@ fn main() {
                             "update": {
                                 "sessionUpdate": "user_message_chunk",
                                 "content": {"type": "text", "text": "[IMPORTANT: Background process proc_2 completed normally (exit code 0).\nOutput:\nall good]"}
+                            }
+                        }
+                    }));
+                    // And the summary of a compacted context: handed to the model as a
+                    // `role="user"` row like the rest, and the longest wall of the three.
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_name,
+                            "update": {
+                                "sessionUpdate": "user_message_chunk",
+                                "content": {"type": "text", "text": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.\n\n- a kept turn\n- another kept turn\n\n--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"}
                             }
                         }
                     }));

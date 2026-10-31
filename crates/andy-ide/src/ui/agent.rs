@@ -1152,7 +1152,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                         // the business of the agent, with the kind of the row under the
                         // pointer. Never a block, because it is not the words of the person.
                         ui.weak(format!("  ↳ {text}"))
-                            .on_hover_text(format!("hermes: {kind}"));
+                            .on_hover_text(format!("service row: {kind}"));
                     }
                 }
             }
