@@ -21,6 +21,14 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 /// stroke through the text rather than a boundary under it.
 const CELL_PAD: f32 = 2.0;
 
+/// The narrowest a column may be drawn when nothing else fits: a cell of two words still has to
+/// be read as a cell.
+const NARROWEST_CELL: f32 = 24.0;
+
+/// The room a column keeps beyond its longest word: a layout weighs the edge of a glyph against
+/// the room it was given, so a word exactly as wide as its column is a coin toss.
+const WORD_ROOM: f32 = 1.0;
+
 /// Draws the Markdown of one answer, under an id of its own.
 pub fn answer(ui: &mut Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str) {
     for (index, part) in split(text).into_iter().enumerate() {
@@ -137,17 +145,16 @@ fn render(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
 /// measured forty points wide, wrapped into a pillar one word per line (a row 255 points tall,
 /// measured), and the column keeps the narrow width it was born with.
 ///
-/// So the room a column wants is remembered from the frame before: what the widest cell of
-/// that column actually took when it was given its share. Until a table has been drawn once,
-/// the columns share the room equally; from then on they are as wide as their words, and only
-/// shrunk — in proportion — when together they want more than they have.
+/// So the room a column wants is measured from the words of its cells (`column_widths`) and not
+/// remembered from the frame before: what a cell took is only ever as wide as the room it was
+/// given, so a column that has wrapped can never say that it wants more.
 fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let mut drawn_slots: Vec<egui::layers::ShapeIdx> = Vec::new();
     let mut drawn_cells: Vec<Vec<egui::Rect>> = Vec::new();
     let frame = egui::Frame::group(ui.style()).show(ui, |ui| {
         let gap = ui.spacing().item_spacing.x;
-        let widths = column_widths(ui, columns, gap);
+        let widths = column_widths(ui, table, columns, gap);
 
         // A place for each band is taken before the words are drawn, so the bands stay behind
         // the text — a band of every other row, the heading counted.
@@ -207,7 +214,6 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
             });
             rows.push(line);
         }
-        remember_widths(ui, columns, &rows, &widths);
         drawn_slots = slots;
         drawn_cells = rows;
     });
@@ -217,50 +223,134 @@ fn draw_table(ui: &mut Ui, cache: &mut CommonMarkCache, table: &Table) {
     bands_and_lines(ui, frame.response.rect, &drawn_slots, &drawn_cells);
 }
 
-/// How wide each column is to be drawn: what it wanted last frame, or an equal share of the
-/// room when the table is drawn for the first time.
-fn column_widths(ui: &Ui, columns: usize, gap: f32) -> Vec<f32> {
+/// How wide each column is to be drawn: the room its words want, and never less than the room
+/// its longest word needs.
+///
+/// Every cell is measured — the room its longest word needs and the room all of its words would
+/// take on one line — and a column takes the wider of the two, but no more than half the table,
+/// so that one cell of a paragraph does not push the other columns into a corner. A word wider
+/// than the column it stands in is broken at an arbitrary character: epaint falls back from a
+/// word boundary to a dash, to punctuation and then to any character at all, so the letters of
+/// one word stand on two lines with no hyphen between them. That is why the longest word of a
+/// column is the least that column may be given.
+///
+/// When the columns together want more than the table has, each is first given its longest word
+/// and what is left over is shared out as each column wants it. Only when one longest word per
+/// column does not fit either is the room shared out as the columns want it, and a word is
+/// broken as the last resort.
+fn column_widths(ui: &Ui, table: &Table, columns: usize, gap: f32) -> Vec<f32> {
     let usable = (ui.available_width() - gap * columns.saturating_sub(1) as f32).max(1.0);
-    let wanted: Vec<f32> = ui
-        .ctx()
-        .data(|data| data.get_temp(ui.id().with("column-widths")))
-        .unwrap_or_default();
-    if wanted.len() != columns {
-        return vec![usable / columns as f32; columns];
+    let mut word = vec![0.0f32; columns];
+    let mut want = vec![0.0f32; columns];
+    for row in &table.rows {
+        for (column, cell) in row.iter().enumerate().take(columns) {
+            let (longest, whole) = cell_measures(ui, cell);
+            word[column] = word[column].max(longest);
+            want[column] = want[column].max(whole);
+        }
     }
-    let total: f32 = wanted.iter().sum();
-    if total <= usable || total <= 0.0 {
-        return wanted;
+    for column in 0..columns {
+        let ceiling = (usable * 0.5).max(word[column]);
+        want[column] = want[column].clamp(word[column], ceiling);
     }
-    // Together they want more than there is: each keeps its share of what there is.
-    wanted
-        .iter()
-        .map(|width| (width / total * usable).max(24.0))
+    let total: f32 = want.iter().sum();
+    if total <= usable {
+        return want;
+    }
+    let least: f32 = word.iter().sum();
+    if least < usable {
+        // Every word still fits: what is left over goes as each column wants it.
+        let left = usable - least;
+        let extra: f32 = want.iter().zip(&word).map(|(w, f)| (w - f).max(0.0)).sum();
+        if extra <= 0.0 {
+            return word;
+        }
+        return want
+            .iter()
+            .zip(&word)
+            .map(|(w, f)| f + (w - f).max(0.0) / extra * left)
+            .collect();
+    }
+    // Even one word per column does not fit: the room is shared out as the columns want it, and
+    // a word still wider than its column is broken — there is nothing left to give it, and a
+    // table wider than the panel is worse than a word cut in two.
+    want.iter()
+        .map(|width| (width / total * usable).max(NARROWEST_CELL))
         .collect()
 }
 
-/// Remembers how wide the columns turned out, for the next frame to lay out.
+/// The room a cell asks for: the room its longest word needs, and the room all of its words
+/// would take on one line.
 ///
-/// A frame is asked for when what the columns took differs from what they were given: the
-/// table is then drawn again with the measured widths, and until it does the first frame's
-/// equal shares are what is on screen.
-fn remember_widths(ui: &Ui, columns: usize, rows: &[Vec<egui::Rect>], given: &[f32]) {
-    let wanted: Vec<f32> = (0..columns)
-        .map(|column| {
-            rows.iter()
-                .filter_map(|row| row.get(column))
-                .map(|rect| rect.width())
-                .fold(0.0, f32::max)
-        })
-        .collect();
-    let settling = wanted
-        .iter()
-        .zip(given)
-        .any(|(wanted, given)| (wanted - given).abs() > 0.5);
+/// The words are measured in the faces the renderer will set them in — a code span is monospace,
+/// which is wider than the body face — so a column laid out from this is never narrower than the
+/// widest thing that has to fit in it. A measurement is kept, keyed by the cell and the size of
+/// the face: the answer stands until the font changes, and a table is drawn every frame.
+fn cell_measures(ui: &Ui, cell: &str) -> (f32, f32) {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let words = words_of(cell);
+    let id = egui::Id::new("andy-ide-table-cell")
+        .with(body.size.to_bits())
+        .with(cell.trim());
+    if let Some(kept) = ui.ctx().data(|data| data.get_temp::<(f32, f32)>(id)) {
+        return kept;
+    }
+    let faces: Vec<egui::FontId> = if cell.contains('`') {
+        vec![body.clone(), egui::TextStyle::Monospace.resolve(ui.style())]
+    } else {
+        vec![body.clone()]
+    };
+    let colour = ui.visuals().text_color();
+    let mut longest = 0.0f32;
+    let mut whole = 0.0f32;
+    for face in &faces {
+        whole = whole.max(room_of(ui, &words, face, colour));
+        for word in words.split_whitespace() {
+            longest = longest.max(room_of(ui, word, face, colour));
+        }
+    }
+    if whole <= 0.0 {
+        // The fonts are not in hand yet: nothing worth keeping, and the next frame asks again.
+        return (0.0, 0.0);
+    }
+    let longest = if longest > 0.0 {
+        longest + WORD_ROOM
+    } else {
+        0.0
+    };
     ui.ctx()
-        .data_mut(|data| data.insert_temp(ui.id().with("column-widths"), wanted));
-    if settling {
-        ui.ctx().request_repaint();
+        .data_mut(|data| data.insert_temp(id, (longest, whole)));
+    (longest, whole)
+}
+
+/// The room a line of words takes when it is not wrapped at all.
+fn room_of(ui: &Ui, text: &str, font: &egui::FontId, colour: egui::Color32) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), colour)
+        .size()
+        .x
+}
+
+/// The words of a cell as the renderer will set them, its Markdown taken off: the marks of
+/// emphasis are not drawn, and a link shows its words rather than its address.
+fn words_of(cell: &str) -> String {
+    let mut words = String::new();
+    for event in Parser::new_ext(cell, options()) {
+        match event {
+            Event::Text(text) | Event::Code(text) | Event::InlineMath(text) => {
+                words.push_str(&text);
+            }
+            Event::SoftBreak | Event::HardBreak | Event::Html(_) | Event::InlineHtml(_) => {
+                words.push(' ');
+            }
+            _ => {}
+        }
+    }
+    let words = words.trim();
+    if words.is_empty() {
+        cell.trim().to_owned()
+    } else {
+        words.to_owned()
     }
 }
 

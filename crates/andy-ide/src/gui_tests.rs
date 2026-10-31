@@ -6763,6 +6763,52 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_table_column_is_never_narrower_than_its_longest_word() {
+        // A word wider than the column it stands in is broken at an arbitrary character: the
+        // renderer falls back from a word boundary to a dash, to punctuation and then to any
+        // character at all, so the letters of one word stand on two lines with no hyphen
+        // between them. Eight columns in a panel of this width gave every column the same
+        // narrow share, and the long cell came out in pieces.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        let long = "pneumonoultramicroscopicsilicovolcanoconiosis";
+        let heading = "| a | b | c | d | e | f | g | h |";
+        let rule = "| --- | --- | --- | --- | --- | --- | --- | --- |";
+        let row = format!("| 1 | {long} | 3 | 4 | 5 | 6 | 7 | 8 |");
+        let table = format!("{heading}\n{rule}\n{row}\n");
+        gui.app_mut().state.agent.transcript.clear();
+        gui.app_mut()
+            .state
+            .agent
+            .transcript
+            .push(crate::agent::Line::Agent(table));
+        gui.settle();
+
+        // The word is drawn at all: a table that is not drawn cuts nothing in half, and a check
+        // of the words alone would pass on an empty panel.
+        assert!(
+            gui.harness.output().shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Text(text)
+                    if text.galley.job.text.contains(long))
+            }),
+            "the cell with the long word is not drawn"
+        );
+        let cut = words_cut_in_half(&gui, long);
+        assert!(cut.is_empty(), "the table cuts a word in half: {cut:?}");
+        gui.app_mut().state.agent.stop();
+    }
+
+    #[test]
     fn a_line_without_spaces_stays_inside_the_panel() {
         // Code and inline code carry lines with nowhere to break — a path, a hash, a URL —
         // and the answer is read in a panel, not in a page that scrolls sideways. What the
@@ -6826,6 +6872,57 @@ mod the_agent_panel {
             }
         }
         None
+    }
+
+    /// The words a painted line cut in half: a line of words that stops in the middle of one —
+    /// the character after it is not a space, and there is more text after it.
+    ///
+    /// A defect of the table and not of the words: a column narrower than the longest word in it
+    /// makes the renderer break that word at an arbitrary character.
+    fn words_cut_in_half(gui: &Gui, needle: &str) -> Vec<String> {
+        let mut cut: Vec<String> = Vec::new();
+        for clipped in &gui.harness.output().shapes {
+            let egui::Shape::Text(text) = &clipped.shape else {
+                continue;
+            };
+            let source = text.galley.job.text.as_str();
+            if !source.contains(needle) {
+                continue;
+            }
+            let rows = &text.galley.rows;
+            let mut cursor = 0usize;
+            for (index, row) in rows.iter().enumerate() {
+                let written: String = row.glyphs.iter().map(|glyph| glyph.chr).collect();
+                if written.is_empty() {
+                    continue;
+                }
+                let Some(at) = source.get(cursor..).and_then(|rest| rest.find(&written)) else {
+                    continue;
+                };
+                let end = cursor + at + written.len();
+                cursor = end;
+                if index + 1 == rows.len() {
+                    break;
+                }
+                let after = source.get(end..).and_then(|rest| rest.chars().next());
+                if after.is_some_and(|chr| !chr.is_whitespace()) {
+                    cut.push(word_at(source, end));
+                }
+            }
+        }
+        cut
+    }
+
+    /// The word a position stands in, for the message a failed check leaves behind.
+    fn word_at(text: &str, at: usize) -> String {
+        let before = text[..at]
+            .rfind(char::is_whitespace)
+            .map(|index| index + text[index..].chars().next().map_or(1, char::len_utf8))
+            .unwrap_or(0);
+        let after = text[at..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |index| at + index);
+        text[before..after].to_owned()
     }
 
     /// The vertical lines of the panel between two x positions.
