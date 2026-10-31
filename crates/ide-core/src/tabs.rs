@@ -86,6 +86,23 @@ impl Tabs {
         }
     }
 
+    /// Moves the active tab one along the strip, wrapping at both ends.
+    ///
+    /// With fewer than two tabs open there is nowhere to go, and with none in front the step lands
+    /// on the first (or the last, going back) — a state reachable by closing the tab that was in
+    /// front, and one where a step that did nothing would be a key that does nothing.
+    pub fn step(&mut self, forward: bool) {
+        let len = self.items.len();
+        if len < 2 {
+            return;
+        }
+        self.active = match self.active() {
+            Some(active) if forward => Some((active + 1) % len),
+            Some(active) => Some((active + len - 1) % len),
+            None => Some(if forward { 0 } else { len - 1 }),
+        };
+    }
+
     /// All tabs, in display order.
     pub fn items(&self) -> &[TabItem] {
         &self.items

@@ -73,3 +73,51 @@ fn buffer_id_is_kept_per_tab() {
     assert_eq!(t.items()[0].buffer_id, 11);
     assert_eq!(t.items()[1].buffer_id, 22);
 }
+
+#[test]
+fn stepping_walks_the_strip_and_wraps_at_both_ends() {
+    let mut t = Tabs::new();
+    t.open(PathBuf::from("/a.rs"), 1);
+    t.open(PathBuf::from("/b.rs"), 2);
+    t.open(PathBuf::from("/c.rs"), 3);
+    t.set_active(0);
+
+    t.step(true);
+    assert_eq!(t.active(), Some(1));
+    t.step(true);
+    t.step(true);
+    assert_eq!(t.active(), Some(0), "the step did not wrap forward");
+
+    t.step(false);
+    assert_eq!(t.active(), Some(2), "the step did not wrap back");
+}
+
+#[test]
+fn stepping_with_one_tab_stays_on_it() {
+    let mut t = Tabs::new();
+    t.open(PathBuf::from("/a.rs"), 1);
+    t.step(true);
+    t.step(false);
+    assert_eq!(t.active(), Some(0));
+}
+
+#[test]
+fn stepping_with_nothing_open_does_nothing() {
+    let mut t = Tabs::new();
+    t.step(true);
+    t.step(false);
+    assert_eq!(t.active(), None);
+}
+
+#[test]
+fn stepping_with_nothing_in_front_takes_the_first_tab() {
+    let mut t = Tabs::new();
+    t.open(PathBuf::from("/a.rs"), 1);
+    t.open(PathBuf::from("/b.rs"), 2);
+    t.close_forced(t.active().expect("the tab that was opened last"));
+
+    // Both are still open in the strip; the step has to land somewhere rather than do nothing.
+    assert_eq!(t.len(), 1);
+    t.step(true);
+    assert_eq!(t.active(), Some(0));
+}

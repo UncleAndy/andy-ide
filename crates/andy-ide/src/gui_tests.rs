@@ -378,6 +378,50 @@ fn ctrl_shift_m_toggles_the_preview() {
 }
 
 #[test]
+fn ctrl_tab_walks_the_open_tabs_and_ctrl_shift_tab_walks_back() {
+    let mut gui = Gui::new(
+        &[("a.rs", "one\n"), ("b.rs", "two\n"), ("c.rs", "three\n")],
+        Some("a.rs"),
+    );
+    gui.settle();
+    // Two more files, opened the way a person opens them.
+    gui.app_mut().state.open_file(Path::new("b.rs"));
+    gui.app_mut().state.open_file(Path::new("c.rs"));
+    gui.settle();
+    assert_eq!(gui.app().state.tabs.len(), 3, "three files are not open");
+    let front = gui.app().state.tabs.active().expect("a tab in front");
+    assert_eq!(
+        gui.app().state.active_buffer().expect("a buffer").text(),
+        "three\n",
+        "the file opened last is not the one in front"
+    );
+
+    // Forward, and past the end: a strip of three is walked in a circle.
+    for step in 1..=3 {
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
+        gui.settle();
+        assert_eq!(
+            gui.app().state.tabs.active(),
+            Some((front + step) % 3),
+            "Ctrl+Tab did not walk to the tab after the one in front ({step})"
+        );
+    }
+
+    // And back again.
+    gui.harness.key_press_modifiers(
+        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        egui::Key::Tab,
+    );
+    gui.settle();
+    assert_eq!(
+        gui.app().state.tabs.active(),
+        Some((front + 2) % 3),
+        "Ctrl+Shift+Tab did not walk to the tab before"
+    );
+}
+
+#[test]
 fn the_preview_takes_the_whole_editing_room() {
     // The preview stands where the source was, across the whole of the editing room: beside
     // it, every line would appear twice and neither would have the width to be read in. The
@@ -1463,12 +1507,19 @@ mod the_symbol_list {
     }
 }
 
-/// The F12 chords, against the real input state: `consume_key` ignores a Shift it
-/// was not asked about, so the order the chords are read in decides who wins.
-mod f12_chords {
+/// The keys of the window, driven through the table the window really reads.
+///
+/// The chords used to be mirrored here by hand, which meant a check could pass while the window did
+/// something else. What is read now is `app::KEYS` itself, in the order the window reads it, so a
+/// chord that a longer one swallows fails here rather than in a person's hands.
+mod the_keys_of_the_window {
 
-    /// Reads the chords in the order `App::handle_keys` reads them, against the
-    /// real input state, and says which one fired.
+    const CTRL: egui::Modifiers = egui::Modifiers::CTRL;
+    const SHIFT: egui::Modifiers = egui::Modifiers::SHIFT;
+    const ALT: egui::Modifiers = egui::Modifiers::ALT;
+    const NONE: egui::Modifiers = egui::Modifiers::NONE;
+
+    /// Reads a chord the way `App::handle_keys` reads it and says what it asked for.
     fn fired(key: egui::Key, modifiers: egui::Modifiers) -> Vec<&'static str> {
         let mut fired = Vec::new();
         let input = egui::RawInput {
@@ -1486,38 +1537,14 @@ mod f12_chords {
             ..Default::default()
         };
         let mut output = egui::Context::default().run_ui(input, |ui| {
-            let project = ui.ctx().input_mut(|input| {
-                input.consume_key(
-                    egui::Modifiers::CTRL
-                        .plus(egui::Modifiers::SHIFT)
-                        .plus(egui::Modifiers::ALT),
-                    egui::Key::N,
-                )
-            });
-            if project {
-                fired.push("project symbols");
-            }
-            let file = ui
-                .ctx()
-                .input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
-            if file {
-                fired.push("file symbols");
-            }
-            let references = ui
-                .ctx()
-                .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12));
-            if references {
-                fired.push("references");
-            }
-            let definition = ui
-                .ctx()
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F12));
-            if definition {
-                fired.push("definition");
+            for (shortcut, command) in crate::app::KEYS {
+                if ui.ctx().input_mut(|input| input.consume_shortcut(shortcut)) {
+                    fired.push(command.name());
+                    break;
+                }
             }
         });
-        // The frame produced a font texture that nobody renders here; dropping it
-        // without saying so panics in `epaint`.
+        // A window that hands textures back without the atlas behind them panics in `epaint`.
         output.textures_delta.clear();
         fired
     }
@@ -1525,33 +1552,49 @@ mod f12_chords {
     #[test]
     fn each_chord_asks_for_exactly_one_thing() {
         assert_eq!(
-            fired(
-                egui::Key::N,
-                egui::Modifiers::CTRL
-                    .plus(egui::Modifiers::SHIFT)
-                    .plus(egui::Modifiers::ALT)
-            ),
+            fired(egui::Key::N, CTRL.plus(SHIFT).plus(ALT)),
             vec!["project symbols"],
             "Ctrl+Alt+Shift+N was taken by a less specific chord"
         );
+        assert_eq!(fired(egui::Key::F12, CTRL), vec!["file symbols"]);
+        assert_eq!(fired(egui::Key::F12, SHIFT), vec!["references"]);
+        assert_eq!(fired(egui::Key::F12, NONE), vec!["the definition"]);
+        assert_eq!(fired(egui::Key::F3, SHIFT), vec!["the match before"]);
+        assert_eq!(fired(egui::Key::F3, NONE), vec!["the match after"]);
         assert_eq!(
-            fired(egui::Key::F12, egui::Modifiers::CTRL),
-            vec!["file symbols"]
+            fired(egui::Key::Tab, CTRL),
+            vec!["the next tab"],
+            "Ctrl+Tab is not a key of the window"
         );
-        // Shift+F12 before the bare key: `consume_key` ignores a Shift it was
-        // not asked about, so plain F12 first would swallow the reference list.
         assert_eq!(
-            fired(egui::Key::F12, egui::Modifiers::SHIFT),
-            vec!["references"]
+            fired(egui::Key::Tab, CTRL.plus(SHIFT)),
+            vec!["the tab before"],
+            "Ctrl+Shift+Tab was read as the plain Ctrl+Tab"
         );
+        assert_eq!(fired(egui::Key::S, CTRL), vec!["save"]);
         assert_eq!(
-            fired(egui::Key::F12, egui::Modifiers::NONE),
-            vec!["definition"]
+            fired(egui::Key::S, CTRL.plus(SHIFT)),
+            vec!["save everything"],
+            "Ctrl+Shift+S was read as the plain Ctrl+S"
+        );
+        assert_eq!(fired(egui::Key::F6, SHIFT), vec!["rename"]);
+        assert_eq!(fired(egui::Key::B, CTRL.plus(SHIFT)), vec!["blame"]);
+        assert_eq!(fired(egui::Key::F12, ALT), vec!["the terminal"]);
+    }
+
+    #[test]
+    fn a_chord_that_is_not_a_key_of_the_window_asks_for_nothing() {
+        assert!(
+            fired(egui::Key::Z, CTRL).is_empty(),
+            "Ctrl+Z is not a key of this window yet"
+        );
+        assert!(
+            fired(egui::Key::Tab, NONE).is_empty(),
+            "a bare Tab belongs to the widgets, not to the window"
         );
     }
 }
 
-/// The project-symbol search `Ctrl+Alt+Shift+N` opens.
 mod the_symbol_search {
     use super::*;
     use crate::ui::results::{Hit, SymbolKind};

@@ -367,150 +367,254 @@ impl App {
     }
 }
 
-impl App {
-    fn handle_keys(&mut self, ui: &egui::Ui) {
-        let close = KeyboardShortcut::new(Modifiers::CTRL, Key::W);
-        let save = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
-        let save_all = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::S);
-        // Ctrl+Shift+V would paste: the window layer treats any Ctrl+V as a paste,
-        // whatever else is held down.
-        let preview = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::M);
-        let quick_open = KeyboardShortcut::new(Modifiers::CTRL, Key::P);
-        // Alt+F12 is the terminal in IntelliJ, and F12 alone is taken by "go to
-        // definition".
-        let terminal = KeyboardShortcut::new(Modifiers::ALT, Key::F12);
-        // Alt+9 is the Git panel in IntelliJ.
-        let git_panel = KeyboardShortcut::new(Modifiers::ALT, Key::Num9);
-        // The blame of the line under the caret, asked for and not shown by default:
-        // walking the history of a file is not something to do on every keystroke.
-        let blame = KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::B);
-        // Alt+0 is the agents panel: the keys around it are taken (Alt+9 is Git,
-        // Alt+F12 the terminal), and the bottom strip is where a conversation belongs.
-        let agent_panel = KeyboardShortcut::new(Modifiers::ALT, Key::Num0);
+/// What a key of the window asks for.
+///
+/// These used to be a run of `if`s inside `handle_keys`, where `consume_shortcut` and `consume_key`
+/// stood side by side and the order of two lines decided which of two overlapping chords won
+/// (`Shift+F12` had to be read before `F12`, or the plain key swallowed the reference list). They
+/// are a table now: one row per key, the row says what happens, and reading a key is one loop over
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Command {
+    CloseTab,
+    Save,
+    SaveAll,
+    TogglePreview,
+    QuickOpen,
+    Find,
+    Replace,
+    NextMatch,
+    PreviousMatch,
+    ProjectSymbols,
+    FileSymbols,
+    References,
+    Definition,
+    Rename,
+    Blame,
+    Terminal,
+    Git,
+    Agent,
+    NextTab,
+    PreviousTab,
+}
 
-        // The longer shortcut has to be taken first: Ctrl+Shift+S would
-        // otherwise be read as Ctrl+S with a stray modifier.
-        let save_all_pressed = ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&save_all));
-        let preview_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&preview));
-        let quick_open_pressed = ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&quick_open));
-        let save_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&save));
-        let close_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&close));
-        let terminal_pressed = ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&terminal));
-        let git_pressed = ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&git_panel));
-        let blame_pressed = ui.ctx().input_mut(|input| input.consume_shortcut(&blame));
-        let agent_pressed = ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&agent_panel));
+impl Command {
+    /// Does what the key asked for.
+    ///
+    /// Every command is given the same two things: the state of the window, and the dock — a panel
+    /// that is asked for may have to be brought back onto screen and put in front.
+    fn run(self, state: &mut AppState, dock: &mut DockState<Tab>) {
+        match self {
+            Command::CloseTab => {
+                if let Some(index) = state.tabs.active() {
+                    state.close_tab(index);
+                }
+            }
+            Command::Save => {
+                state.save_active();
+            }
+            Command::SaveAll => {
+                state.save_all();
+            }
+            Command::TogglePreview => {
+                state.preview_open = !state.preview_open;
+            }
+            Command::QuickOpen => {
+                state.quick_open.open();
+            }
+            Command::Find => {
+                crate::ui::search::open(state, false);
+            }
+            Command::Replace => {
+                crate::ui::search::open(state, true);
+            }
+            Command::NextMatch => {
+                crate::ui::search::step(state, true);
+            }
+            Command::PreviousMatch => {
+                crate::ui::search::step(state, false);
+            }
+            Command::ProjectSymbols => {
+                state.open_symbol_search();
+            }
+            Command::FileSymbols => {
+                state.file_symbols();
+            }
+            Command::References => {
+                state.find_references();
+            }
+            Command::Definition => {
+                state.goto_definition();
+            }
+            Command::Rename => {
+                state.begin_rename();
+            }
+            Command::Blame => {
+                state.toggle_blame();
+            }
+            Command::Terminal => {
+                show_panel(dock, state, Tab::Terminal);
+            }
+            Command::Git => {
+                show_panel(dock, state, Tab::Git);
+            }
+            Command::Agent => {
+                show_panel(dock, state, Tab::Agent);
+            }
+            Command::NextTab => {
+                state.tabs.step(true);
+            }
+            Command::PreviousTab => {
+                state.tabs.step(false);
+            }
+        }
+    }
 
-        if save_all_pressed {
-            self.state.save_all();
-        }
-        if preview_pressed {
-            self.state.preview_open = !self.state.preview_open;
-        }
-        if terminal_pressed {
-            show_panel(&mut self.dock, &mut self.state, Tab::Terminal);
-        }
-        if git_pressed {
-            show_panel(&mut self.dock, &mut self.state, Tab::Git);
-        }
-        if blame_pressed {
-            self.state.toggle_blame();
-        }
-        if agent_pressed {
-            show_panel(&mut self.dock, &mut self.state, Tab::Agent);
-        }
-        if quick_open_pressed {
-            self.state.quick_open.open();
-        }
-        if save_pressed {
-            self.state.save_active();
-        }
-        if close_pressed && let Some(index) = self.state.tabs.active() {
-            self.state.close_tab(index);
-        }
-        // Find and replace in the file, on the keys every editor gives them.
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::F))
-        {
-            crate::ui::search::open(&mut self.state, false);
-        }
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::H))
-        {
-            crate::ui::search::open(&mut self.state, true);
-        }
-        // F3 walks the matches of the search that is already in the bar. Shift+F3 is read
-        // first: `consume_key` treats a modifier it was not asked about as irrelevant, so a
-        // plain F3 would swallow the one with Shift.
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F3))
-        {
-            crate::ui::search::step(&mut self.state, false);
-        }
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F3))
-        {
-            crate::ui::search::step(&mut self.state, true);
-        }
-        // The project symbols keep the key the spec gives them. IntelliJ puts
-        // the file structure on Ctrl+F12 and the project search on
-        // Ctrl+Alt+Shift+N, and so does this editor.
-        let project_symbols = ui.ctx().input_mut(|input| {
-            input.consume_key(
-                Modifiers::CTRL.plus(Modifiers::SHIFT).plus(Modifiers::ALT),
-                Key::N,
-            )
-        });
-        if project_symbols {
-            self.state.open_symbol_search();
-        }
-        let file_symbols = ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::CTRL, Key::F12));
-        if file_symbols {
-            self.state.file_symbols();
-        }
-        // Shift+F12 before the bare key: `consume_key` treats a Shift it was not
-        // asked about as irrelevant, so checking plain F12 first swallowed the
-        // reference list and went to the definition instead.
-        let references = ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F12));
-        if references {
-            self.state.find_references();
-        }
-        // Shift+F6 is "rename" in every JetBrains editor, and the modal it opens
-        // owns the keyboard while it is up.
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::F6))
-        {
-            self.state.begin_rename();
-        }
-        // F12 is the usual "go to definition" everywhere else, and it is a bare
-        // key, so it is read from the events rather than as a shortcut.
-        let f12 = ui
-            .ctx()
-            .input_mut(|input| input.consume_key(Modifiers::NONE, Key::F12));
-        if f12 {
-            self.state.goto_definition();
+    /// The row in words, for the checks that read the table the way the window does.
+    #[cfg(test)]
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Command::CloseTab => "close the tab",
+            Command::Save => "save",
+            Command::SaveAll => "save everything",
+            Command::TogglePreview => "the preview",
+            Command::QuickOpen => "quick open",
+            Command::Find => "find",
+            Command::Replace => "replace",
+            Command::NextMatch => "the match after",
+            Command::PreviousMatch => "the match before",
+            Command::ProjectSymbols => "project symbols",
+            Command::FileSymbols => "file symbols",
+            Command::References => "references",
+            Command::Definition => "the definition",
+            Command::Rename => "rename",
+            Command::Blame => "blame",
+            Command::Terminal => "the terminal",
+            Command::Git => "the git panel",
+            Command::Agent => "the agent panel",
+            Command::NextTab => "the next tab",
+            Command::PreviousTab => "the tab before",
         }
     }
 }
 
+/// The keys the window answers to.
+///
+/// One row per key, and the longer chord of two always first: a key with more modifiers held down
+/// must never be read as the shorter one under it. The checks drive this table itself, so a chord
+/// that a longer one would swallow fails a test rather than a person's hands.
+pub(crate) const KEYS: &[(KeyboardShortcut, Command)] = &[
+    // The project-symbol search and the file structure keep the keys IntelliJ gives them.
+    (
+        KeyboardShortcut::new(
+            Modifiers::CTRL.plus(Modifiers::SHIFT).plus(Modifiers::ALT),
+            Key::N,
+        ),
+        Command::ProjectSymbols,
+    ),
+    // Ctrl+Shift+Tab before Ctrl+Tab, for the reason in the note above.
+    (
+        KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab),
+        Command::PreviousTab,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::Tab),
+        Command::NextTab,
+    ),
+    // Ctrl+Shift+S before Ctrl+S, and Shift+F6 before the bare keys around it: Shift+F6 is
+    // "rename" in every JetBrains editor, and the modal it opens owns the keyboard while it is up.
+    (
+        KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::S),
+        Command::SaveAll,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::S),
+        Command::Save,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::F6),
+        Command::Rename,
+    ),
+    // Ctrl+Shift+V would paste: the window layer treats any Ctrl+V as a paste, whatever else is
+    // held down, so the preview keeps Ctrl+Shift+M.
+    (
+        KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::M),
+        Command::TogglePreview,
+    ),
+    // Ctrl+Shift+B is the blame of the line under the caret — asked for and not shown by default:
+    // walking the history of a file is not something to do on every keystroke.
+    (
+        KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::B),
+        Command::Blame,
+    ),
+    // Shift+F3 walks the matches of the search already in the bar, backwards.
+    (
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::F3),
+        Command::PreviousMatch,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::NONE, Key::F3),
+        Command::NextMatch,
+    ),
+    // Alt+F12 is the terminal in IntelliJ, Alt+9 the Git panel and Alt+0 the agents panel: the keys
+    // around them are taken, and the bottom strip is where a conversation belongs.
+    (
+        KeyboardShortcut::new(Modifiers::ALT, Key::F12),
+        Command::Terminal,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::ALT, Key::Num9),
+        Command::Git,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::ALT, Key::Num0),
+        Command::Agent,
+    ),
+    // The F12 family: the reference list and the file structure before the bare key, which is
+    // "go to definition".
+    (
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::F12),
+        Command::References,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::F12),
+        Command::FileSymbols,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::NONE, Key::F12),
+        Command::Definition,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::W),
+        Command::CloseTab,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::P),
+        Command::QuickOpen,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::F),
+        Command::Find,
+    ),
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::H),
+        Command::Replace,
+    ),
+];
+
+impl App {
+    /// Reads the keys of the window from the table of them.
+    fn handle_keys(&mut self, ui: &egui::Ui) {
+        // One key, one action: the first row that matches takes the key and the rows under it are
+        // left alone.
+        for (shortcut, command) in KEYS {
+            if ui.ctx().input_mut(|input| input.consume_shortcut(shortcut)) {
+                command.run(&mut self.state, &mut self.dock);
+                break;
+            }
+        }
+    }
+}
 /// Brings a panel's tab to the front, wherever the user has dragged it.
 ///
 /// The keyboard follows to that pane: a panel brought forward is the one that is
