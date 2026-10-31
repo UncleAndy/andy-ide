@@ -25,13 +25,18 @@ use egui_dock::TabViewer;
 
 use crate::state::AppState;
 
-/// The window's fonts, with one more behind them.
+/// The window's fonts, with two more behind them.
 ///
 /// The fonts egui brings carry no `↳` and none of the arrows an editor wants to use, and a
-/// character a font does not have is drawn as an empty box. DejaVu Sans goes **behind** the
-/// built-in ones — last in each family, so it is only ever reached for a character that nothing
-/// before it has — and no more than the missing signs are taken from it: the look of the text is
-/// the one the window already had.
+/// character a font does not have is drawn as an empty box. Two fonts go **behind** the built-in
+/// ones — last in each family, so they are only ever reached for a character that nothing before
+/// them has — and no more than the missing signs are taken from them: the look of the text is the
+/// one the window already had.
+///
+/// * DejaVu Sans, for the signs a font of text carries and this one does not (`↳`, `↑`, `⚠`).
+/// * OpenMoji Black, monochrome, for emoji: the NotoEmoji egui brings is older than the emoji the
+///   agent writes (`🧠` and the circles `🟠🟢🟡` of its status lines came out as boxes), and DejaVu
+///   has no emoji at all. The file, its licence and how the subset was cut: `assets/README.md`.
 pub fn fonts_with_fallback() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -40,12 +45,16 @@ pub fn fonts_with_fallback() -> egui::FontDefinitions {
             "../../assets/DejaVuSans.ttf"
         ))),
     );
+    fonts.font_data.insert(
+        "openmoji-black".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/OpenMoji-black.ttf"
+        ))),
+    );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("dejavu-sans".to_owned());
+        let behind = fonts.families.entry(family).or_default();
+        behind.push("dejavu-sans".to_owned());
+        behind.push("openmoji-black".to_owned());
     }
     fonts
 }

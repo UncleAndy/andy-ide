@@ -8031,6 +8031,76 @@ person: {lines:?}"
     }
 
     #[test]
+    fn the_emoji_of_the_service_answers_have_a_font_of_the_window_behind_them() {
+        /// The first character of the heading of the context report: the one that was a box.
+        const BRAIN: char = '\u{1F9E0}';
+        // The agent writes `🧠 Context Window` for its context report and marks its status lines
+        // with `🟠🟢🟡`. The NotoEmoji egui brings is older than those characters, DejaVu Sans has
+        // no emoji at all, and a character that no font of the window has is drawn as an empty box
+        // — which is what the brain of that heading was. OpenMoji Black goes behind both.
+        //
+        // The question asked here is the map of characters, not `has_glyphs`. `has_glyphs` answers
+        // by comparing the face that owns a character with the face that carries the replacement
+        // box `◻` (`epaint/text/font.rs`, false negative noted in its own comment) — and in this
+        // window that face is NotoEmoji, which owns `✅`, `🔍`, `📊`, `⌛`, `🔒`, `🚀` and `⚠` as
+        // well: they are drawn, and `has_glyphs` still says no to them.
+        //
+        // The family asked is the one this panel is drawn with: a `FontId` is answered for the
+        // family it names, and the monospace one answers no to every character.
+        let mut gui = Gui::new(&[("notes.rs", "let a = 1;\n")], Some("notes.rs"));
+        gui.settle();
+        let family = egui::FontFamily::Proportional;
+        let emoji = [
+            "\u{1F9E0}",
+            "\u{1F7E0}",
+            "\u{1F7E2}",
+            "\u{1F7E1}",
+            "\u{2705}",
+            "\u{274C}",
+            "\u{1F50D}",
+            "\u{1F4CA}",
+            "\u{26A0}",
+            "\u{23F3}",
+            "\u{1F512}",
+            "\u{1F680}",
+            "\u{1F3D7}",
+            "\u{1F9EE}",
+        ];
+        for one in emoji {
+            let character = one.chars().next().expect("one character");
+            let fonts = gui.harness.ctx.fonts_mut(|fonts| {
+                fonts
+                    .fonts
+                    .font(&family)
+                    .characters()
+                    .get(&character)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            assert!(
+                !fonts.is_empty(),
+                "no font of the window has {one:?}: it is drawn as an empty box"
+            );
+        }
+
+        // And the brain of that heading comes from the font added for the emoji, not from a
+        // backward step of some other one.
+        let brain = gui.harness.ctx.fonts_mut(|fonts| {
+            fonts
+                .fonts
+                .font(&family)
+                .characters()
+                .get(&BRAIN)
+                .cloned()
+                .unwrap_or_default()
+        });
+        assert!(
+            brain.iter().any(|name| name == "openmoji-black"),
+            "the brain is not drawn by the font added for the emoji: {brain:?}"
+        );
+    }
+
+    #[test]
     fn an_agent_that_was_on_duty_comes_back_with_another_panel_in_front() {
         // A window draws no panel that is not on screen, and a project that remembers the agent
         // which was on duty opens its connection at start. That connection used to sit
