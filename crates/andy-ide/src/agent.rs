@@ -221,6 +221,11 @@ enum Reply {
     Event(AgentEvent),
     /// The session could not be started, or the worker gave up.
     Failed(String),
+    /// What the desk said about one notification: the id it took it under, or why it refused.
+    Told {
+        title: String,
+        told: Result<u32, String>,
+    },
 }
 
 /// The worker thread, seen from the panel's side.
@@ -263,7 +268,7 @@ impl Waker {
 /// The worker's end of the replies: every reply wakes the window that reads them.
 struct Replies {
     outlet: Sender<Reply>,
-    pub(crate) waker: Waker,
+    waker: Waker,
 }
 
 impl Replies {
@@ -324,10 +329,6 @@ pub struct AgentState {
     /// card is asking for the keyboard to write it with.
     pub card_text: String,
     pub card_wants_focus: bool,
-    /// What the window should tell the person about when they are not looking at it: a question
-    /// that waits, and a turn that ended. Taken once a frame by the window, which decides whether
-    /// the desk is worth disturbing at all.
-    pub wanted: Vec<(crate::notify::Want, String)>,
     /// Which of the offered commands the keyboard is on, while a slash is being typed.
     pub command_pick: usize,
     /// The commands the agent offers — `/help`, `/model` and the rest — as it named them.
@@ -426,6 +427,9 @@ pub struct AgentState {
     connects: u32,
     /// The window, once it has drawn a frame: the worker wakes it when it has something to say.
     pub(crate) waker: Waker,
+    /// The desk this window would speak to, handed to the worker when the agent is started: the
+    /// worker is what tells the person now, wherever the window happens to be.
+    pub(crate) notifier: Arc<dyn crate::notify::Surface>,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -458,7 +462,6 @@ impl Default for AgentState {
             agent_line_open: false,
             card_text: String::new(),
             card_wants_focus: false,
-            wanted: Vec::new(),
             field_rect: None,
             below: 64.0,
             command: String::new(),
@@ -497,6 +500,7 @@ impl Default for AgentState {
             connected_at: None,
             #[cfg(test)]
             connects: 0,
+            notifier: Arc::new(crate::notify::System),
             waker: Waker::default(),
             worker: None,
             root: None,
@@ -509,17 +513,6 @@ impl Default for AgentState {
 }
 
 impl AgentState {
-    /// Notes something worth telling a person who is not looking at the panel.
-    fn want(&mut self, want: crate::notify::Want, detail: String) {
-        self.wanted.push((want, detail));
-    }
-
-    /// Takes what is waiting to be told: the window shows it, or drops it when the person is
-    /// already looking at the panel.
-    pub fn take_wanted(&mut self) -> Vec<(crate::notify::Want, String)> {
-        std::mem::take(&mut self.wanted)
-    }
-
     /// Points the panel at a project, reading its `agents.toml`.
     ///
     /// The worker is left alone when the root has not changed: a conversation survives
@@ -668,6 +661,7 @@ impl AgentState {
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
         let waker = self.waker.clone();
+        let desk = Arc::clone(&self.notifier);
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
             .spawn(move || {
@@ -681,6 +675,7 @@ impl AgentState {
                         outlet: answers,
                         waker,
                     },
+                    desk,
                 )
             });
         match started {
@@ -1356,6 +1351,15 @@ impl AgentState {
                 self.busy = false;
                 self.connecting = false;
             }
+            Reply::Told { title, told } => {
+                // What the desk did is said in the window as well as in the log: the person was
+                // looking elsewhere when it mattered, so when they come back the only place that can
+                // tell them the notification was never shown — and why — is here.
+                self.status = match told {
+                    Ok(id) => format!("told the desk: {title} (id {id})"),
+                    Err(reason) => format!("the desk refused: {reason}"),
+                };
+            }
             Reply::Event(event) => match event {
                 AgentEvent::Thinking(thought) => {
                     self.heard_the_agent();
@@ -1415,7 +1419,6 @@ impl AgentState {
                 }
                 AgentEvent::Permission { id, request } => {
                     self.status = request.title();
-                    self.want(crate::notify::Want::Asks, request.title().to_string());
                     self.asking = Some((id, request));
                 }
                 AgentEvent::Commands(commands) => {
@@ -1423,7 +1426,6 @@ impl AgentState {
                 }
                 AgentEvent::Choice { id, request } => {
                     self.status = request.title().to_owned();
-                    self.want(crate::notify::Want::Asks, request.title().to_string());
                     // A new question starts with nothing picked and nothing written: what was
                     // answered for the last one is not an answer to this one.
                     self.picked.clear();
@@ -1464,7 +1466,6 @@ impl AgentState {
                     // not part of a crash loop.
                     self.attempts = 0;
                     self.status = reason.clone();
-                    self.want(crate::notify::Want::Finished, reason.clone());
                     if let Some(queued) = self.queued.take() {
                         self.input = queued;
                         self.send();
@@ -1489,6 +1490,23 @@ impl AgentState {
     }
 }
 
+/// What an event asks a person for, if anything: one answer for both sides of the channel.
+///
+/// One place and not two: what the panel shows and what the desk is told are the same question, and
+/// an answer written out twice drifts.
+fn asking_for(event: &AgentEvent) -> Option<(crate::notify::Want, String)> {
+    match event {
+        AgentEvent::Permission { request, .. } => {
+            Some((crate::notify::Want::Asks, request.title().to_string()))
+        }
+        AgentEvent::Choice { request, .. } => {
+            Some((crate::notify::Want::Asks, request.title().to_string()))
+        }
+        AgentEvent::Finished(reason) => Some((crate::notify::Want::Finished, reason.clone())),
+        _ => None,
+    }
+}
+
 /// The worker: owns the session, so the panel never waits for one.
 fn work(
     spec: ide_agents::AgentSpec,
@@ -1497,6 +1515,7 @@ fn work(
     progress: Arc<Mutex<String>>,
     commands: Receiver<Command>,
     replies: Replies,
+    desk: Arc<dyn crate::notify::Surface>,
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
@@ -1656,6 +1675,31 @@ fn work(
                 event,
                 AgentEvent::Finished(_) | AgentEvent::Closed | AgentEvent::Failed(_)
             );
+            // Told from here, where the agent speaks, and not left to the panel: the window is
+            // drawn on demand, and one that is not on screen — another workspace, a person away from
+            // the desk — is given no frames at all. A notice waiting for a frame waits for the person
+            // to come back to the window, which is the one moment it is of no use.
+            if let Some((want, detail)) = asking_for(&event) {
+                let (title, body) = want.message(&detail);
+                let told = desk.show(&title, &body);
+                match &told {
+                    Ok(id) => tracing::info!(
+                        ?want,
+                        %detail,
+                        id,
+                        "the desk took the notification, told by the agent's own thread"
+                    ),
+                    Err(reason) => tracing::warn!(
+                        ?want,
+                        %detail,
+                        %reason,
+                        "the desk refused the notification"
+                    ),
+                }
+                if replies.send(Reply::Told { title, told }).is_err() {
+                    return;
+                }
+            }
             if replies.send(Reply::Event(event)).is_err() {
                 return;
             }
@@ -1748,6 +1792,32 @@ mod grouping_tests {
         assert!(
             the_panel_asked_for_it(&ctx),
             "the window was not asked for a frame, so an event of the agent waits for the person"
+        );
+    }
+
+    #[test]
+    fn a_desk_that_refuses_is_said_in_the_window() {
+        // A notification the desk never showed leaves no trace where the person can find it: they were
+        // looking elsewhere by definition. The desk is spoken to by the thread of the agent, so its
+        // answer comes back to the panel as a reply — and the panel has to put it where the person will
+        // look, in the window. Without this, the only report of a broken desk is silence.
+        let reason = crate::notify::Surface::show(&crate::notify::Refused, "Ответ готов", "")
+            .expect_err("a desk that refuses is the check's own");
+        let mut agent = AgentState::default();
+        agent.take(Reply::Told {
+            title: "Ответ готов".to_owned(),
+            told: Err(reason.clone()),
+        });
+
+        assert!(
+            agent.status.contains("refused"),
+            "the window did not say the desk refused: {:?}",
+            agent.status
+        );
+        assert!(
+            agent.status.contains(&reason),
+            "the window did not say why: {:?}",
+            agent.status
         );
     }
 

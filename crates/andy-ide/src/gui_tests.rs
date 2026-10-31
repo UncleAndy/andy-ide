@@ -6884,6 +6884,51 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_question_reaches_the_desk_without_the_window_being_drawn() {
+        // The window is drawn on demand, and one that is not on screen — another workspace, a person
+        // away from the desk — is given no frames at all: egui cannot be woken into one, which is what
+        // a repaint asked for from another thread found out on Wayland. So the desk is told by the
+        // thread the agent speaks on, and this asks for exactly that: nothing is drawn after the
+        // request, and the desk is told all the same.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let written = gui.app_mut().watch_notifications();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.app_mut().state.agent.send();
+
+        // From here nothing is drawn at all.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while written.shown().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let shown = written.shown();
+        assert_eq!(
+            shown.len(),
+            1,
+            "the desk was told {shown:?} about one question, frames or no frames"
+        );
+        assert_eq!(
+            shown[0].0, "Ждём вашего ответа",
+            "the title does not say the agent waits: {}",
+            shown[0].0
+        );
+        assert_eq!(
+            shown[0].1, "Which variant should I write?",
+            "the body is not the question itself"
+        );
+    }
+
+    #[test]
     fn the_window_says_how_long_the_agent_has_been_quiet() {
         // A turn that compacts its own context is silent for minutes, and a row sitting at
         // `answering…` all that time is what a hang looks like. Asked here: that the window says

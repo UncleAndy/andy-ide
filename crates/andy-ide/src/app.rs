@@ -371,58 +371,11 @@ impl App {
             self.layout_serialized_at = now;
         }
         self.state.save_workspace(layout, now, closing);
-        // And last, the one thing that leaves the window: a person who has walked away is told that
-        // the agent is waiting for them, or that the turn is over.
-        self.tell_the_person(ui);
-    }
-
-    /// Tells the person, on their desk, whenever the panel has something to say to them.
-    ///
-    /// Nothing is asked first, and nothing is kept back: a want that arrives is sent, every time. No
-    /// setting, no question of where the person is looking, no question of whether the panel is already
-    /// saying it — a notice held back for a moment that has passed would be a notification about the
-    /// past, and deciding for the person what they can see is not the window's business.
-    fn tell_the_person(&mut self, ui: &egui::Ui) {
-        let wanted = self.state.agent.take_wanted();
-        if wanted.is_empty() {
-            return;
-        }
-        let focused = ui.ctx().input(|input| input.focused);
-        let panel_in_front = self.panel_in_front();
-        for (want, detail) in wanted {
-            // The circumstances are written down beside the sending: a notification that surprises
-            // the person is otherwise hard to place, and "the notification did not appear" cannot be
-            // told from "the agent never asked" without a line that says the want arrived at all.
-            tracing::info!(
-                ?want,
-                %detail,
-                focused,
-                panel_in_front,
-                "the panel wants the person"
-            );
-            let (title, body) = want.message(&detail);
-            // What the desk did is said in the window as well as in the log: the person was looking
-            // elsewhere when it mattered, so when they come back the only place that can tell them
-            // the notification was never shown — and why — is here.
-            match self.notifier.show(&title, &body) {
-                Ok(id) => self.state.status = format!("told the desk: {title} (id {id})"),
-                Err(reason) => self.state.status = format!("the desk refused: {reason}"),
-            }
-        }
-    }
-
-    /// Whether the agent panel is the thing on screen, and not merely present in the dock.
-    ///
-    /// A tab that stands behind another tab is not saying anything: the person looking at the
-    /// terminal or at the editor cannot see the question waiting for them, so the news is theirs to
-    /// be told. Only the tab that is actually shown, in an uncollapsed leaf, is already saying it.
-    fn panel_in_front(&self) -> bool {
-        let Some(path) = self.dock.find_tab(&Tab::Agent) else {
-            return false;
-        };
-        match self.dock[path.node_path()].get_leaf() {
-            Some(leaf) => !leaf.collapsed && leaf.active == path.tab,
-            None => false,
+        // And last, the desk this window would speak to is handed to the worker: the thread the agent
+        // speaks on is what tells the person, and it does so whether or not this window is ever drawn
+        // again — a window on another workspace is given no frames at all.
+        if !std::sync::Arc::ptr_eq(&self.notifier, &self.state.agent.notifier) {
+            self.state.agent.notifier = std::sync::Arc::clone(&self.notifier);
         }
     }
 
@@ -431,6 +384,7 @@ impl App {
     pub(crate) fn watch_notifications(&mut self) -> std::sync::Arc<crate::notify::Written> {
         let written = std::sync::Arc::new(crate::notify::Written::default());
         self.notifier = written.clone();
+        self.state.agent.notifier = written.clone();
         written
     }
 }
@@ -847,108 +801,7 @@ mod tests {
         );
     }
 
-    /// One frame of the window with the keyboard (or without it), drawn by hand: whether the
-    /// window is in front is not something a check can ask for through the harness.
-    fn draw_frame_with_focus(app: &mut App, focused: bool) {
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            focused,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1200.0, 800.0),
-            )),
-            ..Default::default()
-        };
-        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
-        output.textures_delta.clear();
-    }
-
-    #[test]
-    fn a_note_reaches_the_desk_even_with_the_panel_in_front() {
-        // The person asked to be told, and the window is where they are looking: the note goes to the
-        // desk in that case too. Nothing about the window's focus or the panel's place keeps it back,
-        // so the check is the plain one — the want arrives, the desk is told.
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        let written = app.watch_notifications();
-        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Finished, "ready".to_owned()));
-
-        draw_frame_with_focus(&mut app, true);
-
-        assert_eq!(
-            written.shown().len(),
-            1,
-            "the panel was in front and nothing was told: {:?}",
-            written.shown()
-        );
-        assert!(
-            app.state.status.contains("told the desk"),
-            "the window did not say it told the desk: {:?}",
-            app.state.status
-        );
-    }
-
-    #[test]
-    fn a_note_reaches_the_desk_when_the_window_is_not_looked_at() {
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        let written = app.watch_notifications();
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
-
-        draw_frame_with_focus(&mut app, false);
-
-        assert_eq!(
-            written.shown().len(),
-            1,
-            "a window without the keyboard told the desk nothing: {:?}",
-            written.shown()
-        );
-        let (title, body) = written.shown().remove(0);
-        assert_eq!(title, "Ждём вашего ответа", "the title: {title}");
-        assert_eq!(body, "Run the tests?", "the body is not what the panel had");
-        assert!(
-            app.state.agent.wanted.is_empty(),
-            "the note was kept after it was told"
-        );
-    }
-
-    #[test]
-    fn a_desk_that_refuses_is_said_in_the_window() {
-        // A notification the desk never showed leaves no trace where the person can find it: they
-        // were looking elsewhere by definition. The window has to say what happened instead, or the
-        // only report of a broken desk is silence — which is what brought this check into being.
-        let project = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let mut app = app_with_project(project.path(), config.path());
-        app.notifier = std::sync::Arc::new(crate::notify::Refused);
-        app.state
-            .agent
-            .wanted
-            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
-
-        draw_frame_with_focus(&mut app, false);
-
-        assert!(
-            app.state.status.contains("refused"),
-            "the window did not say the desk refused: {:?}",
-            app.state.status
-        );
-        assert!(
-            app.state.status.contains("no session bus in reach"),
-            "the window did not say why: {:?}",
-            app.state.status
-        );
-    }
-
+    /// A window drawn by hand, frame by frame.
     fn draw_frames(app: &mut App, frames: usize) -> usize {
         let ctx = egui::Context::default();
         let mut shapes = 0;

@@ -3,8 +3,12 @@
 //! Two things are worth a notification: the agent is waiting for an answer, and a turn is over. Both
 //! are the moments a person who has walked away from the window wants to hear about, and both are
 //! already said inside it — so the notification is for the case where the window is not the thing
-//! being looked at, and nothing is shown while the panel is in front of them in a window that has
-//! the keyboard.
+//! being looked at. Nothing is asked first: a want that arrives is told, every time.
+//!
+//! Who tells is the thread the agent speaks on (`agent::work`), not the window: egui draws on demand,
+//! and a window that is not on screen — another workspace, a person away from the desk — is given no
+//! frames at all, so a notice left to the panel would wait for the person to come back to the window.
+//! The panel is told what the desk answered (`Reply::Told`) and says it in the status line.
 //!
 //! The system's own notifications carry them (`notify-rust`: the desktop's D-Bus service on Linux,
 //! `NSUserNotification` on macOS, a WinRT toast on Windows). A machine that cannot show one — no
@@ -69,7 +73,7 @@ pub fn probe() {
 }
 
 /// Somewhere a notification can be shown.
-pub trait Surface: Send {
+pub trait Surface: Send + Sync {
     /// Show one, or say why it could not be shown.
     ///
     /// The reason comes back rather than only going to the log, because a notification that was
