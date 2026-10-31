@@ -69,11 +69,13 @@ pub trait Surface: Send {
 
 /// How long a notification stands, and how long its connection is kept open for it.
 ///
-/// The desk's own default is a few seconds, chosen for a person already looking at the screen; being
-/// told is worth a little longer than that. It is also how long the handle is held: the desk destroys
-/// a notification whose sender it can no longer see, and the sender is this process — so the
-/// connection has to outlive the message it carried.
-pub const STANDING: std::time::Duration = std::time::Duration::from_secs(10);
+/// A minute, because the person these are for is away from the desk. The desk draws a banner for a
+/// few seconds of its own choosing and GNOME ignores any time asked of it, hiding a banner four
+/// seconds after it appears (`messageTray.js::NOTIFICATION_TIMEOUT`) — there the only way to be read
+/// is to be **critical**, which stands until it is put away; on a desk that honours the time asked,
+/// the minute is the minute. It is also how long the handle is held: the desk destroys a notification
+/// whose sender it can no longer see, and the sender is this process.
+pub const STANDING: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The connections the notifications were sent on, and when they were sent.
 ///
@@ -109,7 +111,12 @@ impl Surface for System {
         // Exactly the call the probe makes — summary, body, nothing else. No name of our own and no
         // time asked for: the probe from a terminal is drawn by the desk, the window's own is not, and
         // every difference between the two is a suspect until the two are the same call.
+        // Critical, at Andy word: a notice nobody can read in the four seconds the desk gives it
+        // is not a notice, and urgency is the only lever the protocol has that a desk honours. It
+        // also passes a desk own do-not-disturb setting, which is the right way round for the one
+        // thing the person is being told: the agent is waiting for them.
         match notify_rust::Notification::new()
+            .urgency(notify_rust::Urgency::Critical)
             .summary(title)
             .body(body)
             .timeout(notify_rust::Timeout::Milliseconds(
@@ -269,8 +276,8 @@ mod tests {
             "the handle was kept long after the notice was over"
         );
         assert!(
-            STANDING >= std::time::Duration::from_secs(8),
-            "a notice stands {STANDING:?}, which is not long enough to be read"
+            STANDING >= std::time::Duration::from_secs(60),
+            "a notice stands {STANDING:?}, and a person away from the desk is not back in a moment"
         );
     }
 
