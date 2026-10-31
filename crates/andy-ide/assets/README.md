@@ -50,6 +50,17 @@ characters — plus its 353 private-use entries, which are not characters in the
 Korean syllables and full-width punctuation are outside OpenMoji altogether and stay boxes whatever
 this file holds.
 
+**Known limitation: the emoji of this file are monochrome.** OpenMoji *Black* is the one-ink build
+(neither the original nor this subset has a `COLR` or `CPAL` table), and epaint paints glyphs as an
+alpha mask tinted with the colour of the text it stands in — there is no colour glyph support to play
+with (the rasteriser is `ab_glyph`). So every emoji here is drawn in one colour, the colour of the
+answer it appears in, and the coloured shapes lose the very thing that tells them apart: measured on
+the outlines, the five circles `🟠 🟡 🟢 🟣 🟤` are **one and the same drawing** (a single composite
+glyph), `🟥 🟦` are one, `🟨 🟩 🟪 🟫` are one, and only `🟧` and `🟰` have drawings of their own. The
+circles the agent marks its status lines with are therefore indistinguishable in the panel. Left as it
+is on purpose: colour would mean painting images of our own instead of glyphs, which is a feature of
+its own, not a font.
+
 Licence: **CC BY-SA 4.0** (<https://creativecommons.org/licenses/by-sa/4.0/>) — not the permissive
 licence of DejaVu. The name of the set and this line are the attribution, and anything shipped with
 the font inside carries it as well (a credits line or an About box beside the binary).
