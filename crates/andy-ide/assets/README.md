@@ -32,6 +32,18 @@ pyftsubset OpenMoji-black-glyf.ttf \
 Every emoji block is kept whole (1472 characters, 838 KB of the 1.4 MB original), so an emoji the
 agent starts using tomorrow is drawn without touching this file.
 
+What it buys, measured by asking the window for its map of characters (`Font::characters`, the same
+question the panel test asks): of the 1472, **523 are drawn by no other font of the window** and were
+empty boxes before this file was added — 505 of them at U+1F000 and above (the faces, the pictograms,
+the transport, the tools of U+1F9xx), the rest signs such as `🟠 🟡 🟢 🔴 🟣 🟤 🟥 🟦 🟧 🟨 🟩 🟪 🟫`, the
+circles the agent marks its status lines with. In both families alike.
+
+Still boxes, and knowingly so: 32 assigned characters the original has and this subset does not — the
+power symbols `⏻ ⏼ ⏽ ⏾` (U+23FB..U+23FE), the stick figures U+1FBC5..U+1FBC9 and 25 invisible tag
+characters — plus its 353 private-use entries, which are not characters in the first place. CJK,
+Korean syllables and full-width punctuation are outside OpenMoji altogether and stay boxes whatever
+this file holds.
+
 Licence: **CC BY-SA 4.0** (<https://creativecommons.org/licenses/by-sa/4.0/>) — not the permissive
 licence of DejaVu. The name of the set and this line are the attribution, and anything shipped with
 the font inside carries it as well (a credits line or an About box beside the binary).
