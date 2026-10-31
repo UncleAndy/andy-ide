@@ -8059,16 +8059,17 @@ person: {lines:?}"
             let panel = gui.app().state.agent.shown_rect.expect("the panel");
             let mut painted = None;
             for clipped in &gui.harness.output().shapes {
-                if let egui::Shape::Text(text) = &clipped.shape {
-                    if text.galley.job.text == answer && panel.contains(text.pos) {
-                        painted = Some(text.fallback_color);
-                    }
+                if let egui::Shape::Text(text) = &clipped.shape
+                    && text.galley.job.text == answer
+                    && panel.contains(text.pos)
+                {
+                    painted = Some(text.fallback_color);
                 }
             }
             let painted = painted
                 .unwrap_or_else(|| panic!("the answer was not drawn in the {theme:?} theme"));
 
-            let ((plain, strong, fill)) = match theme {
+            let (plain, strong, fill) = match theme {
                 ide_core::Theme::Dark => {
                     let visuals = egui::Visuals::dark();
                     (
