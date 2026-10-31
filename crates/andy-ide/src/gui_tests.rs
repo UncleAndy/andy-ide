@@ -378,6 +378,165 @@ fn ctrl_shift_m_toggles_the_preview() {
 }
 
 #[test]
+fn no_key_of_the_window_puts_text_into_the_file_it_was_pressed_in() {
+    // The editor reads the events of a frame itself, so every key of the window reaches it as well.
+    // This walks the table of the window and asks the same question of each key: the file in front
+    // is unchanged afterwards. The keys left out are the ones that ask a language server or start a
+    // panel — they say nothing about the editor, and a stand-in server is not here.
+    let left_out = [
+        "the definition",
+        "references",
+        "file symbols",
+        "project symbols",
+        "rename",
+        "the terminal",
+        "the git panel",
+        "the agent panel",
+    ];
+    for (shortcut, command) in crate::app::KEYS {
+        if left_out.contains(&command.name()) {
+            continue;
+        }
+        // Two files, because one of the keys closes a tab: a buffer that is gone is not a buffer
+        // that was written to.
+        let mut gui = Gui::new(&[("a.rs", "one\ntwo\n"), ("b.rs", "other\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut().state.open_file(Path::new("b.rs"));
+        gui.settle();
+        let before: Vec<(usize, String)> = gui
+            .app()
+            .state
+            .buffers
+            .iter()
+            .map(|(id, buffer)| (*id, buffer.text().to_owned()))
+            .collect();
+        assert!(
+            !before.is_empty(),
+            "nothing is open before the key is pressed"
+        );
+
+        gui.harness.event(egui::Event::Key {
+            key: shortcut.logical_key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: shortcut.modifiers,
+        });
+        gui.settle();
+
+        for (id, text) in before {
+            let Some(buffer) = gui.app().state.buffers.get(&id) else {
+                continue;
+            };
+            assert_eq!(
+                buffer.text(),
+                text,
+                "{} put text into the file it was pressed in",
+                command.name()
+            );
+            assert!(
+                !buffer.is_dirty(),
+                "{} marked the file it was pressed in as changed",
+                command.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn ctrl_tab_walks_away_without_touching_the_file_it_leaves() {
+    // The key is read by the table of commands *and* by the editor: the editor reads the events of
+    // a frame itself instead of consuming them, and the commands are read after the panel is drawn.
+    // A tab put into the file the walk leaves behind is what that costs.
+    let mut gui = Gui::new(&[("a.rs", "one\n"), ("b.rs", "two\n")], Some("a.rs"));
+    gui.settle();
+    gui.app_mut().state.open_file(Path::new("b.rs"));
+    gui.settle();
+
+    let front = gui.app().state.tabs.active().expect("a tab in front");
+    let left = gui.app().state.tabs.items()[front].buffer_id;
+    let before = gui
+        .app()
+        .state
+        .buffers
+        .get(&left)
+        .expect("the buffer of the file in front")
+        .text()
+        .to_owned();
+
+    gui.harness
+        .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
+    gui.settle();
+
+    assert_ne!(
+        gui.app().state.tabs.active(),
+        Some(front),
+        "Ctrl+Tab did not walk away from the file"
+    );
+    let after = gui
+        .app()
+        .state
+        .buffers
+        .get(&left)
+        .expect("the buffer of the file that was left");
+    assert_eq!(
+        after.text(),
+        before,
+        "the file that was left behind gained text"
+    );
+    assert!(
+        !after.is_dirty(),
+        "the file that was left behind was marked as changed"
+    );
+}
+
+#[test]
+fn ctrl_shift_tab_walks_back_without_taking_an_indent_off_the_file_it_leaves() {
+    let mut gui = Gui::new(&[("a.rs", "one\n"), ("b.rs", "    two\n")], Some("a.rs"));
+    gui.settle();
+    gui.app_mut().state.open_file(Path::new("b.rs"));
+    gui.settle();
+
+    let front = gui.app().state.tabs.active().expect("a tab in front");
+    let left = gui.app().state.tabs.items()[front].buffer_id;
+    let before = gui
+        .app()
+        .state
+        .buffers
+        .get(&left)
+        .expect("the buffer of the file in front")
+        .text()
+        .to_owned();
+
+    gui.harness.key_press_modifiers(
+        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        egui::Key::Tab,
+    );
+    gui.settle();
+
+    assert_ne!(
+        gui.app().state.tabs.active(),
+        Some(front),
+        "Ctrl+Shift+Tab did not walk back"
+    );
+    let after = gui
+        .app()
+        .state
+        .buffers
+        .get(&left)
+        .expect("the buffer of the file that was left");
+    assert_eq!(
+        after.text(),
+        before,
+        "the file that was left behind lost its indent"
+    );
+    assert!(
+        !after.is_dirty(),
+        "the file that was left behind was marked as changed"
+    );
+}
+
+#[test]
 fn ctrl_tab_walks_the_open_tabs_and_ctrl_shift_tab_walks_back() {
     let mut gui = Gui::new(
         &[("a.rs", "one\n"), ("b.rs", "two\n"), ("c.rs", "three\n")],

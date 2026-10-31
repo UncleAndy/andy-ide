@@ -941,6 +941,17 @@ fn push_section(job: &mut LayoutJob, text: &str, color: Color32, font: &FontId) 
     });
 }
 
+/// Whether a modifier that belongs to a command of the window is held.
+///
+/// The editor reads the events of a frame itself instead of consuming them, and the commands of the
+/// window are read after the panel has been drawn — so a key a command takes reaches this editor as
+/// well, a moment before the command walks away from the file it was pressed in. `Tab` is the one
+/// key where that showed: `Ctrl+Tab` walked the tabs *and* put a tab into the file it left behind,
+/// and `Ctrl+Shift+Tab` took an indent off it.
+fn command_modifier(modifiers: egui::Modifiers) -> bool {
+    modifiers.ctrl || modifiers.command || modifiers.alt
+}
+
 /// Applies keyboard and clipboard events.
 ///
 /// Returns `(text changed, caret moved)`: the second flag tells the view that
@@ -1091,11 +1102,14 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                         buffer.insert_text("\n");
                         changed = true;
                     }
-                    Key::Tab if modifiers.shift => {
+                    // `Shift` is the editor's own (it takes an indent off); a command modifier is
+                    // not: that key belongs to the window, and this editor has already been handed
+                    // the events.
+                    Key::Tab if !command_modifier(modifiers) && modifiers.shift => {
                         buffer.outdent();
                         changed = true;
                     }
-                    Key::Tab => {
+                    Key::Tab if !command_modifier(modifiers) => {
                         buffer.indent();
                         changed = true;
                     }
