@@ -24,7 +24,7 @@ pub use command::{parse as parse_command, parse_named, quote as quote_command};
 pub use protocol::{
     AgentCommand, ChoiceOption, ChoiceRequest, ConfigChoice, ConfigOption, Mode, Model,
     PermissionOption, PermissionRequest, REASONING, SessionInfo, SessionState, THOUGHT_LEVEL,
-    Update, Usage, list_sessions_prompt, sessions_from_text,
+    Update, Usage,
 };
 pub use registry::Registry;
 pub use session::{AgentSpec, Event, PermissionPolicy, Session};

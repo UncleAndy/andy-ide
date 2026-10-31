@@ -7381,30 +7381,6 @@ mod the_agent_panel {
         wait(&mut gui, "the conversations to arrive", |gui| {
             painted_text(gui, "renaming a symbol across crates")
         });
-        // The conversations had on other surfaces are here: the agent is asked in words for every
-        // conversation it keeps, because ACP's own list is filtered by the adapter and no request
-        // widens it (Hermes lists only its own). The stand-in answers that question with a
-        // telegram conversation and a desktop one, prose and a code fence around the array.
-        assert!(
-            painted_text(&gui, "tables in the terminal"),
-            "the conversations of other surfaces are missing from the list"
-        );
-        assert!(
-            gui.app()
-                .state
-                .agent
-                .sessions
-                .iter()
-                .any(|session| session.source.as_deref() == Some("telegram")),
-            "the surface the conversation was had on was lost"
-        );
-        // The question and the answer to it stay out of the conversation: asking the agent about
-        // its own bookkeeping must not become part of the transcript.
-        assert!(
-            gui.app().state.agent.transcript.is_empty(),
-            "the quiet turn left something in the transcript: {:?}",
-            gui.app().state.agent.transcript
-        );
         // The conversations of other places are here as well: the list is not asked for by
         // directory (Hermes filters by `cwd` when one is named, which hides every conversation had
         // on another surface — the stand-in answers an empty page to a filtered question, so this

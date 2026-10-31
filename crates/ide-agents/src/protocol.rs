@@ -210,9 +210,6 @@ pub fn list_sessions_params(cwd: Option<&std::path::Path>, cursor: Option<&str>)
 pub struct SessionInfo {
     /// The id to hand back to `session/load`.
     pub id: String,
-    /// Which surface the conversation was had on, when it is known — `telegram`, `desktop`,
-    /// `cli`, `acp`. ACP itself never says; the agent does when it is asked for the list.
-    pub source: Option<String>,
     /// Where that conversation lives, if the agent says.
     pub cwd: Option<String>,
     /// What the agent calls it, if it names it at all.
@@ -220,64 +217,6 @@ pub struct SessionInfo {
     /// When it was last touched, in the agent's own words — a string, because agents differ and
     /// a date nobody can parse is still worth showing.
     pub updated_at: Option<String>,
-}
-
-/// The words sent to the agent when the panel wants the list of conversations it keeps.
-///
-/// ACP's own `session/list` is filtered by the adapter that answers it (Hermes' ACP adapter asks
-/// its database for `source="acp"`, so only conversations started from an editor appear), and no
-/// request can widen it. The agent itself is not bound by that: it keeps the store, and can be
-/// asked to read it and answer with what is in it. The answer is asked for as JSON so that it can
-/// be read rather than guessed at.
-pub fn list_sessions_prompt(limit: usize) -> String {
-    format!(
-        "Answer with JSON only, no prose and no code fence: list my Hermes sessions from the \
-         sessions store (the `sessions` table of state.db), newest first, as a JSON array of \
-         objects with keys \"id\", \"title\", \"updated_at\" and \"source\". Include every \
-         surface — telegram, desktop, tui, cli, acp — and at most {limit} rows. If you cannot \
-         read the store, answer with an empty array."
-    )
-}
-
-/// Reads the conversations out of the agent's answer: the first JSON array in the text, read as
-/// rows of the four keys the prompt asks for. Anything else in the answer is ignored — an agent
-/// that explains itself first is still answering.
-pub fn sessions_from_text(text: &str) -> Vec<SessionInfo> {
-    let Some(start) = text.find('[') else {
-        return Vec::new();
-    };
-    // The array may be fenced or followed by prose: take the longest run that parses.
-    let tail = &text[start..];
-    let end = match tail.rfind(']') {
-        Some(end) => &tail[..=end],
-        None => tail,
-    };
-    let Ok(rows) = serde_json::from_str::<Value>(end) else {
-        return Vec::new();
-    };
-    let Some(rows) = rows.as_array() else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|row| {
-            let id = row
-                .get("id")
-                .or_else(|| row.get("sessionId"))
-                .and_then(Value::as_str)?
-                .to_owned();
-            Some(SessionInfo {
-                id,
-                cwd: row.get("cwd").and_then(Value::as_str).map(str::to_owned),
-                title: row.get("title").and_then(Value::as_str).map(str::to_owned),
-                updated_at: row
-                    .get("updated_at")
-                    .or_else(|| row.get("updatedAt"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                source: row.get("source").and_then(Value::as_str).map(str::to_owned),
-            })
-        })
-        .collect()
 }
 
 /// Reads a page of `session/list`: the conversations, and where the next page starts.
@@ -297,7 +236,6 @@ pub fn sessions_of(value: &Value) -> (Vec<SessionInfo>, Option<String>) {
                         .to_owned();
                     Some(SessionInfo {
                         id,
-                        source: row.get("source").and_then(Value::as_str).map(str::to_owned),
                         cwd: row.get("cwd").and_then(Value::as_str).map(str::to_owned),
                         title: row.get("title").and_then(Value::as_str).map(str::to_owned),
                         updated_at: row
