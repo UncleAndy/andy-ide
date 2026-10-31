@@ -229,12 +229,15 @@ pub struct AgentState {
     pub sessions_button: Option<egui::Rect>,
     /// Whether the agent has been asked for the list and has not answered yet.
     pub sessions_loading: bool,
-    /// The figure the agent sent last, kept from the workspace when a session is restored.
+    /// The last figure the agent sent for each conversation, by session id, kept with the
+    /// workspace.
     ///
     /// It is not `usage`: that one is what the agent says *now*, and a connection opened through
-    /// `Agent::start` clears it. This is what the panel falls back to, so a restored session shows
-    /// where the context stood instead of nothing at all.
-    pub kept_usage: Option<Usage>,
+    /// `Agent::start` clears it — as does moving to another conversation. This is what the panel
+    /// falls back to, so a conversation shows where its context stood the last time it was open.
+    /// One figure per conversation: moving between them is exactly when the number is wanted, and
+    /// a single figure would belong to the wrong one.
+    pub contexts: std::collections::BTreeMap<String, Usage>,
     /// Where the panel was last drawn, for the tests that point at it.
     pub shown_rect: Option<egui::Rect>,
     /// Set when the person asked to copy from the panel.
@@ -317,7 +320,7 @@ impl Default for AgentState {
             current_mode: None,
             options: Vec::new(),
             usage: None,
-            kept_usage: None,
+            contexts: std::collections::BTreeMap::new(),
             sessions: Vec::new(),
             sessions_open: false,
             sessions_button: None,
@@ -675,7 +678,6 @@ impl AgentState {
         self.forget_session();
         self.clear_panel();
         self.usage = None;
-        self.kept_usage = None;
         self.sessions_open = false;
         self.resume = Some(session.to_owned());
         self.resumed_from = Some(self.name.clone());
@@ -683,9 +685,12 @@ impl AgentState {
     }
 
     /// What the panel shows about the context: what the agent says now, or — until it says
-    /// anything — what it said when the workspace was last written.
+    /// anything about this conversation — what it said the last time this one was open.
     pub fn context_usage(&self) -> Option<Usage> {
-        self.usage.or(self.kept_usage)
+        self.usage.or_else(|| {
+            let session = self.session.as_ref()?;
+            self.contexts.get(session).copied()
+        })
     }
 
     pub fn working(&self) -> bool {
@@ -861,8 +866,8 @@ impl AgentState {
         self.current_mode = None;
         self.options.clear();
         self.usage = None;
-        // A session of its own, a figure of its own: what the last one knew is not this one's.
-        self.kept_usage = None;
+        // The figures of the other conversations stay: a session of its own is a figure of its
+        // own, and coming back to the others should show what they knew.
         self.commands.clear();
         self.asking = None;
         self.choice = None;
@@ -1140,6 +1145,11 @@ impl AgentState {
                 }
                 AgentEvent::Usage(usage) => {
                     self.usage = Some(usage);
+                    // Written down for the conversation it belongs to: moving away and back is
+                    // when a person wants to see the figure again.
+                    if let Some(session) = self.session.clone() {
+                        self.contexts.insert(session, usage);
+                    }
                 }
                 AgentEvent::Sessions(sessions) => {
                     self.sessions = sessions;

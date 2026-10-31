@@ -1045,7 +1045,7 @@ mod layout_persistence_tests {
                 agent: None,
                 carets: Default::default(),
                 view: Default::default(),
-                context: None,
+                contexts: Default::default(),
             })
             .unwrap();
 
@@ -1162,7 +1162,7 @@ mod layout_persistence_tests {
                 agent: None,
                 carets: Default::default(),
                 view: Default::default(),
-                context: None,
+                contexts: Default::default(),
             })
             .unwrap();
 
@@ -1196,7 +1196,7 @@ mod layout_persistence_tests {
                 agent: None,
                 carets: Default::default(),
                 view: Default::default(),
-                context: None,
+                contexts: Default::default(),
             })
             .unwrap();
 

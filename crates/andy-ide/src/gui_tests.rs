@@ -7423,27 +7423,73 @@ mod the_agent_panel {
     }
 
     #[test]
-    fn the_context_figure_comes_back_with_the_session() {
-        // An agent names the size of its context window only after the first exchange of a
-        // restored session, so the panel used to read "ctx —" until something was asked. The last
-        // figure the agent sent is kept with the project and shown the moment the session returns.
+    fn a_figure_sent_after_a_session_is_loaded_is_shown() {
+        // Hermes sends a `usage_update` right after a session is answered
+        // (`acp_adapter/server.py::_session_response_fields` schedules it), and it can arrive
+        // before the panel has anything else to show. A figure that arrives that way is shown.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_USAGE", "1000:8000")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        wait(&mut gui, "the figure the agent sent", |gui| {
+            painted_text(gui, "ctx 12% of 8000")
+        });
+    }
+
+    #[test]
+    fn the_context_figure_of_a_conversation_comes_back_when_it_is_opened() {
+        // An agent names the size of its window only after the first exchange of a restored
+        // conversation — Hermes' `_build_usage_update` returns nothing while its compressor has no
+        // context length — so the panel used to read "ctx —" until something was asked. The figure
+        // of each conversation is kept with the project and shown when that conversation comes
+        // back: moving between conversations is exactly when a person wants to see it.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("notes.rs"), "let a = 1;\n").unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(
+            project.path().join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // The conversation the project kept, and the figure the agent sent for it last time.
+        std::fs::write(
+            project.path().join(".andy-ide").join("agent-session.json"),
+            "{\"agent\": \"stand-in\", \"session\": \"kept-42\"}\n",
+        )
+        .unwrap();
         let workspace = ide_core::Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
         workspace
             .write_state(&ide_core::WorkspaceState {
-                tabs: vec![std::path::PathBuf::from("notes.rs")],
-                active: Some(0),
+                tabs: Vec::new(),
+                active: None,
                 layout: None,
                 hidden: None,
-                agent: None,
+                agent: Some("stand-in".to_owned()),
                 carets: Default::default(),
                 view: Default::default(),
-                context: Some(ide_core::ContextSpan {
-                    used: 12345,
-                    window: Some(200_000),
-                }),
+                contexts: [(
+                    "kept-42".to_owned(),
+                    ide_core::ContextSpan {
+                        used: 12_345,
+                        window: Some(200_000),
+                    },
+                )]
+                .into_iter()
+                .collect(),
             })
             .unwrap();
 
@@ -7460,20 +7506,14 @@ mod the_agent_panel {
         gui.harness
             .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
         gui.settle();
-        let blank = painted_text(&gui, "ctx —");
+        wait(&mut gui, "the conversation to be picked up", |gui| {
+            gui.app().state.agent.session.as_deref() == Some("kept-42")
+        });
+        // Six per cent of two hundred thousand, as the figure says.
         assert!(
             painted_text(&gui, "ctx 6% of 200k"),
-            "the context figure did not come back with the session{}{}",
-            if blank {
-                ": the panel still says "
-            } else {
-                " (the panel says something else: "
-            },
-            if blank {
-                "\"ctx —\""
-            } else {
-                "not the kept figure)"
-            }
+            "the figure of the conversation did not come back (the panel says {:?})",
+            painted_text(&gui, "ctx —")
         );
     }
 
@@ -7536,7 +7576,7 @@ mod the_agent_panel {
                 agent: Some("stand-in".to_owned()),
                 carets: Default::default(),
                 view: Default::default(),
-                context: None,
+                contexts: Default::default(),
             })
             .unwrap();
 

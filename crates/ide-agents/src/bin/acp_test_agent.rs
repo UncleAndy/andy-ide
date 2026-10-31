@@ -356,6 +356,7 @@ fn main() {
                     }
                 }
                 // The commands it offers, announced once the session is up, the way Hermes
+                usage_if_asked(&session_name);
                 // does it (`acp_adapter/commands.py::_send_available_commands_update`): the
                 // names and descriptions of the real ones.
                 send(json!({
@@ -420,6 +421,7 @@ fn main() {
                     }),
                 );
                 // The commands it offers, announced once the session is up, the way Hermes
+                usage_if_asked(&session_name);
                 // does it (`acp_adapter/commands.py::_send_available_commands_update`): the
                 // names and descriptions of the real ones.
                 send(json!({
@@ -789,6 +791,28 @@ fn main() {
 }
 
 /// One `session/update` notification carrying text.
+/// Sends a `usage_update` when the run asks for one (`ACP_TEST_USAGE=used:size`), the way Hermes
+/// does after a session is loaded (`acp_adapter/server.py::_send_usage_update`).
+fn usage_if_asked(session: &str) {
+    let Some(spec) = std::env::var_os("ACP_TEST_USAGE") else {
+        return;
+    };
+    let spec = spec.to_string_lossy().to_string();
+    let (used, size) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+    let used: u64 = used.trim().parse().unwrap_or(0);
+    let mut update = serde_json::Map::new();
+    update.insert("sessionUpdate".to_owned(), json!("usage_update"));
+    update.insert("used".to_owned(), json!(used));
+    if let Ok(size) = size.trim().parse::<u64>() {
+        update.insert("size".to_owned(), json!(size));
+    }
+    send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": session, "update": Value::Object(update)}
+    }));
+}
+
 fn chunk(session: &str, text: &str) {
     send(json!({
         "jsonrpc": "2.0",

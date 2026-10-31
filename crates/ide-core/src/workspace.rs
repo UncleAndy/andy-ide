@@ -66,14 +66,17 @@ pub struct WorkspaceState {
     /// no line here at all.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub view: BTreeMap<String, bool>,
-    /// What was known about the context of the agent's conversation when the workspace was last
-    /// written: the last figure the agent sent.
+    /// What was known about the context of each conversation, by session id: the last figure the
+    /// agent sent for it.
     ///
-    /// It is kept with the project so the panel has something to show the moment a session comes
-    /// back. An agent names the size of its context window only after the first exchange of a
-    /// restored session, so without this the panel was blank until something was asked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<ContextSpan>,
+    /// Kept with the project so the panel has something to show the moment a conversation is
+    /// opened — its own, or another one the person moved to. An agent names the size of its context
+    /// window only after the first exchange of a restored session, so without this the panel read
+    /// "ctx —" until something had been asked. One figure per session, not one per window: moving
+    /// between conversations is exactly when the number is wanted, and a single figure would be
+    /// the figure of the wrong conversation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contexts: BTreeMap<String, ContextSpan>,
 }
 
 /// Tokens spent, and the window they were spent from.
@@ -170,7 +173,7 @@ mod tests {
             agent: Some("stand-in".to_owned()),
             carets: BTreeMap::from([(PathBuf::from("src/main.rs"), (12, 4))]),
             view: BTreeMap::from([("hints".to_owned(), false)]),
-            context: None,
+            contexts: Default::default(),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
@@ -191,7 +194,7 @@ mod tests {
                 agent: None,
                 carets: BTreeMap::new(),
                 view: BTreeMap::new(),
-                context: None,
+                contexts: Default::default(),
             })
             .unwrap();
         let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();

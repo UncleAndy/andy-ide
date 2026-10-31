@@ -1004,13 +1004,20 @@ impl AppState {
         else {
             return;
         };
-        // What the panel knew about the context comes back with the session: an agent names the
-        // size of its window only after the first exchange of a restored session, and a blank
-        // figure until then reads as a session that remembered nothing.
-        self.agent.kept_usage = state.context.map(|span| Usage {
-            used: span.used,
-            window: span.window,
-        });
+        // What the panel knew about each conversation comes back with it: an agent names the size
+        // of its window only after the first exchange of a restored session, and a blank figure
+        // until then reads as a conversation that remembered nothing.
+        self.agent.contexts = state
+            .contexts
+            .into_iter()
+            .map(|(session, span)| {
+                let usage = Usage {
+                    used: span.used,
+                    window: span.window,
+                };
+                (session, usage)
+            })
+            .collect();
         for path in state.tabs {
             if root.join(&path).is_file() {
                 self.open_file(&path);
@@ -1154,10 +1161,18 @@ impl AppState {
             // The View switches are part of the project as much as the panels are: a person who
             // works without hints does not want them back on the next launch.
             view: self.view_switches(),
-            context: self.agent.context_usage().map(|usage| ContextSpan {
-                used: usage.used,
-                window: usage.window,
-            }),
+            contexts: self
+                .agent
+                .contexts
+                .iter()
+                .map(|(session, usage)| {
+                    let span = ContextSpan {
+                        used: usage.used,
+                        window: usage.window,
+                    };
+                    (session.clone(), span)
+                })
+                .collect(),
         };
         if self.last_state.as_ref() == Some(&state) {
             return;

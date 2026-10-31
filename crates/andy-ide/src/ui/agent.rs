@@ -523,10 +523,13 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     let mut chosen: Option<String> = None;
     // Never more than part of the window: a list that grew to fill it would cover the
     // conversation it belongs to.
-    let limit = (ui.ctx().content_rect().height() * 0.4).max(120.0);
+    // Half the window rather than a strip: a person looking for yesterday's conversation scrolls
+    // through a list, and a short window made even a list of fifty look like a handful.
+    let limit = (ui.ctx().content_rect().height() * 0.5).max(160.0);
+    // One row of the box goes to the count at the top, so the number is not hidden by the cap.
     let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let margins = ui.spacing().menu_margin.sum().y;
-    let height = (rows.len().max(1) as f32 * row + margins).min(limit);
+    let height = ((rows.len() + 1) as f32 * row + margins).min(limit);
     let area = egui::Area::new(egui::Id::new("agent-session-list"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::LEFT_BOTTOM)
@@ -540,6 +543,15 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                     .id_salt("session-list")
                     .max_height(height)
                     .show(ui, |ui| {
+                        // How many there are, and that there are more than fit: a list is not read
+                        // as "these are all of them" when the count says otherwise.
+                        let counted = if state.agent.sessions_loading {
+                            format!("looking\u{2026} {} so far", rows.len())
+                        } else {
+                            format!("{} conversations", rows.len())
+                        };
+                        ui.weak(counted);
+                        ui.separator();
                         if rows.is_empty() {
                             ui.weak(if state.agent.sessions_loading {
                                 "looking for conversations\u{2026}"
