@@ -22,9 +22,10 @@ use serde_json::{Value, json};
 
 use crate::protocol::{
     AgentCommand, ChoiceRequest, ClientCapabilities, ConfigOption, FsCapabilities, Message,
-    PermissionRequest, SessionState, Update, Usage, cancel_params, choice_answer,
-    config_option_params, initialize_params, load_session_params, new_session_params, options_of,
-    permission_answer, prompt_params, session_state, set_mode_params, set_model_params, usage_of,
+    PermissionRequest, SessionInfo, SessionState, Update, Usage, cancel_params, choice_answer,
+    config_option_params, initialize_params, list_sessions_params, load_session_params,
+    new_session_params, options_of, permission_answer, prompt_params, session_state, sessions_of,
+    set_mode_params, set_model_params, usage_of,
 };
 
 /// How long the agent gets to start and say hello.
@@ -35,6 +36,14 @@ pub const ANSWER: Duration = Duration::from_secs(120);
 
 /// How much of the agent's own error output is kept, for when it fails.
 const STDERR_KEPT: usize = 8000;
+
+/// How long the agent gets to answer `session/list`: it only reads what it already keeps.
+const LIST_SESSIONS: Duration = Duration::from_secs(10);
+
+/// How many conversations the panel asks for before it stops turning pages. More than a person
+/// will ever scroll through, and few enough that a broken `nextCursor` cannot keep the worker
+/// busy for good.
+const SESSIONS_MAX: usize = 200;
 
 /// Which agent to run, and how.
 ///
@@ -86,6 +95,9 @@ pub enum Event {
     },
     /// The plan the agent is following.
     Plan(Vec<String>),
+    /// The conversations the agent knows of, asked for with [`Session::list_sessions`]: what the
+    /// panel offers when the person wants to move to an earlier one.
+    Sessions(Vec<SessionInfo>),
     /// An update this version does not show.
     Other {
         /// The tag it arrived with.
@@ -393,6 +405,32 @@ impl Session {
         self.state = session_state(&answer);
         self.usage = usage_of(&answer);
         Ok(())
+    }
+
+    /// The conversations the agent knows of, for this project.
+    ///
+    /// Asked in pages: an agent with a long history answers with as many as fit and a cursor, and
+    /// the panel wants the whole list rather than the first screen of it.
+    pub fn list_sessions(&mut self) -> Result<Vec<SessionInfo>> {
+        let mut all: Vec<SessionInfo> = Vec::new();
+        let mut cursor: Option<String> = None;
+        while all.len() < SESSIONS_MAX {
+            let answer = self.ask(
+                "session/list",
+                list_sessions_params(Some(&self.root), cursor.as_deref()),
+                LIST_SESSIONS,
+            )?;
+            let (mut page, next) = sessions_of(&answer);
+            if page.is_empty() {
+                break;
+            }
+            all.append(&mut page);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     /// The models and modes this conversation has, and which are in use.

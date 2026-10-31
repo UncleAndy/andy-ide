@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ide_agents::{
     AgentCommand, ChoiceRequest, ConfigOption, Event as AgentEvent, Mode, Model, PermissionPolicy,
-    PermissionRequest, REASONING, Registry, Session, THOUGHT_LEVEL, Usage,
+    PermissionRequest, REASONING, Registry, Session, SessionInfo, THOUGHT_LEVEL, Usage,
 };
 
 /// How long the worker waits for the next thing before checking whether it was told to go.
@@ -122,6 +122,9 @@ enum Command {
     Setting { config: String, value: String },
     /// Stop the answer being written. The session stays: this ends the turn, not the agent.
     Cancel,
+    /// List the conversations this agent keeps for this project: the panel shows them, and a
+    /// choice among them reopens the session.
+    Sessions,
 }
 
 /// What the worker tells the panel.
@@ -218,6 +221,14 @@ pub struct AgentState {
     pub options: Vec<ConfigOption>,
     /// How much of the model's context is spent, when the agent says.
     pub usage: Option<Usage>,
+    /// The conversations the agent keeps for this project, as it last listed them.
+    pub sessions: Vec<SessionInfo>,
+    /// Whether the list of conversations is on screen.
+    pub sessions_open: bool,
+    /// Where the button that asks for the list was drawn: the list floats above it.
+    pub sessions_button: Option<egui::Rect>,
+    /// Whether the agent has been asked for the list and has not answered yet.
+    pub sessions_loading: bool,
     /// The figure the agent sent last, kept from the workspace when a session is restored.
     ///
     /// It is not `usage`: that one is what the agent says *now*, and a connection opened through
@@ -307,6 +318,10 @@ impl Default for AgentState {
             options: Vec::new(),
             usage: None,
             kept_usage: None,
+            sessions: Vec::new(),
+            sessions_open: false,
+            sessions_button: None,
+            sessions_loading: false,
             shown_rect: None,
             started: None,
             took: None,
@@ -627,6 +642,46 @@ impl AgentState {
     ///
     /// This is what the foot's button follows: an answer being written can be stopped
     /// whichever side began it.
+    /// Asks the agent for the conversations it keeps for this project, and opens the list.
+    ///
+    /// The list is asked for every time it is opened: a conversation that was started in another
+    /// window since should be there, and the agent answers from what it already keeps.
+    pub fn open_sessions(&mut self) {
+        self.sessions_open = true;
+        self.sessions_loading = true;
+        let Some(worker) = &self.worker else {
+            self.sessions_loading = false;
+            return;
+        };
+        if worker.commands.send(Command::Sessions).is_err() {
+            self.sessions_loading = false;
+        }
+    }
+
+    /// Moves the panel to another conversation of this project.
+    ///
+    /// What is on screen is cleared first: the transcript is about to be replaced by another one,
+    /// and half of each would read as a single conversation. The agent is then opened again the
+    /// way a restored window opens the session it remembered, and the history of the chosen
+    /// conversation arrives through the same replay — the panel fills as it did the first time.
+    pub fn switch_session(&mut self, session: &str) {
+        if self.session.as_deref() == Some(session) {
+            self.sessions_open = false;
+            return;
+        }
+        // The agent that answers now is let go first: this window speaks to one conversation at a
+        // time, and a start that finds an agent already running refuses to do anything at all.
+        self.stop();
+        self.forget_session();
+        self.clear_panel();
+        self.usage = None;
+        self.kept_usage = None;
+        self.sessions_open = false;
+        self.resume = Some(session.to_owned());
+        self.resumed_from = Some(self.name.clone());
+        self.start();
+    }
+
     /// What the panel shows about the context: what the agent says now, or — until it says
     /// anything — what it said when the workspace was last written.
     pub fn context_usage(&self) -> Option<Usage> {
@@ -1086,6 +1141,10 @@ impl AgentState {
                 AgentEvent::Usage(usage) => {
                     self.usage = Some(usage);
                 }
+                AgentEvent::Sessions(sessions) => {
+                    self.sessions = sessions;
+                    self.sessions_loading = false;
+                }
                 AgentEvent::Finished(reason) => {
                     self.last_word = None;
                     // The timer stops with the turn and keeps its figure: a spinner that
@@ -1209,6 +1268,17 @@ fn work(
                     return;
                 }
                 let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+            }
+            Ok(Command::Sessions) => {
+                let answer = match session.list_sessions() {
+                    Ok(sessions) => AgentEvent::Sessions(sessions),
+                    Err(error) => {
+                        AgentEvent::Failed(format!("the agent listed no sessions: {error}"))
+                    }
+                };
+                if replies.send(Reply::Event(answer)).is_err() {
+                    return;
+                }
             }
             Ok(Command::Cancel) => {
                 // Nothing is waited for: the answer to a stopped turn is the turn's own

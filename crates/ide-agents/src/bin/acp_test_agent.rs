@@ -216,6 +216,59 @@ fn main() {
                     }),
                 );
             }
+            // The conversations this agent keeps for a directory: what a client is offered
+            // before it picks one. Hermes answers from its own store with the same fields
+            // (`acp_adapter/server.py::list_sessions`), two at a time with a cursor.
+            "session/list" => {
+                let asked = message
+                    .get("params")
+                    .and_then(|params| params.get("cwd"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let cursor = message
+                    .get("params")
+                    .and_then(|params| params.get("cursor"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let kept = [
+                    ("kept-42", "why the sky is blue", "2026-10-29T18:04:00Z"),
+                    (
+                        "kept-7",
+                        "renaming a symbol across crates",
+                        "2026-10-28T09:12:00Z",
+                    ),
+                    (
+                        "kept-1",
+                        "the first conversation of this project",
+                        "2026-10-27T20:00:00Z",
+                    ),
+                ];
+                let start = cursor
+                    .as_deref()
+                    .and_then(|cursor| kept.iter().position(|(id, _, _)| *id == cursor))
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let page: Vec<Value> = kept
+                    .iter()
+                    .skip(start)
+                    .take(2)
+                    .map(|(id, title, at)| {
+                        json!({"sessionId": id, "cwd": asked, "title": title, "updatedAt": at})
+                    })
+                    .collect();
+                let next = if start + page.len() < kept.len() {
+                    json!(
+                        page.last()
+                            .and_then(|row| row.get("sessionId"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                    )
+                } else {
+                    Value::Null
+                };
+                answer(id, json!({"sessions": page, "nextCursor": next}));
+            }
             // A conversation kept from an earlier run: the client names it, the agent picks
             // it up. A name it does not know is refused, and the client falls back.
             "session/load" => {

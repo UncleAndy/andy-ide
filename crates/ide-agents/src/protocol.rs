@@ -191,6 +191,69 @@ pub fn load_session_params(cwd: &std::path::Path, session: &str) -> Value {
     })
 }
 
+/// The `session/list` parameters: the page to continue from, and which directory's conversations
+/// are wanted. A client that names its project asks for the conversations of that project, not for
+/// every conversation on the machine.
+pub fn list_sessions_params(cwd: Option<&std::path::Path>, cursor: Option<&str>) -> Value {
+    let mut params = serde_json::Map::new();
+    if let Some(cwd) = cwd {
+        params.insert("cwd".to_owned(), Value::String(cwd.display().to_string()));
+    }
+    if let Some(cursor) = cursor {
+        params.insert("cursor".to_owned(), Value::String(cursor.to_owned()));
+    }
+    Value::Object(params)
+}
+
+/// One conversation the agent knows of, as `session/list` describes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// The id to hand back to `session/load`.
+    pub id: String,
+    /// Where that conversation lives, if the agent says.
+    pub cwd: Option<String>,
+    /// What the agent calls it, if it names it at all.
+    pub title: Option<String>,
+    /// When it was last touched, in the agent's own words — a string, because agents differ and
+    /// a date nobody can parse is still worth showing.
+    pub updated_at: Option<String>,
+}
+
+/// Reads a page of `session/list`: the conversations, and where the next page starts.
+pub fn sessions_of(value: &Value) -> (Vec<SessionInfo>, Option<String>) {
+    let sessions = value
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    // `sessionId` is the name ACP gives it; a bare `id` is what an agent that
+                    // reads the schema loosely may send.
+                    let id = row
+                        .get("sessionId")
+                        .or_else(|| row.get("id"))
+                        .and_then(Value::as_str)?
+                        .to_owned();
+                    Some(SessionInfo {
+                        id,
+                        cwd: row.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                        title: row.get("title").and_then(Value::as_str).map(str::to_owned),
+                        updated_at: row
+                            .get("updatedAt")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let next = value
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (sessions, next)
+}
+
 /// The `session/new` parameters. `mcpServers` is empty: the editor brings no servers of
 /// its own, and an agent that wants one can start it itself.
 ///

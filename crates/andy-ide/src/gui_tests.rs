@@ -7328,6 +7328,81 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_conversations_of_the_project_can_be_listed_and_chosen() {
+        // A panel that can only go forward leaves an earlier conversation out of reach. The button
+        // asks the agent which ones it keeps, the list shows them, and a choice reopens that
+        // conversation: its history arrives through the same replay a restored window gets.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(
+            project.path().join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // Nothing is asked for until the button is pressed.
+        assert!(
+            !painted_text(&gui, "renaming a symbol across crates"),
+            "the list of conversations was on screen before it was asked for"
+        );
+        gui.harness.get_by_label("Sessions").click();
+        gui.settle();
+        assert!(
+            gui.app().state.agent.sessions_open,
+            "the button did not open the list (running: {})",
+            gui.app().state.agent.running()
+        );
+        wait(&mut gui, "the conversations to arrive", |gui| {
+            painted_text(gui, "renaming a symbol across crates")
+        });
+
+        // And a choice moves the panel to that conversation: the stand-in answers a load with its
+        // own history, the way Hermes replays a kept conversation.
+        // The list is anchored to the button and the panel around it is still settling: a click
+        // aimed at a rectangle from a frame that has moved lands on whatever is there now.
+        for _ in 0..3 {
+            gui.settle();
+        }
+        gui.harness
+            .get_by_label("renaming a symbol across crates")
+            .click();
+        wait(&mut gui, "the conversation to come back", |gui| {
+            painted_text(gui, "Because air scatters blue light.")
+        });
+        assert_eq!(
+            gui.app().state.agent.session.as_deref(),
+            Some("kept-7"),
+            "the panel is not on the conversation that was chosen"
+        );
+    }
+
+    #[test]
     fn the_context_figure_comes_back_with_the_session() {
         // An agent names the size of its context window only after the first exchange of a
         // restored session, so the panel used to read "ctx —" until something was asked. The last

@@ -48,8 +48,10 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // The field, the facts and the button are one foot, drawn together by `input`: the height
     // of the foot is the height of the field and one row, and nothing else may change it.
     input(ui, state);
-    // The list of models floats in a layer of its own, above the button that opened it.
+    // The list of models floats in a layer of its own, above the button that opened it, and the
+    // list of conversations the same way.
     models(ui, state);
+    sessions(ui, state);
     // What the rows under the conversation take, for the conversation to leave next frame: the
     // field and the single row under it, and nothing else. Measured against the bottom of the
     // panel, the reserve also carried the panel's own padding, and it was measured against a
@@ -476,6 +478,111 @@ fn models(ui: &mut Ui, state: &mut AppState) {
     }
 }
 
+/// The conversations this project kept, in a layer above the button that asked for them.
+///
+/// Drawn like the list of models, for the same reasons: an area of its own rather than a popup (a
+/// popup is laid out inside the rectangle it measured on an earlier frame and clips its own last
+/// row — an entry on screen that takes no click), a box as tall as its rows up to a cap, and a
+/// close on a choice, on a click elsewhere or on Escape.
+fn sessions(ui: &mut Ui, state: &mut AppState) {
+    let Some(anchor) = state.agent.sessions_button else {
+        return;
+    };
+    if !state.agent.sessions_open {
+        return;
+    }
+    // What a row says: the name the agent gave the conversation, or its id when it named none,
+    // and when it was last touched. The id is what a choice hands back.
+    let rows: Vec<(String, String, String)> = state
+        .agent
+        .sessions
+        .iter()
+        .map(|session| {
+            let title = session
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| session.id.clone());
+            (
+                session.id.clone(),
+                title,
+                session.updated_at.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let mut chosen: Option<String> = None;
+    // Never more than part of the window: a list that grew to fill it would cover the
+    // conversation it belongs to.
+    let limit = (ui.ctx().content_rect().height() * 0.4).max(120.0);
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let margins = ui.spacing().menu_margin.sum().y;
+    let height = (rows.len().max(1) as f32 * row + margins).min(limit);
+    let area = egui::Area::new(egui::Id::new("agent-session-list"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(egui::pos2(anchor.left(), anchor.top() - 4.0))
+        .default_size(egui::vec2(300.0, height))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(280.0);
+                ui.set_min_height(height);
+                egui::ScrollArea::vertical()
+                    .id_salt("session-list")
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        if rows.is_empty() {
+                            ui.weak(if state.agent.sessions_loading {
+                                "looking for conversations\u{2026}"
+                            } else {
+                                "no other conversation of this project"
+                            });
+                            return;
+                        }
+                        for (id, title, when) in &rows {
+                            // The conversation that is answering is shown as taken: a click that
+                            // would change nothing is not offered.
+                            let current = state.agent.session.as_deref() == Some(id.as_str());
+                            // The row says the name the conversation is known by; the id and the
+                            // date are in the hint, where they are read when wanted and take no
+                            // room when they are not.
+                            let hint = if when.is_empty() {
+                                id.clone()
+                            } else {
+                                format!("{id}  ·  {when}")
+                            };
+                            let button = ui
+                                .add_enabled(
+                                    !current,
+                                    egui::Button::new(title.clone()).min_size(egui::vec2(
+                                        ui.available_width(),
+                                        row - ui.spacing().item_spacing.y,
+                                    )),
+                                )
+                                .on_hover_text(hint);
+                            if button.clicked() {
+                                chosen = Some(id.clone());
+                            }
+                        }
+                    });
+            });
+        });
+    // Choosing ends the visit, and so does a click anywhere else or Escape — the way a menu
+    // behaves, without a menu's sizing. The click that opened the list is on the button, not
+    // "somewhere else": without saying so, the list would shut on the very frame it opened.
+    let clicked_outside = ui.input(|input| input.pointer.any_click())
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|pos| !area.response.rect.contains(pos) && !anchor.contains(pos));
+    if chosen.is_some() || clicked_outside || ui.input(|input| input.key_pressed(egui::Key::Escape))
+    {
+        state.agent.sessions_open = false;
+    }
+    if let Some(id) = chosen {
+        state.agent.switch_session(&id);
+    }
+}
+
 /// The line under the conversation: how long the turn takes, which model answers, how
 /// hard it is thinking, and how much of its window is spent.
 ///
@@ -739,6 +846,13 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             } else {
                 state.agent.start();
             }
+        }
+        let sessions_button = ui
+            .add_enabled(running, egui::Button::new("Sessions"))
+            .on_hover_text("Move to another conversation this project kept");
+        state.agent.sessions_button = Some(sessions_button.rect);
+        if sessions_button.clicked() {
+            state.agent.open_sessions();
         }
         if ui
             .button("New session")
