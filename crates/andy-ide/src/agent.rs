@@ -230,6 +230,10 @@ pub struct AgentState {
     /// card is asking for the keyboard to write it with.
     pub card_text: String,
     pub card_wants_focus: bool,
+    /// What the window should tell the person about when they are not looking at it: a question
+    /// that waits, and a turn that ended. Taken once a frame by the window, which decides whether
+    /// the desk is worth disturbing at all.
+    pub wanted: Vec<(crate::notify::Want, String)>,
     /// Which of the offered commands the keyboard is on, while a slash is being typed.
     pub command_pick: usize,
     /// The commands the agent offers — `/help`, `/model` and the rest — as it named them.
@@ -358,6 +362,7 @@ impl Default for AgentState {
             agent_line_open: false,
             card_text: String::new(),
             card_wants_focus: false,
+            wanted: Vec::new(),
             field_rect: None,
             below: 64.0,
             command: String::new(),
@@ -407,6 +412,17 @@ impl Default for AgentState {
 }
 
 impl AgentState {
+    /// Notes something worth telling a person who is not looking at the panel.
+    fn want(&mut self, want: crate::notify::Want, detail: String) {
+        self.wanted.push((want, detail));
+    }
+
+    /// Takes what is waiting to be told: the window shows it, or drops it when the person is
+    /// already looking at the panel.
+    pub fn take_wanted(&mut self) -> Vec<(crate::notify::Want, String)> {
+        std::mem::take(&mut self.wanted)
+    }
+
     /// Points the panel at a project, reading its `agents.toml`.
     ///
     /// The worker is left alone when the root has not changed: a conversation survives
@@ -1254,6 +1270,7 @@ impl AgentState {
                 }
                 AgentEvent::Permission { id, request } => {
                     self.status = request.title();
+                    self.want(crate::notify::Want::Asks, request.title().to_string());
                     self.asking = Some((id, request));
                 }
                 AgentEvent::Commands(commands) => {
@@ -1261,6 +1278,7 @@ impl AgentState {
                 }
                 AgentEvent::Choice { id, request } => {
                     self.status = request.title().to_owned();
+                    self.want(crate::notify::Want::Asks, request.title().to_string());
                     // A new question starts with nothing picked and nothing written: what was
                     // answered for the last one is not an answer to this one.
                     self.picked.clear();
@@ -1301,6 +1319,7 @@ impl AgentState {
                     // not part of a crash loop.
                     self.attempts = 0;
                     self.status = reason.clone();
+                    self.want(crate::notify::Want::Finished, reason.clone());
                     if let Some(queued) = self.queued.take() {
                         self.input = queued;
                         self.send();

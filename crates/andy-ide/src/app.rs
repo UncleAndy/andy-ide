@@ -20,6 +20,9 @@ pub struct App {
     frames: u32,
     /// When the dock layout was last serialized, in input time.
     layout_serialized_at: f64,
+    /// Where a notification goes: the desk's own service in the window, and a surface that writes
+    /// them down in the checks.
+    notifier: std::sync::Arc<dyn crate::notify::Surface>,
 }
 
 impl App {
@@ -73,6 +76,7 @@ impl App {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::System),
         }
     }
 }
@@ -364,6 +368,39 @@ impl App {
             self.layout_serialized_at = now;
         }
         self.state.save_workspace(layout, now, closing);
+        // And last, the one thing that leaves the window: a person who has walked away is told that
+        // the agent is waiting for them, or that the turn is over.
+        self.tell_the_person(ui);
+    }
+
+    /// Tells the person, on their desk, what the panel would otherwise only say on screen.
+    ///
+    /// A panel in front of them, in a window that has the keyboard, is already saying it, so nothing
+    /// is shown then: the case this is for is a person reading the editor, or away from the machine.
+    /// What waits to be told is taken even when nothing is shown — a note kept for a moment that has
+    /// passed would be a notification about the past.
+    fn tell_the_person(&mut self, ui: &egui::Ui) {
+        let wanted = self.state.agent.take_wanted();
+        if wanted.is_empty() {
+            return;
+        }
+        let focused = ui.ctx().input(|input| input.focused);
+        let panel_in_front = self.dock.find_tab(&Tab::Agent).is_some();
+        for (want, detail) in wanted {
+            if !crate::notify::wanted(self.state.notifications, focused, panel_in_front) {
+                continue;
+            }
+            let (title, body) = want.message(&detail);
+            self.notifier.show(&title, &body);
+        }
+    }
+
+    /// A surface that writes the notifications down, for a check to ask what the window said.
+    #[cfg(test)]
+    pub(crate) fn watch_notifications(&mut self) -> std::sync::Arc<crate::notify::Written> {
+        let written = std::sync::Arc::new(crate::notify::Written::default());
+        self.notifier = written.clone();
+        written
     }
 }
 
@@ -681,6 +718,12 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             if ui.checkbox(&mut state.hints, "Show hints").changed() {
                 state.status = "hints toggled".to_owned();
             }
+            if ui
+                .checkbox(&mut state.notifications, "system notifications")
+                .changed()
+            {
+                state.status = "system notifications toggled".to_owned();
+            }
             if ui.button("find in file	Ctrl+F").clicked() {
                 crate::ui::search::open(state, false);
             }
@@ -745,7 +788,116 @@ mod tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         }
+    }
+
+    /// One frame of the window with the keyboard (or without it), drawn by hand: whether the
+    /// window is in front is not something a check can ask for through the harness.
+    fn draw_frame_with_focus(app: &mut App, focused: bool) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            focused,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_note_reaches_the_desk_when_the_window_is_not_looked_at() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        let written = app.watch_notifications();
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
+
+        draw_frame_with_focus(&mut app, false);
+
+        assert_eq!(
+            written.shown().len(),
+            1,
+            "a window without the keyboard told the desk nothing: {:?}",
+            written.shown()
+        );
+        let (title, body) = written.shown().remove(0);
+        assert!(title.contains("waiting"), "the title: {title}");
+        assert_eq!(body, "Run the tests?", "the body is not what the panel had");
+        assert!(
+            app.state.agent.wanted.is_empty(),
+            "the note was kept after it was told"
+        );
+    }
+
+    #[test]
+    fn a_note_is_kept_back_while_the_panel_is_in_front_of_the_person() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        let written = app.watch_notifications();
+        // The panel is put on screen: a window that shows it *and* has the keyboard has already
+        // said everything a notification would say.
+        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        assert!(
+            app.dock.find_tab(&Tab::Agent).is_some(),
+            "the panel could not be put on screen for the check"
+        );
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Finished, "ready".to_owned()));
+
+        draw_frame_with_focus(&mut app, true);
+        assert!(
+            written.shown().is_empty(),
+            "the panel was in front and the desk was told anyway: {:?}",
+            written.shown()
+        );
+
+        // The same note, with the panel away: the keyboard is not the point, the panel is.
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Finished, "ready".to_owned()));
+        {
+            let dock = &mut app.dock;
+            let state = &mut app.state;
+            hide_panel(dock, state, Tab::Agent);
+        }
+        draw_frame_with_focus(&mut app, true);
+        assert_eq!(
+            written.shown().len(),
+            1,
+            "a panel that is not on screen kept the news to itself"
+        );
+    }
+
+    #[test]
+    fn the_view_switch_keeps_the_desk_quiet() {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        let written = app.watch_notifications();
+        app.state.notifications = false;
+        app.state
+            .agent
+            .wanted
+            .push((crate::notify::Want::Asks, "Run the tests?".to_owned()));
+
+        draw_frame_with_focus(&mut app, false);
+
+        assert!(
+            written.shown().is_empty(),
+            "the switch was off and the desk was told anyway: {:?}",
+            written.shown()
+        );
     }
 
     fn draw_frames(app: &mut App, frames: usize) -> usize {
@@ -805,6 +957,7 @@ mod tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         };
         let shapes = draw_frames(&mut app, 1);
         assert!(shapes > 0);
@@ -854,6 +1007,7 @@ mod typing_tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         (project, config, app)
@@ -970,6 +1124,7 @@ mod layout_tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         };
         app.state.open_file(std::path::Path::new("long.rs"));
         (project, config, app)
@@ -1046,6 +1201,7 @@ mod click_tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         let ctx = egui::Context::default();
@@ -1090,6 +1246,7 @@ mod layout_persistence_tests {
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
+            notifier: std::sync::Arc::new(crate::notify::Written::default()),
         };
         app.state.open_file(std::path::Path::new("a.rs"));
         let ctx = egui::Context::default();

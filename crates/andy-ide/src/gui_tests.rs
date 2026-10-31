@@ -3170,6 +3170,40 @@ mod opening_a_panel {
     }
 
     #[test]
+    fn the_view_menu_switches_the_notifications_and_the_project_remembers() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        assert!(
+            gui.app().state.notifications,
+            "the notifications start off, which is not what was asked for"
+        );
+
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        gui.harness.get_by_label("system notifications").click();
+        gui.settle();
+
+        assert!(
+            !gui.app().state.notifications,
+            "the View menu switch did not turn the notifications off"
+        );
+        let switches = gui.app().state.view_switches();
+        assert_eq!(
+            switches.get("notifications"),
+            Some(&false),
+            "the switch is not written down with the project: {switches:?}"
+        );
+
+        // And the name is the one the window reads the project back by.
+        gui.app_mut().state.notifications = true;
+        gui.app_mut().state.apply_view(&switches);
+        assert!(
+            !gui.app().state.notifications,
+            "the switch was written under a name the window does not read back"
+        );
+    }
+
+    #[test]
     fn the_view_menu_names_both_panels() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
@@ -6809,6 +6843,121 @@ person: {lines:?}"
         assert!(
             gui.app().state.agent.choice.is_none(),
             "the choice stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn a_question_of_the_agent_reaches_the_desk_when_the_panel_is_away() {
+        // What the notifications are for: the agent waits for an answer and the person is not
+        // looking at the panel. A question is the one time the agent cannot go on without them.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let written = gui.app_mut().watch_notifications();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // The panel goes away before the question arrives.
+        {
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        }
+        gui.settle();
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.app_mut().state.agent.send();
+        wait(&mut gui, "the question", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+        gui.settle();
+
+        let shown = written.shown();
+        assert_eq!(
+            shown.len(),
+            1,
+            "the desk was told {shown:?} about one question"
+        );
+        assert!(
+            shown[0].0.contains("waiting"),
+            "the title does not say the agent waits: {}",
+            shown[0].0
+        );
+        assert_eq!(
+            shown[0].1, "Which variant should I write?",
+            "the body is not the question itself"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_reaches_the_desk() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let written = gui.app_mut().watch_notifications();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        {
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        }
+        gui.settle();
+
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.app_mut().state.agent.send();
+        wait(&mut gui, "the turn ending", |gui| {
+            !gui.app().state.agent.busy
+        });
+        gui.settle();
+
+        let shown = written.shown();
+        assert!(
+            shown.iter().any(|(title, _)| title.contains("finished")),
+            "the end of the turn was not told to the desk: {shown:?}"
+        );
+    }
+
+    #[test]
+    fn the_switch_keeps_the_desk_out_of_it() {
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let written = gui.app_mut().watch_notifications();
+        gui.app_mut().state.notifications = false;
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        {
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        }
+        gui.settle();
+        gui.app_mut().state.agent.input = "choose".to_owned();
+        gui.app_mut().state.agent.send();
+        wait(&mut gui, "the question", |gui| {
+            gui.app().state.agent.choice.is_some()
+        });
+        gui.settle();
+
+        assert!(
+            written.shown().is_empty(),
+            "the switch was off and the desk was told anyway: {:?}",
+            written.shown()
         );
     }
 

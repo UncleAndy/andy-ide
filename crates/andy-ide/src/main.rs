@@ -8,6 +8,7 @@ mod git;
 mod gui_tests;
 mod log;
 mod lsp;
+mod notify;
 mod rename;
 mod state;
 #[cfg(test)]
