@@ -67,6 +67,39 @@ pub trait Surface: Send {
     fn show(&self, title: &str, body: &str) -> Result<u32, String>;
 }
 
+/// How long a notification stands, and how long its connection is kept open for it.
+///
+/// The desk's own default is a few seconds, chosen for a person already looking at the screen; being
+/// told is worth a little longer than that. It is also how long the handle is held: the desk destroys
+/// a notification whose sender it can no longer see, and the sender is this process — so the
+/// connection has to outlive the message it carried.
+pub const STANDING: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The connections the notifications were sent on, and when they were sent.
+///
+/// `notify-rust` opens a connection per call and closes it as soon as the handle is dropped. The desk
+/// resolves a sender that owns a window to an application, and an application's source is destroyed the
+/// moment its sender leaves the bus — taking the notification with it, banner and all. That is why a
+/// probe from a terminal appears (there is no window to resolve, so the source is a plain one that
+/// survives) while the window's own does not, and why the very same window appears when it has no
+/// window yet: the handle has to be kept, not thrown away with the id.
+static HELD: std::sync::Mutex<Vec<(std::time::Instant, notify_rust::NotificationHandle)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Whether a handle sent at `sent` is still worth holding at `now`.
+fn worth_holding(sent: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(sent) < STANDING
+}
+
+/// Keeps the handle alive for as long as the notice stands, and lets go of the ones that are over.
+fn hold(handle: notify_rust::NotificationHandle, now: std::time::Instant) {
+    let Ok(mut held) = HELD.lock() else {
+        return;
+    };
+    held.push((now, handle));
+    held.retain(|(sent, _)| worth_holding(*sent, now));
+}
+
 /// The desk's own notifications, through the service the session provides.
 #[derive(Default)]
 pub struct System;
@@ -79,6 +112,9 @@ impl Surface for System {
         match notify_rust::Notification::new()
             .summary(title)
             .body(body)
+            .timeout(notify_rust::Timeout::Milliseconds(
+                STANDING.as_millis() as u32
+            ))
             .show()
         {
             Ok(handle) => {
@@ -87,12 +123,14 @@ impl Surface for System {
                 // drawing the desk. That difference is invisible without the address.
                 // At info, not debug: when a notification is taken and never seen, this line is the
                 // only way to learn which bus answered — and the default filter would hide it.
+                let id = handle.id();
                 tracing::info!(
-                    id = handle.id(),
+                    id,
                     bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
                     "the desk took the notification"
                 );
-                Ok(handle.id())
+                hold(handle, std::time::Instant::now());
+                Ok(id)
             }
             Err(error) => {
                 tracing::warn!(%error, "the notification could not be shown");
@@ -210,6 +248,29 @@ mod tests {
         assert!(
             body.is_empty(),
             "the name of the event is not something to read: {body:?}"
+        );
+    }
+
+    #[test]
+    fn a_connection_is_held_for_as_long_as_the_notice_stands() {
+        // A handle thrown away with its id is a sender gone from the bus, and the desk destroys the
+        // notification of a sender it cannot see. Held for the standing time, the notice lives.
+        let sent = std::time::Instant::now();
+        assert!(
+            worth_holding(sent, sent),
+            "the handle was let go the moment it was taken"
+        );
+        assert!(
+            worth_holding(sent, sent + STANDING / 2),
+            "the handle was let go while the notice still stood"
+        );
+        assert!(
+            !worth_holding(sent, sent + STANDING + std::time::Duration::from_secs(1)),
+            "the handle was kept long after the notice was over"
+        );
+        assert!(
+            STANDING >= std::time::Duration::from_secs(8),
+            "a notice stands {STANDING:?}, which is not long enough to be read"
         );
     }
 
