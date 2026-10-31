@@ -44,15 +44,27 @@ impl Want {
 /// differ in their sender — so the same call is made here, by the window, at a moment when nothing
 /// else is happening. Run the window with `ANDY_IDE_NOTIFY_PROBE=1` and see whether it appears.
 pub fn probe() {
-    let sent = notify_rust::Notification::new()
-        .summary("ПРОБА из процесса окна")
-        .body("это уведомление отправлено самим andy-ide")
-        .show()
-        .map(|handle| handle.id());
+    // Two, differing in one thing: the urgency, which is the only lever a desk honours for how
+    // long a notice stands. Sent from this process before it has a window, so the answer is about
+    // the urgency and not about the sender.
+    let show = |label: &str, urgent: bool| {
+        let mut note = notify_rust::Notification::new();
+        note.summary(label).body(label);
+        if urgent {
+            note.urgency(notify_rust::Urgency::Critical);
+        }
+        let sent = note.show().map(|handle| handle.id());
+        tracing::info!(label, urgent, sent = ?sent, "the probe was sent");
+        std::thread::sleep(std::time::Duration::from_millis(3_000));
+    };
+    // Eight seconds first, so the person can start the window and walk to another workspace: the
+    // question is what a notice does when it arrives where the window is not.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    show("ПРОБА 1 обычная", false);
+    show("ПРОБА 2 срочная", true);
     tracing::info!(
-        sent = ?sent,
         bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
-        "the window's own probe was sent"
+        "the window probe is done"
     );
 }
 
