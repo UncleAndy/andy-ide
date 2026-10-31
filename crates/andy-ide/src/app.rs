@@ -387,7 +387,20 @@ impl App {
         let focused = ui.ctx().input(|input| input.focused);
         let panel_in_front = self.dock.find_tab(&Tab::Agent).is_some();
         for (want, detail) in wanted {
-            if !crate::notify::wanted(self.state.notifications, focused, panel_in_front) {
+            // The decision is written down before it is acted on. A want that arrives and is kept
+            // back leaves no other trace — the panel simply says nothing — so "the notification did
+            // not appear" cannot be told from "the agent never asked" without this line.
+            let shown = crate::notify::wanted(self.state.notifications, focused, panel_in_front);
+            tracing::info!(
+                ?want,
+                %detail,
+                setting = self.state.notifications,
+                focused,
+                panel_in_front,
+                shown,
+                "the panel wants the person"
+            );
+            if !shown {
                 continue;
             }
             let (title, body) = want.message(&detail);
