@@ -88,22 +88,35 @@ impl Surface for System {
 
 #[cfg(test)]
 mod try_the_desk {
-    /// A real notification, shown on the desktop this check runs under. Not part of the suite: it
-    /// needs a session bus and a person looking at the screen. Run it to learn what the desk does.
+    /// Three notifications on the desk this check runs under, told apart by their names.
+    ///
+    /// Not part of the suite: it needs a session bus and a person looking at the screen. Run it and
+    /// say which of the three appeared — the answers are the same in every other respect, so the one
+    /// that differs names the cause.
     #[test]
     #[ignore = "needs the desktop"]
     fn a_real_notification_reaches_the_desk() {
-        use super::Surface;
-        let shown = notify_rust::Notification::new()
-            .summary("andy-ide: check of the desk")
-            .body("if you can read this, the system notifications work")
-            .show();
-        println!("RESULT: {shown:?}");
+        use super::Surface as _;
+        let show = |label: &str, with_name: bool| {
+            let mut note = notify_rust::Notification::new();
+            note.summary(&format!("check {label}")).body(&format!(
+                "if you can read this, the notification {label} is shown"
+            ));
+            if with_name {
+                note.appname("andy-ide");
+            }
+            match note.show() {
+                Ok(handle) => println!("{label}: Ok id={}", handle.id()),
+                Err(error) => println!("{label}: Err {error}"),
+            }
+        };
+        show("1-default-name", false);
+        show("2-appname-andy-ide", true);
         println!("BUS: {:?}", std::env::var("DBUS_SESSION_BUS_ADDRESS"));
         println!("RUNTIME: {:?}", std::env::var("XDG_RUNTIME_DIR"));
         println!(
-            "SURFACE: {:?}",
-            super::System.show("andy-ide: through the surface", "the window's own path")
+            "3-through-the-surface: {:?}",
+            super::System.show("check 3-through-the-surface", "the window's own path")
         );
     }
 }
