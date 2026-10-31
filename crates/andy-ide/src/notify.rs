@@ -108,13 +108,12 @@ pub struct System;
 
 impl Surface for System {
     fn show(&self, title: &str, body: &str) -> Result<u32, String> {
-        // Exactly the call the probe makes — summary, body, nothing else. No name of our own and no
-        // time asked for: the probe from a terminal is drawn by the desk, the window's own is not, and
-        // every difference between the two is a suspect until the two are the same call.
-        // Critical, at Andy word: a notice nobody can read in the four seconds the desk gives it
-        // is not a notice, and urgency is the only lever the protocol has that a desk honours. It
-        // also passes a desk own do-not-disturb setting, which is the right way round for the one
-        // thing the person is being told: the agent is waiting for them.
+        // No name of our own — the desk takes the name of the sender, which is what the probes that are
+        // drawn carry. Urgent, and standing a minute: here the call leaves the probe behind on
+        // purpose, because a notice nobody can read in the four seconds the desk gives it is not a
+        // notice, and urgency is the only lever the protocol has that a desk honours. It also
+        // passes a desk setting of do not disturb, which is the right way round for the one thing the
+        // person is being told: the agent is waiting for them.
         match notify_rust::Notification::new()
             .urgency(notify_rust::Urgency::Critical)
             .summary(title)
