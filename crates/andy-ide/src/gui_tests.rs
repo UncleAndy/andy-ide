@@ -7444,6 +7444,57 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_names_in_the_list_do_not_slide_when_the_pointer_moves() {
+        // The rows were measured by `ui.available_width()` inside the scroll area, which fed the
+        // area its own width back: every frame the rows grew a little, the content grew with them,
+        // and the names slid off to the right as soon as the pointer made the panel redraw.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the conversations to arrive", |gui| {
+            painted_text(gui, "renaming a symbol across crates")
+        });
+        for _ in 0..3 {
+            gui.settle();
+        }
+
+        let before = gui
+            .harness
+            .query_by_label_contains("renaming a symbol across crates")
+            .expect("the row of a conversation")
+            .rect();
+        // The pointer is moved about, as a person would: every frame of it repaints the panel.
+        for pos in [
+            egui::pos2(120.0, 200.0),
+            egui::pos2(360.0, 320.0),
+            egui::pos2(220.0, 430.0),
+            egui::pos2(480.0, 260.0),
+        ] {
+            gui.harness.event(egui::Event::PointerMoved(pos));
+            gui.settle();
+        }
+        let after = gui
+            .harness
+            .query_by_label_contains("renaming a symbol across crates")
+            .expect("the row of a conversation")
+            .rect();
+        assert!(
+            (before.min.x - after.min.x).abs() < 1.0
+                && (before.width() - after.width()).abs() < 1.0,
+            "the row moved while the pointer did: {before:?} became {after:?}"
+        );
+    }
+
+    #[test]
     fn a_conversation_can_be_renamed_and_the_name_is_shown() {
         // The agent names a conversation after the first thing said in it — often not what it
         // turned out to be about — and ACP has no way to rename one. The name a person gives is

@@ -536,6 +536,11 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     // Half the window rather than a strip: a person looking for yesterday's conversation scrolls
     // through a list, and a short window made even a list of fifty look like a handful.
     let limit = (ui.ctx().content_rect().height() * 0.5).max(160.0);
+    // The width comes from the window, never from the content. Measuring a row by
+    // `ui.available_width()` inside the scroll area fed the area its own width back: every frame
+    // the rows grew a little, the content grew with them, and the names slid off to the right as
+    // soon as the pointer made the panel redraw.
+    let width = (ui.ctx().content_rect().width() * 0.34).clamp(280.0, 520.0);
     // One row of the box goes to the count at the top, so the number is not hidden by the cap.
     let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let margins = ui.spacing().menu_margin.sum().y;
@@ -544,10 +549,10 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::LEFT_BOTTOM)
         .fixed_pos(egui::pos2(anchor.left(), anchor.top() - 4.0))
-        .default_size(egui::vec2(300.0, height))
+        .default_size(egui::vec2(width, height))
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(280.0);
+                ui.set_min_width(width);
                 ui.set_min_height(height);
                 egui::ScrollArea::vertical()
                     .id_salt("session-list")
@@ -639,7 +644,8 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             // and a click aimed at the name landed on the button beside it.
                             ui.horizontal(|ui| {
                                 let room = 56.0;
-                                let wide = (ui.available_width() - room - 4.0).max(80.0);
+                                // Measured against the list, not against what is inside it.
+                                let wide = (width - room - 16.0).max(80.0);
                                 let button = ui
                                     .add_enabled(
                                         !current,
