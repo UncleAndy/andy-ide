@@ -88,52 +88,49 @@ impl Surface for System {
 
 #[cfg(test)]
 mod try_the_desk {
-    /// What a notification has to be for the desk to show it.
+    /// Which words the desk refuses to show.
     ///
-    /// Not part of the suite: it needs a session bus and a person looking at the screen, and it asks
-    /// that person what appeared and for how long. Each one differs from the next in a single thing —
-    /// the name it carries, the words in it, or how long it may stand — so the answers narrow the
-    /// cause without a guess.
+    /// The probe that sent the window's own words was taken with an id and never shown, while plain
+    /// ones appeared — so the desk answers, and something about the notification is not to its
+    /// liking. Everything here stands for fifteen seconds, so nothing expires before the next
+    /// arrives, and each one differs from the next in its words alone.
     #[test]
     #[ignore = "needs the desktop"]
     fn a_real_notification_reaches_the_desk() {
-        use super::Surface as _;
-        let note = |label: &str| {
-            notify_rust::Notification::new()
-                .summary(label)
-                .body(label)
-                .show()
+        let show = |label: &str, summary: &str, body: &str, long: bool| {
+            let mut note = notify_rust::Notification::new();
+            note.appname("andy-ide").summary(summary).body(body);
+            if long {
+                note.timeout(notify_rust::Timeout::Milliseconds(15_000));
+            }
+            println!("{label}: {:?}", note.show().map(|handle| handle.id()));
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
         };
-        println!("1-plain: {:?}", note("1-plain"));
-        println!(
-            "2-named: {:?}",
-            notify_rust::Notification::new()
-                .appname("andy-ide")
-                .summary("2-named")
-                .body("named")
-                .show()
-                .map(|handle| handle.id())
+        show("1-ascii", "1-ascii", "1-ascii", true);
+        show(
+            "2-the-windows-title",
+            "andy-ide: the agent is waiting for you",
+            "2 body in ascii",
+            true,
         );
-        // The words the window itself sends, character for character.
-        println!(
-            "3-the-windows-words: {:?}",
-            super::System.show(
-                "andy-ide: the agent is waiting for you",
-                "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
-            )
+        show(
+            "3-a-russian-body",
+            "3-a-russian-body",
+            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
+            true,
         );
-        // The same, standing long enough to be read.
-        println!(
-            "4-standing-long: {:?}",
-            notify_rust::Notification::new()
-                .appname("andy-ide")
-                .summary("4-standing-long")
-                .body("this one stays for a while")
-                .timeout(notify_rust::Timeout::Milliseconds(15_000))
-                .show()
-                .map(|handle| handle.id())
+        show(
+            "4-the-windows-words",
+            "andy-ide: the agent is waiting for you",
+            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
+            true,
         );
-        println!("BUS: {:?}", std::env::var("DBUS_SESSION_BUS_ADDRESS"));
+        show(
+            "5-the-windows-words-short",
+            "andy-ide: the agent is waiting for you",
+            "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
+            false,
+        );
     }
 }
 
