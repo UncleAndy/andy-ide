@@ -7444,6 +7444,86 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_conversation_in_front_can_be_renamed_too() {
+        // The row for the conversation in front used to be labelled "this conversation" whatever the
+        // person called it: a rename looked like nothing had happened, and it looked that way after
+        // the next launch too, because the label was hard-coded and the name was never read back
+        // from the project. The name is kept either way — this is about showing it.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(
+            project.path().join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: tempfile::tempdir().unwrap(),
+            _config: None,
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the conversations to arrive", |gui| {
+            painted_text(gui, "this conversation")
+        });
+        for _ in 0..3 {
+            gui.settle();
+        }
+
+        // The first row is the conversation in front. A frame is given to it after the click: the
+        // field that appears needs its frame to take the keyboard before anything is typed.
+        gui.harness
+            .get_all_by_label("rename")
+            .next()
+            .expect("a rename button")
+            .click();
+        gui.settle();
+        gui.harness
+            .event(egui::Event::Text("tables in the panel".to_owned()));
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        assert!(
+            painted_text(&gui, "tables in the panel"),
+            "the conversation in front kept its stand-in label after the rename"
+        );
+        // And it is written down where the next launch looks for it.
+        gui.app_mut().state.save_workspace(None, 100.0, true);
+        let written = ide_core::Workspace::open(&project.path().canonicalize().unwrap())
+            .unwrap()
+            .read_state();
+        assert!(
+            written
+                .session_names
+                .values()
+                .any(|name| name == "tables in the panel"),
+            "the name was not kept with the project: {:?}",
+            written.session_names
+        );
+    }
+
+    #[test]
     fn the_names_in_the_list_do_not_slide_when_the_pointer_moves() {
         // The rows were measured by `ui.available_width()` inside the scroll area, which fed the
         // area its own width back: every frame the rows grew a little, the content grew with them,

@@ -519,7 +519,16 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     if let Some(current) = state.agent.session.clone()
         && !rows.iter().any(|(id, _, _)| id == &current)
     {
-        rows.insert(0, (current, "this conversation".to_owned(), String::new()));
+        // The name a person gave it, if any: "this conversation" is the stand-in for a conversation
+        // that has no name yet, not a name that overrides the one it was given — a rename of the
+        // conversation in front looked like nothing had happened.
+        let label = state
+            .agent
+            .session_names
+            .get(&current)
+            .cloned()
+            .unwrap_or_else(|| "this conversation".to_owned());
+        rows.insert(0, (current, label, String::new()));
     }
     let mut chosen: Option<String> = None;
     // The row being renamed, the name that has been typed for it, and whether the person gave up:
