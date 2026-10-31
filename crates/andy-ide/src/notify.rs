@@ -50,6 +50,14 @@ pub trait Surface: Send {
     fn show(&self, title: &str, body: &str) -> Result<u32, String>;
 }
 
+/// How long a notification stands, when the desk is not asked for a time of its own.
+///
+/// The desk's own default is a few seconds, chosen for a person already looking at the screen. These
+/// notifications exist for the opposite case — someone in another window, or away from the machine —
+/// and a notice nobody can read is not a notice. Ten seconds is long enough to notice and short enough
+/// not to stand in the way.
+pub const STANDING: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The desk's own notifications, through the service the session provides.
 #[derive(Default)]
 pub struct System;
@@ -63,6 +71,9 @@ impl Surface for System {
             .appname("andy-ide")
             .summary(title)
             .body(body)
+            .timeout(notify_rust::Timeout::Milliseconds(
+                STANDING.as_millis() as u32
+            ))
             .show()
         {
             Ok(handle) => {
@@ -173,6 +184,16 @@ impl Surface for Written {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_stands_long_enough_to_be_read() {
+        // The desk's own default is meant for somebody already at the screen. These are for somebody
+        // who is not, and a notice that is gone before they look is the same as no notice at all.
+        assert!(
+            STANDING >= std::time::Duration::from_secs(8),
+            "a notification stands {STANDING:?}, which is not long enough to be noticed"
+        );
+    }
 
     #[test]
     fn a_panel_in_front_of_a_person_is_its_own_notification() {
