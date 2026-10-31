@@ -1024,7 +1024,16 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             };
             ui.weak(format!("{phase}{dots}"));
         } else {
-            ui.weak(&state.agent.status);
+            // The line of a turn in flight has to move, and to say the one thing the panel can see
+            // of a long silence: how long it has been. A row sitting at `answering…` while the agent
+            // is quiet for minutes is what a hang looks like, which is the whole complaint this
+            // answers. The repaint is asked for here too, where the line is drawn, so that a window
+            // too narrow for the facts row still counts.
+            let saying = state.agent.saying();
+            if state.agent.busy {
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
+            }
+            ui.weak(saying);
         }
     });
     // The row of the name and the command is the desk the agent is set up at; a running

@@ -6912,6 +6912,41 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_window_says_how_long_the_agent_has_been_quiet() {
+        // A turn that compacts its own context is silent for minutes, and a row sitting at
+        // `answering…` all that time is what a hang looks like. Asked here: that the window says
+        // the one thing it can see, where a person is looking.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        {
+            let agent = &mut gui.app_mut().state.agent;
+            agent.status = "answering…".to_owned();
+            agent.turn_in_flight_for(std::time::Duration::from_secs(90));
+        }
+        gui.settle();
+
+        let sayings: Vec<String> = gui
+            .harness
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sayings
+                .iter()
+                .any(|text| text.contains("no word from the agent for 1:30")),
+            "the window did not say how long the agent has been quiet: {sayings:?}"
+        );
+    }
+
+    #[test]
     fn a_finished_turn_reaches_the_desk() {
         let Some(mut gui) = with_agent() else {
             println!("the stand-in agent is not built: the check was skipped");

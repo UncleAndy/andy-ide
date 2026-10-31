@@ -26,6 +26,14 @@ const PUMP: std::time::Duration = std::time::Duration::from_millis(20);
 /// gap between two chunks, short enough that the button is not a lie a second afterwards.
 const SILENCE: Duration = Duration::from_millis(1200);
 
+/// How long a turn in flight may be quiet before the panel says how long it has been quiet.
+///
+/// A tool call, a slow model and a turn that compacts its own context all take their time without a
+/// word, and a line that says nothing but `answering…` for minutes is what a hang looks like. A
+/// minute is the first silence a person would not call ordinary, and it is where the panel starts
+/// saying the one thing it knows: that nothing has come for that long, and for how long.
+const QUIET: Duration = Duration::from_secs(60);
+
 /// How long the panel waits before starting a crashed agent again.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -159,6 +167,17 @@ fn service_line(text: &str) -> Option<(&'static str, String)> {
         .iter()
         .find(|(shape, _, _)| opening.starts_with(shape))?;
     Some((kind, line(text)))
+}
+
+/// A length of time, as a person counts it: `1:12`, or `1:02:03` past the hour.
+fn clock(took: Duration) -> String {
+    let seconds = took.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 /// What the panel tells the worker.
@@ -836,6 +855,47 @@ impl AgentState {
 
     pub fn working(&self) -> bool {
         self.busy || self.last_word.is_some_and(|when| when.elapsed() < SILENCE)
+    }
+
+    /// How long the turn in flight has been quiet: since the agent last said anything, or since the
+    /// turn was sent when it has said nothing at all.
+    ///
+    /// Nothing else, while a turn this panel asked for is running: the watchdog leaves `last_word`
+    /// alone until the turn is over, so this is the silence of the agent and not of the panel.
+    pub fn quiet_for(&self) -> Option<Duration> {
+        if !self.busy {
+            return None;
+        }
+        Some(self.last_word.or(self.started)?.elapsed())
+    }
+
+    /// What the panel says about the work in hand.
+    ///
+    /// The plain word while the agent answers as usual, and — once the silence has lasted longer
+    /// than a person would call ordinary — the length of it, so that a window sitting at
+    /// `answering…` and a window that has stalled can be told apart at a glance. The reason for a
+    /// silence is not ours to know: a compaction, a tool and a slow model look the same from here,
+    /// and the panel says only what it can see.
+    pub fn saying(&self) -> String {
+        match self.quiet_for() {
+            Some(quiet) if quiet >= QUIET => {
+                format!(
+                    "{} — no word from the agent for {}",
+                    self.status,
+                    clock(quiet)
+                )
+            }
+            _ => self.status.clone(),
+        }
+    }
+
+    /// Puts a turn in flight that began a while ago, for the checks that ask what the panel says
+    /// about a silence nobody wants to sit through.
+    #[cfg(test)]
+    pub(crate) fn turn_in_flight_for(&mut self, quiet: Duration) {
+        self.busy = true;
+        self.last_word = None;
+        self.started = Some(Instant::now() - quiet);
     }
 
     /// Ends the work only heard about, once the words have stopped coming.
@@ -1575,6 +1635,55 @@ mod grouping_tests {
             None,
             "a line quoting a receipt is still the words of the person"
         );
+    }
+
+    #[test]
+    fn a_long_silence_of_the_agent_is_said_out_loud() {
+        let mut agent = AgentState {
+            status: "answering…".to_owned(),
+            ..AgentState::default()
+        };
+
+        // Nothing in flight, and a turn that has only just been sent: the plain word.
+        assert_eq!(agent.quiet_for(), None);
+        assert_eq!(agent.saying(), "answering…");
+        agent.turn_in_flight_for(Duration::from_secs(30));
+        assert_eq!(
+            agent.saying(),
+            "answering…",
+            "half a minute of a slow model is not a silence worth announcing"
+        );
+
+        // Past the minute, the panel says the one thing it can see.
+        agent.turn_in_flight_for(Duration::from_secs(75));
+        assert_eq!(
+            agent.saying(),
+            "answering… — no word from the agent for 1:15"
+        );
+    }
+
+    #[test]
+    fn the_silence_is_counted_from_the_last_word_and_not_from_the_send() {
+        let mut agent = AgentState {
+            status: "answering…".to_owned(),
+            ..AgentState::default()
+        };
+        // A turn that streamed for four minutes and has been quiet for two: counting from the send
+        // would claim six, and a person told six would go looking for a problem that is not there.
+        agent.turn_in_flight_for(Duration::from_secs(360));
+        agent.last_word = Some(Instant::now() - Duration::from_secs(120));
+        assert_eq!(
+            agent.saying(),
+            "answering… — no word from the agent for 2:00"
+        );
+    }
+
+    #[test]
+    fn a_long_quiet_is_counted_the_way_a_person_counts_it() {
+        assert_eq!(clock(Duration::from_secs(75)), "1:15");
+        assert_eq!(clock(Duration::from_secs(600)), "10:00");
+        assert_eq!(clock(Duration::from_secs(3600)), "1:00:00");
+        assert_eq!(clock(Duration::from_secs(3725)), "1:02:05");
     }
 
     #[test]
