@@ -65,11 +65,12 @@ pub struct System;
 
 impl Surface for System {
     fn show(&self, title: &str, body: &str) -> Result<u32, String> {
-        // The name is what the desk attributes the notification to, and a notification it cannot
-        // attribute is one it may drop without a word — which is a failure that looks exactly like
-        // success from here, because the call itself returns an id.
+        // No name is given: the desk takes the sender's own, which is what a call from a terminal
+        // gets and what the desk has been seen to show. Naming the application was a guess at why a
+        // notification was not drawn, and it was a guess that cost a day — the probe that appeared and
+        // the window that did not differed in this and in nothing else, and the probe was the one
+        // without it.
         match notify_rust::Notification::new()
-            .appname("andy-ide")
             .summary(title)
             .body(body)
             .timeout(notify_rust::Timeout::Milliseconds(
