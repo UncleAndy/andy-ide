@@ -7444,6 +7444,99 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_conversation_begun_here_survives_a_move_to_another() {
+        // Moving between conversations used to put the agent down and take it up again, and an agent
+        // holds the conversations it is serving: a conversation begun a moment ago, not yet written
+        // down, went with the process and was missing from the agent's own list for good. Now the
+        // move asks the agent that is up, so nothing is lost and the agent is not restarted.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        assert_eq!(
+            gui.app().state.agent.connects(),
+            1,
+            "one agent was brought up"
+        );
+
+        gui.harness.get_by_label("New session").click();
+        gui.settle();
+        wait(&mut gui, "the fresh conversation", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        assert_eq!(
+            gui.app().state.agent.connects(),
+            1,
+            "a fresh conversation put the agent down and took it up again"
+        );
+        let fresh = gui.app().state.agent.session.clone().expect("a session");
+
+        // Something said in it: an agent lists a conversation only once it has history, so a fresh
+        // one is not in its list until a turn has run.
+        gui.app_mut().state.agent.input = "say something".to_owned();
+        gui.app_mut().state.agent.send();
+        wait(&mut gui, "the answer to the first question", |gui| {
+            !gui.app().state.agent.busy
+        });
+
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the list of conversations", |gui| {
+            gui.app()
+                .state
+                .agent
+                .sessions
+                .iter()
+                .any(|session| session.id == fresh)
+        });
+        assert!(
+            gui.app().state.agent.sessions.iter().any(|session| session
+                .title
+                .as_deref()
+                .is_some_and(|title| title.contains("begun in this window"))),
+            "the conversation begun here was not in the agent's list: {:?}",
+            gui.app().state.agent.sessions
+        );
+
+        // Off to another conversation, and back to the list.
+        gui.harness
+            .get_by_label_contains("renaming a symbol across crates")
+            .click();
+        wait(&mut gui, "the other conversation", |gui| {
+            gui.app().state.agent.session.as_deref() != Some(fresh.as_str())
+                && gui.app().state.agent.status.starts_with("ready")
+        });
+        assert_eq!(
+            gui.app().state.agent.connects(),
+            1,
+            "the move to another conversation restarted the agent"
+        );
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the list again", |gui| {
+            gui.app()
+                .state
+                .agent
+                .sessions
+                .iter()
+                .any(|session| session.id == fresh)
+        });
+        assert!(
+            gui.app().state.agent.sessions.iter().any(|session| session
+                .title
+                .as_deref()
+                .is_some_and(|title| title.contains("begun in this window"))),
+            "the conversation begun here was gone after the move: {:?}",
+            gui.app().state.agent.sessions
+        );
+    }
+
+    #[test]
     fn the_conversation_in_front_can_be_renamed_too() {
         // The row for the conversation in front used to be labelled "this conversation" whatever the
         // person called it: a rename looked like nothing had happened, and it looked that way after

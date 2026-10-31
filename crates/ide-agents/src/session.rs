@@ -440,6 +440,56 @@ impl Session {
         Ok(all)
     }
 
+    /// Starts a fresh conversation on the agent that is already running.
+    ///
+    /// Asked for over the open connection for the same reason a conversation is loaded over it: an
+    /// agent keeps the conversations it is serving, and restarting the process throws them away. A
+    /// conversation begun a moment ago and not yet written down is gone with it.
+    pub fn begin(&mut self) -> Result<()> {
+        let answer = self.ask("session/new", new_session_params(&self.root), HELLO)?;
+        let id = answer
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("the agent opened no session")?;
+        self.session_id = id;
+        self.resumed = false;
+        self.state = session_state(&answer);
+        self.usage = usage_of(&answer);
+        self.turn = None;
+        Ok(())
+    }
+
+    /// Opens another conversation on the agent that is already running, replacing the one in hand.
+    ///
+    /// Loaded over the connection that is open rather than by starting a new agent. An agent keeps
+    /// the conversations it is serving in memory, and a client that restarts the process to move
+    /// between them loses them: a conversation started a moment ago has not been written down yet,
+    /// and it disappears from the agent's own list the moment the process holding it is gone. Loading
+    /// replays the history of the chosen conversation before it answers, so the panel fills the same
+    /// way a restored window does.
+    pub fn load_into(&mut self, session: &str) -> Result<()> {
+        let answer = self.ask(
+            "session/load",
+            load_session_params(&self.root, session),
+            HELLO,
+        )?;
+        // The agent may answer with the id it kept, or with nothing but the models: either way the
+        // conversation in hand is the one that was asked for.
+        let id = answer
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| session.to_owned());
+        self.session_id = id;
+        self.resumed = true;
+        self.state = session_state(&answer);
+        self.usage = usage_of(&answer);
+        // No turn is in flight for the conversation that has just been opened.
+        self.turn = None;
+        Ok(())
+    }
+
     /// The models and modes this conversation has, and which are in use.
     pub fn state(&self) -> &SessionState {
         &self.state

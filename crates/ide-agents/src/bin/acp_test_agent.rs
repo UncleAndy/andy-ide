@@ -17,6 +17,7 @@
 //! - anything else — echoes the words back as a single chunk.
 
 use std::io::{BufRead, Write};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
@@ -27,6 +28,18 @@ use serde_json::{Value, json};
 /// notification *while* a turn is running, so it can only be noticed by a turn that
 /// looks, and only a turn that looks can end as `cancelled` rather than `end_turn`.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// The conversations this process has begun and not written down anywhere.
+///
+/// A real agent keeps the conversations it is serving in memory and writes them out as the turns
+/// end; a client that restarts the process to move between conversations loses the ones that are
+/// only in memory. The stand-in holds them the same way, so a test can tell a move from a restart.
+static FRESH: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// The conversations something has been said in. A real agent lists an in-memory conversation only
+/// once it has history (`acp_adapter/session.py` skips one whose history is empty), so a client
+/// cannot count on seeing a conversation it has just opened.
+static SPOKEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Ends a turn, saying how much of the window it used: ACP has no field for this, so the
 /// figure rides in `_meta`, the way a real agent would send it.
@@ -236,6 +249,21 @@ fn main() {
                     .and_then(|params| params.get("cursor"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                // What this process holds in memory comes first, as a real agent offers it.
+                let spoken = SPOKEN
+                    .lock()
+                    .map(|spoken| spoken.clone())
+                    .unwrap_or_default();
+                let held: Vec<(String, String, String)> = FRESH
+                    .lock()
+                    .map(|fresh| {
+                        fresh
+                            .iter()
+                            .filter(|(id, _)| spoken.iter().any(|said| said == id))
+                            .map(|(id, title)| (id.clone(), title.clone(), String::new()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let kept = [
                     ("kept-42", "why the sky is blue", "2026-10-29T18:04:00Z"),
                     (
@@ -249,12 +277,21 @@ fn main() {
                         "2026-10-27T20:00:00Z",
                     ),
                 ];
+                let listed: Vec<(String, String, String)> = held
+                    .iter()
+                    .cloned()
+                    .chain(kept.iter().map(|(id, title, at)| {
+                        ((*id).to_owned(), (*title).to_owned(), (*at).to_owned())
+                    }))
+                    .collect();
+                // The cursor names the last row of the last page, wherever that row came from:
+                // counting from the in-memory conversations keeps the pages from overlapping.
                 let start = cursor
                     .as_deref()
-                    .and_then(|cursor| kept.iter().position(|(id, _, _)| *id == cursor))
+                    .and_then(|cursor| listed.iter().position(|(id, _, _)| id == cursor))
                     .map(|index| index + 1)
                     .unwrap_or(0);
-                let page: Vec<Value> = kept
+                let page: Vec<Value> = listed
                     .iter()
                     .skip(start)
                     .take(2)
@@ -390,6 +427,14 @@ fn main() {
             "session/new" => {
                 resumed = false;
                 session_name = "stand-in-session".to_owned();
+                if let Ok(mut fresh) = FRESH.lock()
+                    && !fresh.iter().any(|(id, _)| id == &session_name)
+                {
+                    fresh.push((
+                        session_name.clone(),
+                        "a conversation begun in this window".to_owned(),
+                    ));
+                }
                 cwd = message
                     .get("params")
                     .and_then(|params| params.get("cwd"))
@@ -493,6 +538,11 @@ fn main() {
                 answer(id, json!({}));
             }
             "session/prompt" => {
+                if let Ok(mut spoken) = SPOKEN.lock()
+                    && !spoken.iter().any(|said| said == &session_name)
+                {
+                    spoken.push(session_name.clone());
+                }
                 // A new turn is not a stopped one, whatever the last one ended as.
                 CANCELLED.store(false, Ordering::SeqCst);
                 let text = message

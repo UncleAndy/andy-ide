@@ -125,6 +125,12 @@ enum Command {
     /// List the conversations this agent keeps for this project: the panel shows them, and a
     /// choice among them reopens the session.
     Sessions,
+    /// Open another conversation on the agent that is already up. The agent is not restarted: the
+    /// conversations it holds in memory would go with the process, and one that has not been written
+    /// down yet would vanish from its own list.
+    SwitchTo(String),
+    /// Begin a fresh conversation on the agent that is already up, for the same reason.
+    Fresh,
 }
 
 /// What the worker tells the panel.
@@ -279,6 +285,11 @@ pub struct AgentState {
     /// When the session last became ready: a crash after a long healthy run is not part
     /// of a crash loop, and the attempts are forgiven.
     connected_at: Option<Instant>,
+    /// How many times an agent has been brought up. A panel that moves between conversations asks
+    /// the agent it has; the count is how a test tells that apart from a restart, and nothing in the
+    /// panel needs it.
+    #[cfg(test)]
+    connects: u32,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -347,6 +358,8 @@ impl Default for AgentState {
             retry_at: None,
             reconnecting: false,
             connected_at: None,
+            #[cfg(test)]
+            connects: 0,
             worker: None,
             root: None,
             place: None,
@@ -511,6 +524,12 @@ impl AgentState {
         match started {
             Ok(_) => {
                 self.worker = Some(Worker { commands, replies });
+                // An agent brought up, not a conversation opened: the count is how a test tells a
+                // move between conversations from a restart, and a move sends an answer of its own.
+                #[cfg(test)]
+                {
+                    self.connects += 1;
+                }
                 self.chosen = Some(name.clone());
                 self.status = format!("{name}: starting…");
             }
@@ -702,17 +721,31 @@ impl AgentState {
             self.sessions_open = false;
             return;
         }
-        // The agent that answers now is let go first: this window speaks to one conversation at a
-        // time, and a start that finds an agent already running refuses to do anything at all.
-        self.stop();
-        self.forget_session();
+        // The conversation on screen is cleared first: the transcript is about to be replaced by
+        // another one, and half of each would read as a single conversation.
         self.clear_panel();
         self.usage = None;
         self.sessions_open = false;
         self.session_rename = None;
-        self.resume = Some(session.to_owned());
-        self.resumed_from = Some(self.name.clone());
-        self.start();
+        self.ready = false;
+        // The agent is asked to open the conversation, not restarted. Restarting it threw away the
+        // conversations it was holding in memory — including the one just left, if the agent had not
+        // written it down yet — and they vanished from its own list.
+        let taken = match &self.worker {
+            Some(worker) => worker
+                .commands
+                .send(Command::SwitchTo(session.to_owned()))
+                .is_ok(),
+            None => false,
+        };
+        if !taken {
+            // No agent to ask (or one that will not listen): open it the way a start does, from the
+            // id written where a restart looks for it.
+            self.forget_session();
+            self.resume = Some(session.to_owned());
+            self.resumed_from = Some(self.name.clone());
+            self.start();
+        }
     }
 
     /// What the panel shows about the context: what the agent says now, or — until it says
@@ -925,6 +958,13 @@ impl AgentState {
         self.connected_at.is_some()
     }
 
+    /// How many agents have been brought up in this window: unchanged across a move from one
+    /// conversation to another, one greater after a restart.
+    #[cfg(test)]
+    pub fn connects(&self) -> u32 {
+        self.connects
+    }
+
     /// Whether the panel is waiting to start a crashed agent again.
     pub fn waiting_to_reconnect(&self) -> bool {
         self.retry_at.is_some()
@@ -1061,10 +1101,23 @@ impl AgentState {
     /// The running process is stopped rather than left behind: two agents on one project
     /// would each keep their own idea of what was said.
     pub fn new_session(&mut self) {
-        self.stop();
-        self.forget_session();
+        // Asked of the agent that is up, not by putting it down and taking it up again: the
+        // conversations it holds go with the process, and a fresh one is no reason to lose them.
         self.clear_panel();
-        self.start();
+        self.usage = None;
+        self.sessions_open = false;
+        self.session_rename = None;
+        self.ready = false;
+        let taken = match &self.worker {
+            Some(worker) => worker.commands.send(Command::Fresh).is_ok(),
+            None => false,
+        };
+        if !taken {
+            self.forget_session();
+            self.resume = None;
+            self.resumed_from = None;
+            self.start();
+        }
     }
 
     /// Files one reply from the worker.
@@ -1310,6 +1363,36 @@ fn work(
                 }
                 let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
+            Ok(Command::Fresh) => match session.begin() {
+                Ok(()) => {
+                    let opened = session.id().to_owned();
+                    let _ = replies.send(Reply::Ready {
+                        session: opened,
+                        resumed: false,
+                    });
+                    let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+                }
+                Err(error) => {
+                    let _ = replies.send(Reply::Event(AgentEvent::Failed(format!(
+                        "the agent could not begin a conversation: {error}"
+                    ))));
+                }
+            },
+            Ok(Command::SwitchTo(wanted)) => match session.load_into(&wanted) {
+                Ok(()) => {
+                    let opened = session.id().to_owned();
+                    let _ = replies.send(Reply::Ready {
+                        session: opened,
+                        resumed: true,
+                    });
+                    let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
+                }
+                Err(error) => {
+                    let _ = replies.send(Reply::Event(AgentEvent::Failed(format!(
+                        "the agent could not open that conversation: {error}"
+                    ))));
+                }
+            },
             Ok(Command::Sessions) => {
                 let answer = match session.list_sessions() {
                     Ok(sessions) => AgentEvent::Sessions(sessions),
