@@ -88,36 +88,52 @@ impl Surface for System {
 
 #[cfg(test)]
 mod try_the_desk {
-    /// Three notifications on the desk this check runs under, told apart by their names.
+    /// What a notification has to be for the desk to show it.
     ///
-    /// Not part of the suite: it needs a session bus and a person looking at the screen. Run it and
-    /// say which of the three appeared — the answers are the same in every other respect, so the one
-    /// that differs names the cause.
+    /// Not part of the suite: it needs a session bus and a person looking at the screen, and it asks
+    /// that person what appeared and for how long. Each one differs from the next in a single thing —
+    /// the name it carries, the words in it, or how long it may stand — so the answers narrow the
+    /// cause without a guess.
     #[test]
     #[ignore = "needs the desktop"]
     fn a_real_notification_reaches_the_desk() {
         use super::Surface as _;
-        let show = |label: &str, with_name: bool| {
-            let mut note = notify_rust::Notification::new();
-            note.summary(&format!("check {label}")).body(&format!(
-                "if you can read this, the notification {label} is shown"
-            ));
-            if with_name {
-                note.appname("andy-ide");
-            }
-            match note.show() {
-                Ok(handle) => println!("{label}: Ok id={}", handle.id()),
-                Err(error) => println!("{label}: Err {error}"),
-            }
+        let note = |label: &str| {
+            notify_rust::Notification::new()
+                .summary(label)
+                .body(label)
+                .show()
         };
-        show("1-default-name", false);
-        show("2-appname-andy-ide", true);
-        println!("BUS: {:?}", std::env::var("DBUS_SESSION_BUS_ADDRESS"));
-        println!("RUNTIME: {:?}", std::env::var("XDG_RUNTIME_DIR"));
+        println!("1-plain: {:?}", note("1-plain"));
         println!(
-            "3-through-the-surface: {:?}",
-            super::System.show("check 3-through-the-surface", "the window's own path")
+            "2-named: {:?}",
+            notify_rust::Notification::new()
+                .appname("andy-ide")
+                .summary("2-named")
+                .body("named")
+                .show()
+                .map(|handle| handle.id())
         );
+        // The words the window itself sends, character for character.
+        println!(
+            "3-the-windows-words: {:?}",
+            super::System.show(
+                "andy-ide: the agent is waiting for you",
+                "Запрос выбора для проверки. Появился ли тост на рабочем столе?",
+            )
+        );
+        // The same, standing long enough to be read.
+        println!(
+            "4-standing-long: {:?}",
+            notify_rust::Notification::new()
+                .appname("andy-ide")
+                .summary("4-standing-long")
+                .body("this one stays for a while")
+                .timeout(notify_rust::Timeout::Milliseconds(15_000))
+                .show()
+                .map(|handle| handle.id())
+        );
+        println!("BUS: {:?}", std::env::var("DBUS_SESSION_BUS_ADDRESS"));
     }
 }
 
