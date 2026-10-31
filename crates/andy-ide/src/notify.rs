@@ -69,7 +69,9 @@ impl Surface for System {
                 // Which bus took it, and under which id: an id means a daemon answered, and a
                 // notification that answered but never appeared means the daemon is not the one
                 // drawing the desk. That difference is invisible without the address.
-                tracing::debug!(
+                // At info, not debug: when a notification is taken and never seen, this line is the
+                // only way to learn which bus answered — and the default filter would hide it.
+                tracing::info!(
                     id = handle.id(),
                     bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
                     "the desk took the notification"
