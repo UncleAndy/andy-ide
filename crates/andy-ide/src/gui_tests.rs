@@ -7444,6 +7444,72 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_conversation_can_be_renamed_and_the_name_is_shown() {
+        // The agent names a conversation after the first thing said in it — often not what it
+        // turned out to be about — and ACP has no way to rename one. The name a person gives is
+        // kept with the project, and the list shows it instead of the agent's.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the conversations to arrive", |gui| {
+            painted_text(gui, "renaming a symbol across crates")
+        });
+        // The window settles before a click on a floating list: the panel around the anchor is
+        // still moving, and a click aimed at a frame that has passed lands elsewhere.
+        for _ in 0..3 {
+            gui.settle();
+        }
+
+        // The first row is the conversation in front; renaming it takes the keyboard at once.
+        gui.harness
+            .get_all_by_label("rename")
+            .next()
+            .expect("a rename button")
+            .click();
+        gui.settle();
+        gui.harness
+            .event(egui::Event::Text("tables in the panel".to_owned()));
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+
+        wait(&mut gui, "the new name to be shown", |gui| {
+            gui.app()
+                .state
+                .agent
+                .session_names
+                .values()
+                .any(|name| name == "tables in the panel")
+        });
+        let session = gui
+            .app()
+            .state
+            .agent
+            .session
+            .clone()
+            .expect("the conversation in front");
+        assert_eq!(
+            gui.app()
+                .state
+                .agent
+                .session_names
+                .get(&session)
+                .map(String::as_str),
+            Some("tables in the panel"),
+            "the name was not kept for the conversation it was given to"
+        );
+    }
+
+    #[test]
     fn the_context_figure_of_a_conversation_comes_back_when_it_is_opened() {
         // An agent names the size of its window only after the first exchange of a restored
         // conversation — Hermes' `_build_usage_update` returns nothing while its compressor has no
@@ -7490,6 +7556,7 @@ mod the_agent_panel {
                 )]
                 .into_iter()
                 .collect(),
+                session_names: Default::default(),
             })
             .unwrap();
 
@@ -7577,6 +7644,7 @@ mod the_agent_panel {
                 carets: Default::default(),
                 view: Default::default(),
                 contexts: Default::default(),
+                session_names: Default::default(),
             })
             .unwrap();
 
@@ -8010,6 +8078,51 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.choice.is_none(),
             "the question stayed after it was answered"
+        );
+    }
+
+    #[test]
+    fn the_last_command_of_the_agent_can_be_reached_from_the_list() {
+        // An agent offers more commands than the box shows at once — nine, here, against eight
+        // rows — and the list used to stop at the eighth: the last one could not be seen, could
+        // not be clicked, and the keyboard walked past a row nobody could look at. The list
+        // scrolls now, and the picked row is brought into sight.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the commands", |gui| {
+            gui.app().state.agent.commands.len() == 9
+        });
+
+        let fields = gui
+            .harness
+            .get_all_by_role(egui::accesskit::Role::MultilineTextInput);
+        fields.last().expect("the message field").click();
+        gui.settle();
+        gui.harness.event(egui::Event::Text("/".to_owned()));
+        for _ in 0..6 {
+            gui.harness.step();
+        }
+
+        // Down to the last command of all: the panel completes what it is on, so the row has to
+        // be on screen for a person to know what they are about to send.
+        for _ in 0..8 {
+            gui.harness.key_press(egui::Key::ArrowDown);
+            gui.settle();
+        }
+        assert_eq!(
+            gui.app().state.agent.command_pick,
+            8,
+            "the keyboard did not reach the ninth command"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("/version").is_some(),
+            "the last command of the agent is not on screen: the list does not scroll"
         );
     }
 

@@ -498,14 +498,15 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         .sessions
         .iter()
         .map(|session| {
-            let title = session
+            // The name a person gave the conversation, or the one the agent chose — which is the
+            // first thing that was said in it, often not what it turned out to be about.
+            let given = session
                 .title
                 .clone()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| session.id.clone());
+                .filter(|title| !title.trim().is_empty());
             (
                 session.id.clone(),
-                title,
+                state.agent.session_name(&session.id, given.as_deref()),
                 session.updated_at.clone().unwrap_or_default(),
             )
         })
@@ -521,6 +522,15 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         rows.insert(0, (current, "this conversation".to_owned(), String::new()));
     }
     let mut chosen: Option<String> = None;
+    // The row being renamed, the name that has been typed for it, and whether the person gave up:
+    // the list is drawn from a borrow of the panel's state, so what is typed is kept here and given
+    // back at the end of the frame.
+    let mut renaming: Option<(String, String)> = state.agent.session_rename.clone();
+    let mut renamed: Option<(String, String)> = None;
+    let mut given_up = false;
+    // A rename that has just begun takes the keyboard: the person pressed the button to type, and
+    // making them click the field first is a step nobody asked for.
+    let rename_started = state.agent.session_rename.is_none() && renaming.is_some();
     // Never more than part of the window: a list that grew to fill it would cover the
     // conversation it belongs to.
     // Half the window rather than a strip: a person looking for yesterday's conversation scrolls
@@ -560,10 +570,51 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             });
                             return;
                         }
+                        let row_height = row - ui.spacing().item_spacing.y;
                         for (id, title, when) in &rows {
                             // The conversation that is answering is shown as taken: a click that
                             // would change nothing is not offered.
                             let current = state.agent.session.as_deref() == Some(id.as_str());
+                            // A row being renamed becomes a field, in the row itself: the name is
+                            // typed where the name is, so nothing jumps and no dialog opens.
+                            if renaming
+                                .as_ref()
+                                .is_some_and(|(being_renamed, _)| being_renamed == id)
+                            {
+                                let draft =
+                                    &mut renaming.as_mut().expect("the row is being renamed").1;
+                                let room = (ui.available_width() - 120.0).max(120.0);
+                                let field = ui.add_sized(
+                                    egui::vec2(room, row_height),
+                                    egui::TextEdit::singleline(draft)
+                                        .hint_text("a name for this conversation"),
+                                );
+                                // The field keeps the keyboard while it is open: the message field
+                                // below takes it back the moment it is free, and a name typed into
+                                // the message field is a name sent to the agent.
+                                if !field.has_focus() {
+                                    field.request_focus();
+                                }
+                                let _ = rename_started;
+                                // `Enter` in a single-line field does not take the focus away, and
+                                // the panel below reads the key as "send the message": it is taken
+                                // here, so that the name is kept and nothing is sent. `Escape` is
+                                // taken the same way — it means "not now", not "close the list".
+                                let enter = ui.input_mut(|input| {
+                                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                });
+                                let escape = ui.input_mut(|input| {
+                                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                });
+                                let saved =
+                                    ui.button("save").clicked() || (field.has_focus() && enter);
+                                if saved {
+                                    renamed = Some((id.clone(), draft.clone()));
+                                } else if escape || ui.button("cancel").clicked() {
+                                    given_up = true;
+                                }
+                                continue;
+                            }
                             // The row says the name the conversation is known by; the id and the
                             // date are in the hint, where they are read when wanted and take no
                             // room when they are not.
@@ -583,18 +634,39 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             if !when.is_empty() {
                                 hint.push_str(&format!("  ·  {when}"));
                             }
-                            let button = ui
-                                .add_enabled(
-                                    !current,
-                                    egui::Button::new(title.clone()).min_size(egui::vec2(
-                                        ui.available_width(),
-                                        row - ui.spacing().item_spacing.y,
-                                    )),
-                                )
-                                .on_hover_text(hint);
-                            if button.clicked() {
-                                chosen = Some(id.clone());
-                            }
+                            // One row per conversation: the name to pick it by, and the way to
+                            // rename it, side by side. Stacking them made every row two rows tall,
+                            // and a click aimed at the name landed on the button beside it.
+                            ui.horizontal(|ui| {
+                                let room = 56.0;
+                                let wide = (ui.available_width() - room - 4.0).max(80.0);
+                                let button = ui
+                                    .add_enabled(
+                                        !current,
+                                        egui::Button::new(title.clone())
+                                            .min_size(egui::vec2(wide, row_height)),
+                                    )
+                                    .on_hover_text(hint);
+                                if button.clicked() {
+                                    chosen = Some(id.clone());
+                                }
+                                // Renaming is offered on every row, the one in front included: a
+                                // name a person cannot change is a name they are stuck with.
+                                let rename = ui
+                                    .add_sized([room, row_height], egui::Button::new("rename"))
+                                    .on_hover_text("Give this conversation a name of your own");
+                                if rename.clicked() {
+                                    renaming = Some((
+                                        id.clone(),
+                                        state
+                                            .agent
+                                            .session_names
+                                            .get(id)
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                    ));
+                                }
+                            });
                         }
                     });
             });
@@ -610,6 +682,15 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     if chosen.is_some() || clicked_outside || ui.input(|input| input.key_pressed(egui::Key::Escape))
     {
         state.agent.sessions_open = false;
+    }
+    // What was typed is given back: the draft while it is being typed, the name when it is kept,
+    // nothing when the person gave up.
+    if let Some((id, name)) = renamed {
+        state.agent.rename_session(&id, &name);
+    } else if given_up {
+        state.agent.session_rename = None;
+    } else {
+        state.agent.session_rename = renaming;
     }
     if let Some(id) = chosen {
         state.agent.switch_session(&id);
@@ -1205,7 +1286,7 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     }
     // Asked for on every frame until it is held, not once: a request is not the keyboard, and
     // a panel drawn later in the same frame asks louder.
-    if state.agent.wants_focus {
+    if state.agent.wants_focus && state.agent.session_rename.is_none() {
         if response.has_focus() {
             state.agent.wants_focus = false;
         } else {
@@ -1234,21 +1315,37 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(320.0);
-                for (index, command) in matches.iter().enumerate().take(ROWS_SHOWN) {
-                    let row = egui::Button::selectable(
-                        index == state.agent.command_pick,
-                        format!("/{}  {}", command.name, command.description),
-                    )
-                    .min_size(egui::vec2(ui.available_width(), ROW))
-                    .corner_radius(2);
-                    let hint = match &command.hint {
-                        Some(hint) => format!("/{} \u{2014} takes {}", command.name, hint),
-                        None => format!("/{} takes nothing", command.name),
-                    };
-                    if ui.add(row).on_hover_text(hint).clicked() {
-                        completed = Some(command.name.clone());
-                    }
-                }
+                // The list scrolls rather than stopping at the eighth line: an agent may offer more
+                // commands than fit, and a command that cannot be seen is a command that cannot be
+                // reached — neither by the keyboard, which walks past the visible rows, nor by the
+                // mouse, which has nothing to click.
+                egui::ScrollArea::vertical()
+                    .id_salt("agent-command-list")
+                    .max_height(height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (index, command) in matches.iter().enumerate() {
+                            let row = egui::Button::selectable(
+                                index == state.agent.command_pick,
+                                format!("/{}  {}", command.name, command.description),
+                            )
+                            .min_size(egui::vec2(ui.available_width(), ROW))
+                            .corner_radius(2);
+                            let hint = match &command.hint {
+                                Some(hint) => format!("/{} \u{2014} takes {}", command.name, hint),
+                                None => format!("/{} takes nothing", command.name),
+                            };
+                            let drawn = ui.add(row).on_hover_text(hint);
+                            // The picked row is brought into sight: the keyboard walks the whole
+                            // list, and a highlight nobody can see is worse than no highlight.
+                            if index == state.agent.command_pick {
+                                ui.scroll_to_rect(drawn.rect, None);
+                            }
+                            if drawn.clicked() {
+                                completed = Some(command.name.clone());
+                            }
+                        }
+                    });
             });
         });
     if let Some(name) = completed {

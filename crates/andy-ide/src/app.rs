@@ -1046,6 +1046,7 @@ mod layout_persistence_tests {
                 carets: Default::default(),
                 view: Default::default(),
                 contexts: Default::default(),
+                session_names: Default::default(),
             })
             .unwrap();
 
@@ -1163,6 +1164,7 @@ mod layout_persistence_tests {
                 carets: Default::default(),
                 view: Default::default(),
                 contexts: Default::default(),
+                session_names: Default::default(),
             })
             .unwrap();
 
@@ -1197,6 +1199,7 @@ mod layout_persistence_tests {
                 carets: Default::default(),
                 view: Default::default(),
                 contexts: Default::default(),
+                session_names: Default::default(),
             })
             .unwrap();
 

@@ -1007,6 +1007,7 @@ impl AppState {
         // What the panel knew about each conversation comes back with it: an agent names the size
         // of its window only after the first exchange of a restored session, and a blank figure
         // until then reads as a conversation that remembered nothing.
+        self.agent.session_names = state.session_names;
         self.agent.contexts = state
             .contexts
             .into_iter()
@@ -1161,6 +1162,7 @@ impl AppState {
             // The View switches are part of the project as much as the panels are: a person who
             // works without hints does not want them back on the next launch.
             view: self.view_switches(),
+            session_names: self.agent.session_names.clone(),
             contexts: self
                 .agent
                 .contexts

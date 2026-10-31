@@ -77,6 +77,13 @@ pub struct WorkspaceState {
     /// the figure of the wrong conversation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub contexts: BTreeMap<String, ContextSpan>,
+    /// The names a person gave the conversations of the agent, by session id.
+    ///
+    /// The agent names a conversation after the first thing that was said in it, which is often not
+    /// what the conversation turned out to be about — and there is no way to tell it otherwise over
+    /// ACP. The name a person gives is kept here, with the project the conversations were had in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_names: BTreeMap<String, String>,
 }
 
 /// Tokens spent, and the window they were spent from.
@@ -174,6 +181,7 @@ mod tests {
             carets: BTreeMap::from([(PathBuf::from("src/main.rs"), (12, 4))]),
             view: BTreeMap::from([("hints".to_owned(), false)]),
             contexts: Default::default(),
+            session_names: Default::default(),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
@@ -195,6 +203,7 @@ mod tests {
                 carets: BTreeMap::new(),
                 view: BTreeMap::new(),
                 contexts: Default::default(),
+                session_names: Default::default(),
             })
             .unwrap();
         let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();

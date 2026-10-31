@@ -223,6 +223,11 @@ pub struct AgentState {
     pub usage: Option<Usage>,
     /// The conversations the agent keeps for this project, as it last listed them.
     pub sessions: Vec<SessionInfo>,
+    /// The names a person gave the conversations, by session id: what the list shows instead of
+    /// the name the agent chose.
+    pub session_names: std::collections::BTreeMap<String, String>,
+    /// The conversation being renamed, and what has been typed for it so far.
+    pub session_rename: Option<(String, String)>,
     /// Whether the list of conversations is on screen.
     pub sessions_open: bool,
     /// Where the button that asks for the list was drawn: the list floats above it.
@@ -322,6 +327,8 @@ impl Default for AgentState {
             usage: None,
             contexts: std::collections::BTreeMap::new(),
             sessions: Vec::new(),
+            session_names: std::collections::BTreeMap::new(),
+            session_rename: None,
             sessions_open: false,
             sessions_button: None,
             sessions_loading: false,
@@ -661,6 +668,29 @@ impl AgentState {
         }
     }
 
+    /// Gives a conversation a name of its own, or takes one away when the name is empty.
+    ///
+    /// The name lives with the project, not with the agent: ACP has no way to rename a session, and
+    /// the name the agent gives is the first thing that was said in it.
+    pub fn rename_session(&mut self, session: &str, name: &str) {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            self.session_names.remove(session);
+        } else {
+            self.session_names.insert(session.to_owned(), name);
+        }
+        self.session_rename = None;
+    }
+
+    /// What a conversation is called: the name a person gave it, or the one the agent chose.
+    pub fn session_name(&self, session: &str, given: Option<&str>) -> String {
+        self.session_names
+            .get(session)
+            .cloned()
+            .or_else(|| given.map(str::to_owned))
+            .unwrap_or_else(|| session.to_owned())
+    }
+
     /// Moves the panel to another conversation of this project.
     ///
     /// What is on screen is cleared first: the transcript is about to be replaced by another one,
@@ -679,6 +709,7 @@ impl AgentState {
         self.clear_panel();
         self.usage = None;
         self.sessions_open = false;
+        self.session_rename = None;
         self.resume = Some(session.to_owned());
         self.resumed_from = Some(self.name.clone());
         self.start();
