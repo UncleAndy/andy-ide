@@ -406,13 +406,23 @@ impl Terminal {
                 ui.close();
             }
         });
-        let pressed_at = ui.input(|input| {
-            if input.pointer.any_pressed() {
-                input.pointer.interact_pos()
-            } else {
-                None
-            }
-        });
+        // A press belongs to the terminal only when the pointer is over it and nothing is drawn on
+        // top of it. `button_pressed` is the state of the whole window, so a click on the context
+        // menu — which stands over the canvas — used to arrive here as a click on the canvas, and
+        // wiped the very selection that menu was about to copy. `hovered` is false as soon as a
+        // popup covers the pointer, which is exactly the difference.
+        let mine = response.hovered() || response.is_pointer_button_down_on();
+        let pressed_at = if mine {
+            ui.input(|input| {
+                if input.pointer.any_pressed() {
+                    input.pointer.interact_pos()
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         if let Some(focused) = focus_after(rect, pressed_at, response.clicked()) {
             self.focused = focused;
         }
@@ -423,7 +433,7 @@ impl Terminal {
         // flag: the keyboard is never given to the canvas, so `has_focus()` is false even while the
         // shell is taking every key — which is how the cursor stayed hollow in the active terminal.
         let has_keyboard = self.focused;
-        self.track_selection(ui, rect, cell_size, cols, rows);
+        self.track_selection(ui, rect, cell_size, cols, rows, mine);
         let hovered = self.link_under_pointer(ui, rect, cell_size, cols, rows);
         self.follow_clicked_link(ui, &hovered);
         let painter = ui.painter_at(rect);
@@ -598,6 +608,7 @@ impl Terminal {
         cell: egui::Vec2,
         cols: u16,
         rows: u16,
+        over_the_canvas: bool,
     ) {
         let (pos, shift, ctrl, pressed, down, released) = ui.input(|input| {
             (
@@ -609,6 +620,9 @@ impl Terminal {
                 input.pointer.button_released(egui::PointerButton::Primary),
             )
         });
+        // A press somewhere else — a popup over the canvas, the panel behind it — is not a press on
+        // the terminal, and must not touch the selection.
+        let pressed = pressed && over_the_canvas;
         let wants_mouse = self
             .pane()
             .is_some_and(|pane| pane.session.mouse_protocol().enabled);

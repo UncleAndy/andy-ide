@@ -3497,6 +3497,113 @@ mod the_terminal_selection {
     }
 
     #[test]
+    fn the_copy_keys_and_the_menu_both_copy_the_terminal_selection() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        type_text(&mut gui, "echo copy-me\n");
+        wait_until(&mut gui, "the output to arrive", |gui| {
+            gui.app().state.terminal.contents().contains("copy-me")
+        });
+        let row = row_of(&gui, "copy-me");
+        let line = gui
+            .app()
+            .state
+            .terminal
+            .contents()
+            .lines()
+            .find(|line| line.contains("copy-me"))
+            .expect("the line is on the screen")
+            .trim_end()
+            .to_owned();
+        let from = at(&gui, rect, 0, row);
+        let to = at(
+            &gui,
+            rect,
+            (line.chars().count() as u16).saturating_sub(1),
+            row,
+        );
+
+        let copied = |gui: &Gui| {
+            gui.harness
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+        };
+
+        drag(&mut gui, from, to, false);
+        assert!(
+            gui.app().state.terminal.selection().is_some(),
+            "nothing was selected"
+        );
+
+        // `Ctrl+Insert`, the habit the editor already answers.
+        gui.harness.event(egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness.step();
+        assert_eq!(
+            copied(&gui).as_deref(),
+            Some(line.as_str()),
+            "Ctrl+Insert did not copy the terminal's selection"
+        );
+
+        // And the menu's own item, from the right-click on the canvas.
+        gui.harness.event(egui::Event::PointerMoved(to));
+        gui.settle();
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            gui.settle();
+        }
+        assert!(
+            gui.harness.query_by_label("Copy text").is_some(),
+            "the terminal's right-click offered no menu"
+        );
+        // The command lives in the output of the frame that made it, so it is read before any
+        // further frame runs over it.
+        // The menu item is clicked by hand, at its own rectangle: a click that never reaches the
+        // item is not a click on it.
+        let item = gui.harness.get_by_label("Copy text").rect().center();
+        gui.harness.event(egui::Event::PointerMoved(item));
+        gui.settle();
+        let item = gui.harness.get_by_label("Copy text").rect().center();
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: item,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        // The events are queued: without a frame they are never read.
+        gui.harness.step();
+        assert_eq!(
+            copied(&gui).as_deref(),
+            Some(line.as_str()),
+            "the menu's Copy text did not copy the terminal's selection"
+        );
+        // And a right-click is not a reason to lose what was picked out.
+        assert!(
+            gui.app().state.terminal.selection().is_some(),
+            "the right-click took the terminal's selection away"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
     fn a_shift_drag_picks_the_text_and_leaves_the_program_alone() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let rect = open_terminal(&mut gui);

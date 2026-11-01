@@ -1173,19 +1173,20 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                 .interact_pos()
                 .is_some_and(|pos| conversation.contains(pos))
     });
-    let mut copy = false;
-    egui::Popup::menu(&sensor)
+    // The menu is made here — it needs the conversation's own rectangle — and **shown** after the
+    // conversation has been drawn. That order is the whole of Andy's report: a popup takes the
+    // pointer, so a menu drawn before the labels leaves them unhovered on the frame of the press, and
+    // egui reads "a press with nothing hovered" as a click somewhere else and drops the label
+    // selection — the highlight went the moment the right button came down.
+    let menu = egui::Popup::menu(&sensor)
         .open_memory(asked.then_some(egui::SetOpenCommand::Bool(true)))
-        .at_pointer_fixed()
-        .show(|ui| {
-            if ui.button("Copy text").clicked() {
-                copy = true;
-                ui.close();
-            }
-        });
-    if copy {
-        // The panel's own copy: an `Event::Copy` is pushed at the top of the next frame, which is
-        // what egui reads to put a selected label's text on the clipboard.
+        .at_pointer_fixed();
+    // The text is taken while it still exists. egui clears a label's selection at the *start* of the
+    // frame in which anything is pressed, so by the time the click on the item is read the selection
+    // is already gone — the item's own press is what erased it. The menu offers one thing, so the
+    // moment it is asked for is the moment to copy; the item is kept as well, for the case where a
+    // selection has somehow outlived the press.
+    if asked {
         state.agent.wants_copy = true;
     }
     // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
@@ -1276,6 +1277,17 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                     }
                 }
             });
+    }
+
+    let mut copy = false;
+    menu.show(|ui| {
+        if ui.button("Copy text").clicked() {
+            copy = true;
+            ui.close();
+        }
+    });
+    if copy {
+        state.agent.wants_copy = true;
     }
 }
 
