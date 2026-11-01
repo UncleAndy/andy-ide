@@ -49,7 +49,13 @@ fn options(config: &ide_core::Config) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_title("andy-ide")
+            // The title carries the build: which commit the window in front of a person was made from.
+            // `ANDY_IDE_COMMIT` comes from `build.rs`; see the note there for why it is worth a title.
+            .with_title(format!(
+                "andy-ide {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("ANDY_IDE_COMMIT")
+            ))
             .with_maximized(config.window_maximized),
         ..Default::default()
     }
