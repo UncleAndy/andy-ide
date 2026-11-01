@@ -95,3 +95,112 @@ fn the_commands_the_agent_offers_arrive_with_their_descriptions() {
     );
     session.stop();
 }
+
+#[test]
+fn a_permission_request_is_answered_by_the_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+    let opened = session.id();
+    session.start_turn("ask").expect("the turn goes out");
+
+    let mut asked = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && asked.is_none() {
+        if let Some(Event::Permission { id, request }) =
+            session.next_event(Duration::from_millis(200))
+        {
+            asked = Some((id, request));
+        }
+    }
+    let (id, request) = asked.expect("the agent never asked for permission");
+    assert_eq!(
+        request.session, opened,
+        "the question arrived under another conversation"
+    );
+    assert!(
+        request.tool_call.is_object(),
+        "the tool call did not arrive: {:?}",
+        request.tool_call
+    );
+    let yes = request
+        .option_of("allow_once")
+        .expect("the ways to answer did not arrive")
+        .to_owned();
+
+    session
+        .answer_permission(id, Some(&yes))
+        .expect("the answer goes out");
+
+    let mut said = String::new();
+    let mut finished = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && finished.is_none() {
+        match session.next_event(Duration::from_millis(200)) {
+            Some(Event::Text(text)) => said.push_str(&text),
+            Some(Event::Finished(word)) => finished = Some(word),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        said, "allowed",
+        "the agent did not hear the answer the person gave"
+    );
+    assert_eq!(finished.as_deref(), Some("end_turn"));
+    session.stop();
+}
+
+#[test]
+fn a_question_with_variants_is_answered_with_what_was_picked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+    session.start_turn("choose").expect("the turn goes out");
+
+    let mut asked = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && asked.is_none() {
+        if let Some(Event::Choice { id, request }) = session.next_event(Duration::from_millis(200))
+        {
+            asked = Some((id, request));
+        }
+    }
+    let (id, request) = asked.expect("the agent never asked the person to choose");
+    assert_eq!(
+        request.field, "variant",
+        "the answer goes back under another name"
+    );
+    assert!(
+        request.options.len() >= 3,
+        "the variants did not arrive: {:?}",
+        request.options
+    );
+    assert!(
+        request.options[1].title.contains("Readable"),
+        "the variants arrived without the agent's words: {:?}",
+        request.options
+    );
+    let picked = request.options[1].value.clone();
+
+    session
+        .answer_choice(
+            id,
+            &request.field,
+            false,
+            Some(std::slice::from_ref(&picked)),
+        )
+        .expect("the answer goes out");
+
+    let mut said = String::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !said.contains(&picked) {
+        if let Some(Event::Text(text)) = session.next_event(Duration::from_millis(200)) {
+            said.push_str(&text);
+        }
+    }
+    assert_eq!(
+        said, picked,
+        "the agent did not hear which variant was picked"
+    );
+    session.stop();
+}

@@ -10,25 +10,30 @@
 //! the protocol and goes into the record as a note, the way the session's own reader does it.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, AvailableCommandInput, ContentBlock, Implementation, InitializeRequest,
-    LoadSessionRequest, NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate,
-    StopReason, TextContent, ToolCallStatus,
+    AvailableCommand, AvailableCommandInput, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationContentValue,
+    ElicitationMode, Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
+    ToolCallStatus,
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client, Responder};
 use anyhow::Context as _;
 use async_process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use futures::StreamExt;
 use futures::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 
-use crate::protocol::{AgentCommand, SessionState, Usage};
+use crate::protocol::{AgentCommand, ChoiceRequest, PermissionRequest, SessionState, Usage};
 use crate::session::{AgentSpec, Event, PermissionPolicy};
 use crate::wire::Wire;
 
@@ -225,12 +230,42 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReportingReader<R> {
 /// not answered `initialize` within this is not one this window can use.
 const HANDSHAKE: Duration = Duration::from_secs(60);
 
+/// A question the agent asked and the person has not answered yet.
+///
+/// The responder is the protocol's own handle for the request: it carries the id the agent is waiting on, so
+/// a question can be answered as long as the person takes, from a thread that has nothing to do with the one
+/// the request arrived on.
+enum Waiting {
+    /// `session/request_permission`.
+    Permission(Responder<RequestPermissionResponse>),
+    /// `elicitation/create`.
+    Choice(Responder<CreateElicitationResponse>),
+}
+
 /// What the panel asks the thread that owns the connection to do.
 enum Order {
     /// One turn, with the words the person typed.
     Turn(String),
     /// The session is over.
     Stop,
+    /// The person's answer to a permission request.
+    Permission {
+        /// Which question, by the number handed to the panel.
+        id: u64,
+        /// The option they chose, or nothing for a refusal.
+        option: Option<String>,
+    },
+    /// The person's answer to a question with variants.
+    Choice {
+        /// Which question, by the number handed to the panel.
+        id: u64,
+        /// The property the answer goes back under.
+        field: String,
+        /// Whether several answers were allowed.
+        multiple: bool,
+        /// What they picked or wrote, or nothing for a refusal.
+        chosen: Option<Vec<String>>,
+    },
 }
 
 /// What the handshake answered, handed back to whoever started the session.
@@ -278,7 +313,7 @@ impl Session {
     pub fn start_with(
         spec: &AgentSpec,
         root: &Path,
-        _policy: PermissionPolicy,
+        policy: PermissionPolicy,
         resume: Option<String>,
         progress: Option<Arc<Mutex<String>>>,
         wire: Option<Arc<dyn Wire>>,
@@ -292,12 +327,16 @@ impl Session {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let id = Arc::new(Mutex::new(String::new()));
         let complaints = Arc::new(Mutex::new(String::new()));
+        let waiting: Arc<Mutex<HashMap<u64, Waiting>>> = Arc::new(Mutex::new(HashMap::new()));
+        let questions = Arc::new(AtomicU64::new(1));
         let child = Arc::new(Mutex::new(started.child));
 
         let cwd = root.to_path_buf();
         let driver = {
             let id = Arc::clone(&id);
             let complaints = Arc::clone(&complaints);
+            let waiting = Arc::clone(&waiting);
+            let questions = Arc::clone(&questions);
             let wire = Arc::clone(&wire);
             let record = Arc::clone(&wire);
             std::thread::Builder::new()
@@ -312,6 +351,9 @@ impl Session {
                         id,
                         complaints,
                         wire,
+                        waiting,
+                        questions,
+                        policy,
                         resume,
                         cwd,
                     ));
@@ -429,6 +471,34 @@ impl Session {
         }
     }
 
+    /// Answers a permission request that was handed over with [`Event::Permission`].
+    pub fn answer_permission(&mut self, id: u64, option: Option<&str>) -> anyhow::Result<()> {
+        self.orders
+            .unbounded_send(Order::Permission {
+                id,
+                option: option.map(str::to_owned),
+            })
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
+    /// Answers a question with variants, handed over with [`Event::Choice`].
+    pub fn answer_choice(
+        &mut self,
+        id: u64,
+        field: &str,
+        multiple: bool,
+        chosen: Option<&[String]>,
+    ) -> anyhow::Result<()> {
+        self.orders
+            .unbounded_send(Order::Choice {
+                id,
+                field: field.to_owned(),
+                multiple,
+                chosen: chosen.map(<[String]>::to_vec),
+            })
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
     /// Ends the conversation: the agent is asked to stop, then killed.
     pub fn stop(&mut self) {
         let _ = self.orders.unbounded_send(Order::Stop);
@@ -472,14 +542,89 @@ async fn converse(
     id: Arc<Mutex<String>>,
     complaints: Arc<Mutex<String>>,
     wire: Arc<dyn Wire>,
+    waiting: Arc<Mutex<HashMap<u64, Waiting>>>,
+    questions: Arc<AtomicU64>,
+    policy: PermissionPolicy,
     resume: Option<String>,
     cwd: PathBuf,
 ) -> anyhow::Result<()> {
     let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
     let told = events.clone();
+    // Each handler is a `move` closure of its own, so each gets its own share of the same state.
+    let asking_permission = events.clone();
+    let waiting_permission = Arc::clone(&waiting);
+    let numbered_permission = Arc::clone(&questions);
+    let asking_choice = events.clone();
+    let waiting_choice = Arc::clone(&waiting);
+    let numbered_choice = Arc::clone(&questions);
     Client
         .builder()
         .name("andy-ide")
+        .on_receive_request(
+            async move |request: RequestPermissionRequest, responder, _cx| {
+                let asked_for = PermissionRequest::from_params(&json_of(&request));
+                // The policy first, the person second: an agent told to go ahead is not a question, and a
+                // window with nobody at it would otherwise hold up a turn nobody is watching.
+                let decided = match policy {
+                    PermissionPolicy::Allow => asked_for
+                        .option_of("allow_once")
+                        .or_else(|| asked_for.option_of("allow_always")),
+                    PermissionPolicy::Deny => asked_for
+                        .option_of("reject_once")
+                        .or_else(|| asked_for.option_of("reject_always")),
+                    PermissionPolicy::Ask => {
+                        let id = numbered_permission.fetch_add(1, Ordering::Relaxed);
+                        let kept = match waiting_permission.lock() {
+                            Ok(mut waiting) => {
+                                waiting.insert(id, Waiting::Permission(responder));
+                                true
+                            }
+                            Err(_) => false,
+                        };
+                        if !kept {
+                            return Ok(());
+                        }
+                        let _ = asking_permission.send(Event::Permission {
+                            id,
+                            request: asked_for,
+                        });
+                        return Ok(());
+                    }
+                };
+                let _ = responder.respond(RequestPermissionResponse::new(outcome_of(decided)));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CreateElicitationRequest, responder, _cx| {
+                // A form is what this window can draw. An agent that opens a URL has left the window, and a
+                // panel cannot follow it — said in the protocol's own words rather than left unanswered.
+                if !matches!(request.mode, ElicitationMode::Form(_)) {
+                    let _ = responder.respond_with_internal_error(
+                        "this client asks for a choice in form mode only",
+                    );
+                    return Ok(());
+                }
+                let id = numbered_choice.fetch_add(1, Ordering::Relaxed);
+                let kept = match waiting_choice.lock() {
+                    Ok(mut waiting) => {
+                        waiting.insert(id, Waiting::Choice(responder));
+                        true
+                    }
+                    Err(_) => false,
+                };
+                if !kept {
+                    return Ok(());
+                }
+                let _ = asking_choice.send(Event::Choice {
+                    id,
+                    request: ChoiceRequest::from_params(&json_of(&request)),
+                });
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 if let Some(event) = event_of(&notification.update) {
@@ -525,32 +670,104 @@ async fn converse(
             }
             let _ = ready.send(Ready { resumed });
 
+            // A turn is a task of its own and not something the loop waits on: the person's answer arrives
+            // *while* a turn runs — that is what a permission request is — so a loop that waited for the
+            // prompt would be waiting for an answer it is itself holding up. One turn at a time, held by a
+            // lock the tasks share, so turns keep the order they were asked in.
+            let one_at_a_time = Arc::new(futures::lock::Mutex::new(()));
             while let Some(order) = orders.next().await {
                 match order {
                     Order::Turn(text) => {
-                        let answer = cx
-                            .send_request(PromptRequest::new(
-                                opened.clone(),
-                                vec![ContentBlock::Text(TextContent::new(text))],
-                            ))
-                            .block_task()
-                            .await;
-                        match answer {
-                            Ok(answer) => {
-                                let _ = events.send(Event::Finished(word_of(&answer.stop_reason)));
+                        let turns = Arc::clone(&one_at_a_time);
+                        let fresh = cx.clone();
+                        let events = events.clone();
+                        let session = opened.clone();
+                        cx.spawn(async move {
+                            let _alone = turns.lock().await;
+                            let answer = fresh
+                                .send_request(PromptRequest::new(
+                                    session,
+                                    vec![ContentBlock::Text(TextContent::new(text))],
+                                ))
+                                .block_task()
+                                .await;
+                            match answer {
+                                Ok(answer) => {
+                                    let _ =
+                                        events.send(Event::Finished(word_of(&answer.stop_reason)));
+                                }
+                                Err(error) => {
+                                    let _ = events.send(Event::Failed(format!("{error}")));
+                                }
                             }
-                            Err(error) => {
-                                let _ = events.send(Event::Failed(format!("{error}")));
-                            }
-                        }
+                            Ok(())
+                        })?;
                     }
                     Order::Stop => break,
+                    Order::Permission { id, option } => {
+                        if let Some(Waiting::Permission(responder)) = take(&waiting, id) {
+                            let _ = responder.respond(RequestPermissionResponse::new(outcome_of(
+                                option.as_deref(),
+                            )));
+                        }
+                    }
+                    Order::Choice {
+                        id,
+                        field,
+                        multiple,
+                        chosen,
+                    } => {
+                        if let Some(Waiting::Choice(responder)) = take(&waiting, id) {
+                            let action = match chosen {
+                                Some(values) if !values.is_empty() => {
+                                    let value = if multiple {
+                                        ElicitationContentValue::StringArray(values)
+                                    } else {
+                                        ElicitationContentValue::String(values[0].clone())
+                                    };
+                                    ElicitationAction::Accept(
+                                        ElicitationAcceptAction::new()
+                                            .content(BTreeMap::from([(field, value)])),
+                                    )
+                                }
+                                _ => ElicitationAction::Decline,
+                            };
+                            let _ = responder.respond(CreateElicitationResponse::new(action));
+                        }
+                    }
                 }
             }
             Ok(())
         })
         .await?;
     Ok(())
+}
+
+/// One of the agent's own messages as JSON, for the readers this project already has.
+///
+/// The shapes of the standard and the shapes of the panel are the same JSON: the parsers in
+/// `crate::protocol` were written for the wire, so the typed request is handed to them unchanged rather than
+/// translated into a second set of types that could drift.
+fn json_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// Takes the question with that number, if it is still waiting.
+fn take(waiting: &Arc<Mutex<HashMap<u64, Waiting>>>, id: u64) -> Option<Waiting> {
+    waiting
+        .lock()
+        .ok()
+        .and_then(|mut waiting| waiting.remove(&id))
+}
+
+/// The answer to a permission request: the option by its id, or a refusal.
+fn outcome_of(option: Option<&str>) -> RequestPermissionOutcome {
+    match option {
+        Some(option) => {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.to_owned()))
+        }
+        None => RequestPermissionOutcome::Cancelled,
+    }
 }
 
 /// How the agent named itself, for the record.
