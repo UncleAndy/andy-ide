@@ -10,15 +10,26 @@
 //! the protocol and goes into the record as a note, the way the session's own reader does it.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    AvailableCommand, AvailableCommandInput, ContentBlock, Implementation, InitializeRequest,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate,
+    StopReason, TextContent, ToolCallStatus,
+};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client};
+use anyhow::Context as _;
 use async_process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use futures::StreamExt;
 use futures::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 
+use crate::protocol::{AgentCommand, SessionState, Usage};
+use crate::session::{AgentSpec, Event, PermissionPolicy};
 use crate::wire::Wire;
 
 /// An agent started for one session, with the transport the SDK drives.
@@ -63,11 +74,25 @@ pub fn start(
 /// Reads the agent's own words until the pipe closes, writing each line into the record.
 ///
 /// Not a frame of the protocol: an agent that says why it is unhappy says it here, and a person reading the
-/// record afterwards is the one who needs it.
-pub async fn note_the_agent_words(stderr: ChildStderr, wire: Arc<dyn Wire>) {
+/// record afterwards is the one who needs it. `keep` is for the panel, which says the same words in its own
+/// way when something goes wrong — the record is for whoever reads the file, `keep` is for whoever is looking
+/// at the window.
+pub async fn note_the_agent_words(
+    stderr: ChildStderr,
+    wire: Arc<dyn Wire>,
+    keep: Option<Arc<Mutex<String>>>,
+) {
     let mut lines = BufReader::new(stderr).lines();
     while let Some(Ok(line)) = lines.next().await {
         wire.note(&line);
+        if let Some(keep) = &keep
+            && let Ok(mut kept) = keep.lock()
+        {
+            if !kept.is_empty() {
+                kept.push('\n');
+            }
+            kept.push_str(&line);
+        }
     }
 }
 
@@ -188,4 +213,447 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReportingReader<R> {
         }
         poll
     }
+}
+
+// ==============================================================================================
+// The session: the surface the panel already knows, spoken over the standard's own client.
+// ==============================================================================================
+
+/// How long the handshake may take before the session is called a failure.
+///
+/// A start that hangs is a start that failed: the panel is waiting for a conversation, and an agent that has
+/// not answered `initialize` within this is not one this window can use.
+const HANDSHAKE: Duration = Duration::from_secs(60);
+
+/// What the panel asks the thread that owns the connection to do.
+enum Order {
+    /// One turn, with the words the person typed.
+    Turn(String),
+    /// The session is over.
+    Stop,
+}
+
+/// What the handshake answered, handed back to whoever started the session.
+struct Ready {
+    /// Whether the conversation was picked up from an earlier run.
+    resumed: bool,
+}
+
+/// A running agent, spoken to through the standard's own client.
+///
+/// The same surface the panel already knows (`crate::session::Session`): what changes in the migration is the
+/// wire underneath, not the panel above. The connection lives on a thread of its own and is driven by
+/// `futures::executor` — the standard brings no runtime, and this project has none.
+pub struct Session {
+    /// Orders to that thread.
+    orders: futures::channel::mpsc::UnboundedSender<Order>,
+    /// Events from it.
+    events: std::sync::mpsc::Receiver<Event>,
+    /// The process, shared so that stopping the session stops the agent.
+    child: Arc<Mutex<Child>>,
+    /// The conversation's id, once the handshake named it.
+    id: Arc<Mutex<String>>,
+    /// Whether it was picked up from an earlier run.
+    resumed: bool,
+    /// The models and modes the agent offered.
+    state: SessionState,
+    /// The last context figure it gave.
+    usage: Option<Usage>,
+    /// The agent's own error output, as it arrives.
+    complaints: Arc<Mutex<String>>,
+    /// Whether the process is gone.
+    closed: bool,
+}
+
+impl Session {
+    /// Starts an agent in `root` and speaks the protocol with it.
+    pub fn start(spec: &AgentSpec, root: &Path, policy: PermissionPolicy) -> anyhow::Result<Self> {
+        Self::start_with(spec, root, policy, None, None, None)
+    }
+
+    /// Starts an agent and asks it to pick up `resume`, if it has such a conversation.
+    ///
+    /// The handshake happens before this returns, so a `Session` that exists is a session that answered: an
+    /// agent that does not answer `initialize` within [`HANDSHAKE`] is a failure to start and nothing else.
+    pub fn start_with(
+        spec: &AgentSpec,
+        root: &Path,
+        _policy: PermissionPolicy,
+        resume: Option<String>,
+        progress: Option<Arc<Mutex<String>>>,
+        wire: Option<Arc<dyn Wire>>,
+    ) -> anyhow::Result<Self> {
+        step_said(progress.as_ref(), "Launching\u{2026}");
+        let wire: Arc<dyn Wire> = wire.unwrap_or_else(|| Arc::new(crate::wire::Silent));
+        let started = start(&spec.command, &spec.args, &spec.env, Arc::clone(&wire))?;
+
+        let (orders_tx, orders) = futures::channel::mpsc::unbounded();
+        let (events_tx, events) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let id = Arc::new(Mutex::new(String::new()));
+        let complaints = Arc::new(Mutex::new(String::new()));
+        let child = Arc::new(Mutex::new(started.child));
+
+        let cwd = root.to_path_buf();
+        let driver = {
+            let id = Arc::clone(&id);
+            let complaints = Arc::clone(&complaints);
+            let wire = Arc::clone(&wire);
+            let record = Arc::clone(&wire);
+            std::thread::Builder::new()
+                .name("acp-sdk".to_owned())
+                .spawn(move || {
+                    let outcome = futures::executor::block_on(converse(
+                        started.transport,
+                        started.stderr,
+                        orders,
+                        events_tx,
+                        ready_tx,
+                        id,
+                        complaints,
+                        wire,
+                        resume,
+                        cwd,
+                    ));
+                    if let Err(error) = outcome {
+                        // Said into the record and not into a log this crate does not have: whoever reads
+                        // the record afterwards is the one who needs to know the connection ended.
+                        record.note(&format!("the connection to the agent ended: {error}"));
+                    }
+                })
+                .context("starting the thread that speaks to the agent")?
+        };
+
+        let ready = match ready_rx.recv_timeout(HANDSHAKE) {
+            Ok(ready) => ready,
+            Err(_) => {
+                let _ = driver;
+                anyhow::bail!(
+                    "{} did not answer within {}s",
+                    spec.name,
+                    HANDSHAKE.as_secs()
+                );
+            }
+        };
+        step_said(progress.as_ref(), "ready");
+        Ok(Self {
+            orders: orders_tx,
+            events,
+            child,
+            id,
+            resumed: ready.resumed,
+            state: SessionState::default(),
+            usage: None,
+            complaints,
+            closed: false,
+        })
+    }
+
+    /// The conversation's id, as the agent named it.
+    pub fn id(&self) -> String {
+        self.id.lock().map(|id| id.clone()).unwrap_or_default()
+    }
+
+    /// Whether this conversation was picked up from an earlier run.
+    pub fn resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// The models and modes the agent offered when it opened the conversation.
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    /// The last context figure the agent gave.
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+
+    /// Says what the panel is doing while the agent comes up.
+    pub fn complaints(&self) -> String {
+        self.complaints
+            .lock()
+            .map(|kept| kept.clone())
+            .unwrap_or_default()
+    }
+
+    /// Sends one turn to the agent.
+    pub fn start_turn(&mut self, text: &str) -> anyhow::Result<()> {
+        self.orders
+            .unbounded_send(Order::Turn(text.to_owned()))
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
+    /// Sends one turn and waits for the agent's own word about how it ended.
+    pub fn prompt(&mut self, text: &str, timeout: Duration) -> anyhow::Result<String> {
+        self.start_turn(text)?;
+        let deadline = std::time::Instant::now() + timeout;
+        while let Some(left) = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+        {
+            match self.next_event(left) {
+                Some(Event::Finished(word)) => return Ok(word),
+                Some(Event::Failed(words)) => anyhow::bail!("{words}"),
+                Some(_) => {}
+                None => break,
+            }
+        }
+        anyhow::bail!("the agent did not finish the turn within {timeout:?}")
+    }
+
+    /// The next thing the agent said, waiting up to `timeout`.
+    pub fn next_event(&mut self, timeout: Duration) -> Option<Event> {
+        if self.closed {
+            return Some(Event::Closed);
+        }
+        match self.events.recv_timeout(timeout) {
+            Ok(event) => {
+                self.keep_in_step(&event);
+                Some(event)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.closed = true;
+                Some(Event::Closed)
+            }
+        }
+    }
+
+    /// Keeps what the panel asks for separately from what it is shown.
+    fn keep_in_step(&mut self, event: &Event) {
+        match event {
+            Event::Usage(usage) => self.usage = Some(*usage),
+            Event::Setup(state) => self.state = state.clone(),
+            _ => {}
+        }
+    }
+
+    /// Ends the conversation: the agent is asked to stop, then killed.
+    pub fn stop(&mut self) {
+        let _ = self.orders.unbounded_send(Order::Stop);
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            let gone = self
+                .child
+                .lock()
+                .map(|mut child| matches!(child.try_status(), Ok(Some(_))))
+                .unwrap_or(false);
+            if gone {
+                self.closed = true;
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+        self.closed = true;
+    }
+}
+
+/// Says something in the status line the panel watches while an agent comes up.
+fn step_said(progress: Option<&Arc<Mutex<String>>>, text: &str) {
+    if let Some(progress) = progress
+        && let Ok(mut said) = progress.lock()
+    {
+        *said = text.to_owned();
+    }
+}
+
+/// Drives the connection: the handshake, then one order after another.
+#[allow(clippy::too_many_arguments)]
+async fn converse(
+    transport: ByteStreams<ReportingWriter<ChildStdin>, ReportingReader<ChildStdout>>,
+    stderr: ChildStderr,
+    mut orders: futures::channel::mpsc::UnboundedReceiver<Order>,
+    events: std::sync::mpsc::Sender<Event>,
+    ready: std::sync::mpsc::Sender<Ready>,
+    id: Arc<Mutex<String>>,
+    complaints: Arc<Mutex<String>>,
+    wire: Arc<dyn Wire>,
+    resume: Option<String>,
+    cwd: PathBuf,
+) -> anyhow::Result<()> {
+    let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
+    let told = events.clone();
+    Client
+        .builder()
+        .name("andy-ide")
+        .on_receive_notification(
+            async move |notification: SessionNotification, _cx| {
+                if let Some(event) = event_of(&notification.update) {
+                    let _ = told.send(event);
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(transport, async move |cx| {
+            // The agent's own words are read for as long as it speaks, on a task of the connection's own.
+            cx.spawn(async move {
+                words.await;
+                Ok(())
+            })?;
+            let init = cx
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            wire.note(&format!(
+                "{} answered initialize: {:?}",
+                said_of(&init.agent_info),
+                init.protocol_version
+            ));
+
+            let (opened, resumed) = match resume {
+                Some(session) => {
+                    cx.send_request(LoadSessionRequest::new(session.clone(), cwd.clone()))
+                        .block_task()
+                        .await?;
+                    (session, true)
+                }
+                None => {
+                    let answer = cx
+                        .send_request(NewSessionRequest::new(cwd.clone()))
+                        .block_task()
+                        .await?;
+                    (answer.session_id.to_string(), false)
+                }
+            };
+            if let Ok(mut named) = id.lock() {
+                *named = opened.clone();
+            }
+            let _ = ready.send(Ready { resumed });
+
+            while let Some(order) = orders.next().await {
+                match order {
+                    Order::Turn(text) => {
+                        let answer = cx
+                            .send_request(PromptRequest::new(
+                                opened.clone(),
+                                vec![ContentBlock::Text(TextContent::new(text))],
+                            ))
+                            .block_task()
+                            .await;
+                        match answer {
+                            Ok(answer) => {
+                                let _ = events.send(Event::Finished(word_of(&answer.stop_reason)));
+                            }
+                            Err(error) => {
+                                let _ = events.send(Event::Failed(format!("{error}")));
+                            }
+                        }
+                    }
+                    Order::Stop => break,
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+/// How the agent named itself, for the record.
+fn said_of(info: &Option<Implementation>) -> String {
+    match info {
+        Some(info) => format!("{} {}", info.name, info.version),
+        None => "an agent that did not name itself".to_owned(),
+    }
+}
+
+/// The turn's end in the agent's own word, which is what the panel shows.
+fn word_of(reason: &StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".to_owned(),
+        StopReason::Cancelled => "cancelled".to_owned(),
+        StopReason::Refusal => "refusal".to_owned(),
+        StopReason::MaxTokens => "max_tokens".to_owned(),
+        StopReason::MaxTurnRequests => "max_turn_requests".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// One update, as the events the panel knows. `None` when it is nothing to show.
+fn event_of(update: &SessionUpdate) -> Option<Event> {
+    match update {
+        SessionUpdate::AgentMessageChunk(chunk) => text_of(&chunk.content).map(Event::Text),
+        SessionUpdate::AgentThoughtChunk(chunk) => text_of(&chunk.content).map(Event::Thinking),
+        SessionUpdate::UserMessageChunk(chunk) => text_of(&chunk.content).map(Event::You),
+        SessionUpdate::Plan(plan) => Some(Event::Plan(
+            plan.entries
+                .iter()
+                .map(|entry| entry.content.clone())
+                .collect(),
+        )),
+        SessionUpdate::ToolCall(call) => Some(Event::ToolCall {
+            id: call.tool_call_id.to_string(),
+            title: call.title.clone(),
+            status: status_of(&call.status),
+        }),
+        SessionUpdate::ToolCallUpdate(update) => Some(Event::ToolCall {
+            id: update.tool_call_id.to_string(),
+            title: update.fields.title.clone().unwrap_or_default(),
+            status: update
+                .fields
+                .status
+                .as_ref()
+                .map(status_of)
+                .unwrap_or_default(),
+        }),
+        SessionUpdate::AvailableCommandsUpdate(update) => Some(Event::Commands(
+            update.available_commands.iter().map(command_of).collect(),
+        )),
+        SessionUpdate::UsageUpdate(update) => Some(Event::Usage(Usage {
+            used: update.used,
+            window: Some(update.size),
+        })),
+        other => Some(Event::Other {
+            kind: kind_of(other),
+        }),
+    }
+}
+
+/// The words of a text chunk: anything else the protocol allows is not something the panel draws.
+fn text_of(content: &ContentBlock) -> Option<String> {
+    match content {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        _ => None,
+    }
+}
+
+/// A tool call's standing, in the words the panel already uses.
+fn status_of(status: &ToolCallStatus) -> String {
+    match status {
+        ToolCallStatus::Pending => "pending".to_owned(),
+        ToolCallStatus::InProgress => "in_progress".to_owned(),
+        ToolCallStatus::Completed => "completed".to_owned(),
+        ToolCallStatus::Failed => "failed".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// One of the agent's commands, in the shape the panel offers.
+fn command_of(command: &AvailableCommand) -> AgentCommand {
+    AgentCommand {
+        name: command.name.clone(),
+        description: command.description.clone(),
+        hint: match &command.input {
+            Some(AvailableCommandInput::Unstructured(input)) => Some(input.hint.clone()),
+            _ => None,
+        },
+    }
+}
+
+/// The name an update goes by on the wire, for the ones this panel does not show yet.
+fn kind_of(update: &SessionUpdate) -> String {
+    let word = match update {
+        SessionUpdate::CurrentModeUpdate(_) => "current_mode_update",
+        SessionUpdate::ConfigOptionUpdate(_) => "config_option_update",
+        SessionUpdate::SessionInfoUpdate(_) => "session_info_update",
+        SessionUpdate::Notice(_) => "notice",
+        SessionUpdate::CompactionUpdate(_) => "compaction_update",
+        SessionUpdate::CompactionSummaryChunk(_) => "compaction_summary_chunk",
+        _ => "an update of a kind this panel does not know",
+    };
+    word.to_owned()
 }
