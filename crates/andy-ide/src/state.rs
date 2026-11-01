@@ -231,7 +231,7 @@ impl AppState {
             git: crate::git::GitState::default(),
             agent: crate::agent::AgentState::default(),
             lsp: None,
-            lsp_status: String::from("starting"),
+            lsp_status: String::new(),
             highlight_key: None,
             highlight_asked: None,
             highlight_since: 0.0,
