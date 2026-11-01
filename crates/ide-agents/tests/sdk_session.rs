@@ -444,6 +444,54 @@ fn the_model_menu_of_an_agent_that_names_its_models_hermes_way_still_arrives() {
     session.stop();
 }
 
+/// Hermes answers a model change with an update of its own (as it does a mode change): the settings are
+/// read back even though the model is not among them. The panel's optimistic model has to survive that
+/// follow-up, or the dropdown that had just shown the new model falls back to the old one — the red line
+/// said the model changed while the list showed it had not.
+#[test]
+fn the_model_a_person_chose_survives_the_update_the_agent_reads_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    session.set_model("large").expect("the model goes out");
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("large"),
+        "the panel shows a model the agent never took"
+    );
+
+    // Drain the follow-up the agent sent back in answer to the change. Whatever it carries, the model the
+    // person asked for is what stays: the only thing a rebuild may do is hear about settings.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut met = false;
+    while Instant::now() < deadline {
+        match session.next_event(Duration::from_millis(200)) {
+            Some(Event::Setup(state)) => {
+                met = true;
+                assert_eq!(
+                    state.current_model.as_deref(),
+                    Some("large"),
+                    "the follow-up update reverted the model a person had chosen"
+                );
+                break;
+            }
+            Some(_) => continue,
+            None => {}
+        }
+    }
+    assert!(
+        met,
+        "the agent never read the settings back after the model change"
+    );
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("large"),
+        "the panel lost the model it had been given"
+    );
+    session.stop();
+}
+
 #[test]
 fn the_way_back_is_written_into_the_record() {
     // The rule: an agent's own method is not the standard's, so whoever reads the record afterwards has to be

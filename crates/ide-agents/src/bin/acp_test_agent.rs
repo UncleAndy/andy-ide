@@ -622,6 +622,27 @@ fn main() {
                 {
                     model = chosen.to_owned();
                 }
+                // Hermes answers a model change with an update of its own, as it does a mode change
+                // (the `edits` setting): the panel is told the settings again even though nothing in them
+                // named the model. A client that rebuilt its model from that message alone would fall back
+                // to the model that predated the change — which is what a real window showed.
+                let session = message
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session,
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": settings(&effort, &policy, &model)
+                        }
+                    }
+                }));
                 answer(id, json!({}));
             }
             "session/set_mode" => {

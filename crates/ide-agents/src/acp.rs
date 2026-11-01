@@ -1116,6 +1116,34 @@ async fn converse(
                         }
                     }
                     Order::Change { what, done } => {
+                        // The model the person chose is what the panel shows, and the very update the
+                        // agent sends back in answer must read it as such — the red line said the model
+                        // changed while the list still showed the old one (Andy's report). A change of
+                        // the model has to reach the authoritative `settings` every inbound update is
+                        // rebuilt from *before* the model is asked for, not after the answer: the agent
+                        // answers a model change with an update of its own, and the task that turns it
+                        // into a setup can run between the awaits of this request — a write that came
+                        // after the answer lost the race and the dropdown fell back. On a refusal the
+                        // old model is put back.
+                        let model_change = match &what {
+                            Change::Model(model) => Some(model.clone()),
+                            Change::Setting { config, value }
+                                if settings.lock().ok().is_some_and(|known| {
+                                    known.options.iter().any(|option| {
+                                        option.id == *config
+                                            && (option.category.as_deref() == Some(MODEL)
+                                                || option.id == MODEL)
+                                    })
+                                }) =>
+                            {
+                                Some(value.clone())
+                            }
+                            _ => None,
+                        };
+                        let before = settings.lock().ok().and_then(|known| known.current_model.clone());
+                        if let (Some(model), Ok(mut known)) = (model_change.clone(), settings.lock()) {
+                            known.current_model = Some(model);
+                        }
                         let outcome = match what {
                             Change::Mode(mode) => cx
                                 .send_request(SetSessionModeRequest::new(opened.clone(), mode))
@@ -1151,6 +1179,12 @@ async fn converse(
                                 .map(|answer| options_of(&json_of(&answer)))
                                 .map_err(|error| anyhow::anyhow!("{error}")),
                         };
+                        if outcome.is_err()
+                            && let (Some(_), before, Ok(mut known)) =
+                                (model_change, before, settings.lock())
+                        {
+                            known.current_model = before;
+                        }
                         let _ = done.send(outcome);
                     }
                     Order::Open { session, done } => {
