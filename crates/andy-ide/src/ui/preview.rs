@@ -65,7 +65,7 @@ impl Preview {
     /// a table in an answer, and the renderer would lay it out by a measurement of its own
     /// (a cell measured in the room it had the frame before, and columns that never wrap).
     pub fn show(&mut self, ui: &mut Ui, cache: &mut CommonMarkCache) {
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_salt("markdown-preview")
             .auto_shrink([false, false])
             .show(ui, |ui| {

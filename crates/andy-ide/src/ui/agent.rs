@@ -1267,7 +1267,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
     // no room for the conversation must not hand that card a sliver of what the answer needs.
     if height > 0.0 {
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_salt("agent-transcript")
             .stick_to_bottom(true)
             .auto_shrink([false, false])

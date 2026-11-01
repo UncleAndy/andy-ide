@@ -183,6 +183,19 @@ impl TabViewer for Viewer<'_> {
         }
     }
 
+    /// The dock wraps the panel of a tab in a scroll area of its own, both bars by default. Every panel
+    /// here that holds something long scrolls what it holds itself, so the dock's outer horizontal bar had
+    /// nothing to do: it showed as a full-width thumb over content that fitted — a bar a person reads as a
+    /// mistake. Those tabs keep the vertical (a panel taller than its leaf still needs a way down) and drop
+    /// the horizontal. A commit log or a list of diagnostics scrolls only downwards of its own, so its tab
+    /// keeps both: the way across is the dock's.
+    fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
+        match tab {
+            Tab::Editor | Tab::Projects | Tab::Diff | Tab::Agent | Tab::Terminal => [false, true],
+            Tab::Git | Tab::History | Tab::Problems => [true, true],
+        }
+    }
+
     /// Every panel has a cross, and the cross puts the panel away rather than throwing it out:
     /// a panel is a place in the window, not a document, and the state behind it — a running
     /// shell, a conversation, the changes of a repository — is not the dock's to destroy.
@@ -256,5 +269,36 @@ mod tests {
         assert!(state.hidden.contains(&Tab::Git));
         state.bring_back(Tab::Git);
         assert!(!state.hidden.contains(&Tab::Git));
+    }
+
+    #[test]
+    fn the_dock_adds_no_horizontal_bar_where_the_panel_scrolls_itself() {
+        // The dock wraps a tab's panel in a scroll area of its own, both bars by default. A panel that
+        // scrolls what it holds itself therefore had a bar with nothing to do — a full-width thumb over
+        // content that fitted. The tabs whose panels scroll only downwards keep the way across.
+        let (_config, mut state) = state();
+        let viewer = Viewer { state: &mut state };
+        for tab in [
+            Tab::Editor,
+            Tab::Projects,
+            Tab::Diff,
+            Tab::Agent,
+            Tab::Terminal,
+        ] {
+            assert_eq!(
+                viewer.scroll_bars(&tab),
+                [false, true],
+                "{} has a horizontal bar of the dock's own",
+                tab.title()
+            );
+        }
+        for tab in [Tab::Git, Tab::History, Tab::Problems] {
+            assert_eq!(
+                viewer.scroll_bars(&tab),
+                [true, true],
+                "{} lost the way across that only the dock could give it",
+                tab.title()
+            );
+        }
     }
 }
