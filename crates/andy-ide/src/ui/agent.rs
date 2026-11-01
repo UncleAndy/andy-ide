@@ -37,7 +37,12 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.agent.card_rect = None;
     ui.separator();
     transcript(ui, state);
+    // Measured here, and not from the conversation's own end: the conversation's height is worked out
+    // from this reserve, so a reserve worked out from the conversation is two numbers leaning on each
+    // other. A separator is a fixed thing — measure it once and it is known.
+    let before_separator = ui.cursor().top();
     ui.separator();
+    let separator = ui.cursor().top() - before_separator;
     // The card the agent is waiting on is drawn under the conversation and directly over the
     // field: a card at the top of the panel is one a person reading the conversation walks past
     // — the question belongs with the words that explain it, next to the place the answer goes.
@@ -51,7 +56,11 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     choice(ui, state);
     // The field, the facts and the button are one foot, drawn together by `input`: the height
     // of the foot is the height of the field and one row, and nothing else may change it.
+    // The foot is measured, not counted: what it took is what the conversation has to leave next
+    // frame. Counted, the difference between the guess and the drawing is a gap under the last line.
+    let foot_top = ui.cursor().top();
     input(ui, state);
+    state.agent.foot = ui.cursor().top() - foot_top;
     // The list of models floats in a layer of its own, above the button that opened it, and the
     // list of conversations the same way.
     models(ui, state);
@@ -60,19 +69,18 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // field and the single row under it, and nothing else. Measured against the bottom of the
     // panel, the reserve also carried the panel's own padding, and it was measured against a
     // drawing the conversation itself had moved — two numbers each leaning on the other.
-    if let Some(field) = state.agent.field_rect {
-        let row = ui.spacing().interact_size.y;
-        // The card's own height is part of the foot now, and the gap between the two.
-        let card = state
-            .agent
-            .card_rect
-            .map_or(0.0, |rect| rect.height() + CARD_LEG);
-        state.agent.below = (card + field.height() + row + 6.0).max(24.0);
-        // Told to leave a room of one size and taking another: the conversation is drawn again in
-        // the same frame with the new room, because nothing else would ever repaint for it. Once
-        // the room it was given is the room it took, no further frame is asked for.
-        if (card - state.agent.card_taken).abs() > 0.5 {
-            state.agent.card_taken = card;
+    if state.agent.field_rect.is_some() {
+        // Everything under the conversation, measured where it ends: the separator, the card when one
+        // waits, the leg under it and the foot. Counted instead, the parts left out of the sum are
+        // left on screen as a gap under the last row, and the parts added twice push the foot past
+        // the panel's edge.
+        let card = state.agent.card_rect.map_or(0.0, |rect| rect.height());
+        let below = (card + separator + state.agent.foot + ui.spacing().item_spacing.y).max(24.0);
+        // Told to leave a room of one size and taking another: the conversation is drawn again in the
+        // same frame with the new room, because nothing else would ever repaint for it. Once the room
+        // it was given is the room it took, no further frame is asked for.
+        if (below - state.agent.below).abs() > 0.5 {
+            state.agent.below = below;
             ui.ctx().request_repaint();
         }
     }
@@ -137,10 +145,6 @@ const CARD_REFUSAL: f32 = 26.0;
 /// Kept back beyond the arithmetic above, because the scroll area has a margin of its own and
 /// being a little short of room is a card that keeps a row back — never a card off the panel.
 const CARD_SLACK: f32 = 8.0;
-
-/// The gap between the card and the field under it, which is part of what the conversation
-/// leaves over: two blocks standing with nothing between them read as one.
-const CARD_LEG: f32 = 8.0;
 
 /// The most of the panel's height a card may take. It is not all of it: a question that
 /// covers the whole panel takes the conversation with it, and the conversation is what a
@@ -1116,7 +1120,9 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     // What the rows below the conversation took last frame, and a line's worth more: the field
     // grows a line at a time, and the room for that line has to be given up on the frame it is
     // typed, not the one after it.
-    let below = state.agent.below + ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    // The foot's own height is measured now, so nothing is kept back beyond the layout's own gap:
+    // a line held for a field that may grow was a line of blank under the last row of the panel.
+    let below = state.agent.below + ui.spacing().item_spacing.y;
     // While the agent waits for an answer the card stands under the conversation, so the conversation
     // gives up its floor: the question is what has to be answered, and its answers have to be inside
     // the panel — in a short panel a floor here is exactly the room the answer needs.

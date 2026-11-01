@@ -9641,21 +9641,48 @@ mod the_agent_panel {
             .agent
             .field_rect
             .expect("the field is not on screen");
-        let foot = gui.app().state.agent.below;
+        // The face of the foot — the field, the row under it and the button — as it was drawn.
         // The field, and one row under it with its gaps: 34 px of room for a row of 20 and the
-        // spacing around it. Measured to the bottom of the panel the same foot came to 65 px,
-        // most of it the panel's own padding and a whole extra row for the mark of a fact left
-        // out — the padding is the panel's business, and the mark belongs in the row.
+        // spacing around it. The reserve the conversation is told to leave (`below`) is this foot
+        // and the separator above it, so the two are read apart: counted together, the separator
+        // looked like a foot that had grown.
+        let foot = gui.app().state.agent.foot;
         assert!(
             foot <= field.height() + 34.0,
             "the foot is {foot:.1} px tall for a field of {:.1} px",
             field.height()
         );
+        // And the reserve is that foot, the separator above it and nothing else: a line kept back
+        // for something else is a line of blank under the last row of the panel.
+        let reserved = gui.app().state.agent.below;
+        assert!(
+            reserved <= foot + 24.0,
+            "the reserve is {reserved:.1} px for a foot of {foot:.1} px"
+        );
+        // The row of facts ends at the panel's bottom: the empty line under it was what a person saw
+        // and asked about, and nothing in the foot asks for it.
+        let row = gui
+            .app()
+            .state
+            .agent
+            .status_rect
+            .expect("the row of facts is not on screen");
+        let panel = gui
+            .app()
+            .state
+            .agent
+            .shown_rect
+            .expect("the panel is not on screen");
+        assert!(
+            panel.bottom() - row.bottom() <= 12.0,
+            "the panel keeps {:.1} px of blank under its last row",
+            panel.bottom() - row.bottom()
+        );
 
         // And it does not move when the pointer does: the panel is repainted then and at no
         // other time, so a foot that is measured against the conversation grows on that frame
         // and stays grown.
-        let before = (field, foot);
+        let before = (field, foot, gui.app().state.agent.below);
         for step in 0..8 {
             gui.harness.event(egui::Event::PointerMoved(egui::pos2(
                 40.0 + step as f32,
@@ -9665,6 +9692,7 @@ mod the_agent_panel {
         }
         let after = (
             gui.app().state.agent.field_rect.expect("the field"),
+            gui.app().state.agent.foot,
             gui.app().state.agent.below,
         );
         assert_eq!(
@@ -9673,10 +9701,12 @@ mod the_agent_panel {
             "the field moved when the pointer did: {before:?} became {after:?}"
         );
         assert!(
-            (before.1 - after.1).abs() < 0.5,
-            "the foot changed height when the pointer moved: {:.1} px became {:.1} px",
+            (before.1 - after.1).abs() < 0.5 && (before.2 - after.2).abs() < 0.5,
+            "the foot changed height when the pointer moved: {:.1}/{:.1} px became {:.1}/{:.1} px",
             before.1,
-            after.1
+            after.1,
+            before.2,
+            after.2
         );
     }
 

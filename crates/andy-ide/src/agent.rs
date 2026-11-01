@@ -317,12 +317,11 @@ pub struct AgentState {
     /// the person writes, and the conversation above it has to be told what to leave — a fixed
     /// number of points is a promise the field breaks the moment a second line is typed.
     pub field_rect: Option<egui::Rect>,
+    /// What the foot under the conversation actually took last frame: the field, the facts and the
+    /// button, measured rather than counted. A reserve built from guessed parts leaves the difference
+    /// on screen — a gap the answer never asked for.
+    pub foot: f32,
     pub below: f32,
-    /// The card's share of `below` the last time the conversation was told what to leave. Kept so
-    /// that a frame can tell whether the room given is the room the card took: a card is drawn
-    /// under the conversation, and a card that outgrew the room left for it hangs past the panel's
-    /// edge, where it takes no click — only another frame with the wider room puts it right.
-    pub card_taken: f32,
     /// Whether a start is in flight: the process is coming up, and the status line says
     /// which step it is at rather than that it is on its way. The step itself is written
     /// by the worker through `progress`, so the panel can hold the line while the worker
@@ -476,8 +475,8 @@ impl Default for AgentState {
             card_text: String::new(),
             card_wants_focus: false,
             field_rect: None,
+            foot: 0.0,
             below: 64.0,
-            card_taken: 0.0,
             command: String::new(),
             name: String::new(),
             status: String::new(),
