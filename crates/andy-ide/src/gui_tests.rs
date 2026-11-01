@@ -3437,6 +3437,25 @@ mod the_terminal_selection {
     }
 
     #[test]
+    fn a_key_handed_to_the_shell_lights_the_cursor() {
+        // The rule is a pure function, but this is the end of the chain that feeds it: a stroke that
+        // reaches the shell has to leave a mark, or the cursor blinks right through a person's typing.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        open_terminal(&mut gui);
+        assert!(
+            gui.app().state.terminal.last_key_at().is_none(),
+            "a terminal nobody has typed in is not working"
+        );
+
+        type_text(&mut gui, "echo lit\n");
+        assert!(
+            gui.app().state.terminal.last_key_at().is_some(),
+            "a keystroke that reached the shell left no mark, so the cursor would blink through it"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
     fn a_click_without_a_drag_picks_nothing_out() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let rect = open_terminal(&mut gui);

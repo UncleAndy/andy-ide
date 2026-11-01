@@ -63,6 +63,11 @@ pub struct Terminal {
     pub cwd: Option<std::path::PathBuf>,
     /// Whether keys typed in this frame belong to the terminal.
     pub focused: bool,
+    /// When a key was last handed to the shell, in the window's own seconds.
+    ///
+    /// The cursor is lit while a person is typing and only blinks once the keys have gone quiet: a
+    /// block that goes dark in the middle of a word reads as a cursor that has been lost.
+    last_key_at: Option<f64>,
     /// Whether the panel was drawn at all in the last frame.
     ///
     /// The panel is only drawn while its tab is visible, so this flag is the only way
@@ -129,6 +134,7 @@ impl Terminal {
             rows: 24,
             cwd: None,
             focused: false,
+            last_key_at: None,
             shown: false,
             shown_rect: None,
             link_clicked: None,
@@ -274,6 +280,9 @@ impl Terminal {
                     _ => {}
                 }
             }
+        }
+        if !bytes.is_empty() {
+            self.last_key_at = Some(ui.input(|input| input.time));
         }
         bytes
     }
@@ -511,7 +520,12 @@ impl Terminal {
                     rect.left_top() + egui::vec2(col as f32 * cell_width, row as f32 * cell_height);
                 let cursor_cell =
                     egui::Rect::from_min_size(position, egui::vec2(cell_width, cell_height));
-                match cursor_of(has_keyboard, ui.input(|input| input.time)) {
+                let now = ui.input(|input| input.time);
+                // A key went to the shell a moment ago: the block is lit, and it is not blinking.
+                let working = self
+                    .last_key_at
+                    .is_some_and(|at| now - at < STEADY_AFTER_A_KEY);
+                match cursor_of(has_keyboard, now, working) {
                     Cursor::Block => {
                         // The cell turned over: the block takes the colour the letter had, and the
                         // letter is put back in the colour of the paper. That is what makes the
@@ -648,6 +662,12 @@ impl Terminal {
                 });
             }
         }
+    }
+
+    /// When a key was last handed to the shell, in the window's own seconds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn last_key_at(&self) -> Option<f64> {
+        self.last_key_at
     }
 
     /// The text the user has picked out, if any.
@@ -904,6 +924,7 @@ impl Terminal {
         self.active = 0;
         self.error = None;
         self.focused = false;
+        self.last_key_at = None;
     }
 
     /// Whether the program in the terminal asked for the application cursor keys.
@@ -1114,13 +1135,16 @@ mod tests {
 
     #[test]
     fn the_cursor_blinks_where_the_keys_go_and_stands_still_where_they_do_not() {
-        // The terminal that is taking the strokes: a block, and it blinks.
-        assert_eq!(cursor_of(true, 0.1), Cursor::Block);
-        assert_eq!(cursor_of(true, 0.7), Cursor::Nothing);
+        // The terminal that is taking the strokes: a block, and it blinks while the keys are quiet.
+        assert_eq!(cursor_of(true, 0.1, false), Cursor::Block);
+        assert_eq!(cursor_of(true, 0.7, false), Cursor::Nothing);
+        // While a person is typing it is lit for the whole cycle — never caught mid-dark.
+        assert_eq!(cursor_of(true, 0.1, true), Cursor::Block);
+        assert_eq!(cursor_of(true, 0.7, true), Cursor::Block);
         // The terminal that is merely on screen: the hollow frame, and it does not blink — the frame
         // is what says "not here".
-        assert_eq!(cursor_of(false, 0.1), Cursor::Hollow);
-        assert_eq!(cursor_of(false, 0.7), Cursor::Hollow);
+        assert_eq!(cursor_of(false, 0.1, false), Cursor::Hollow);
+        assert_eq!(cursor_of(false, 0.7, true), Cursor::Hollow);
     }
 
     #[test]
@@ -1288,11 +1312,23 @@ fn cursor_ink_and_paper(
     (ink, paper)
 }
 
-/// The cursor of a frame: `focused` is the terminal's own "these keys are mine" flag, `time` the
-/// seconds the window has been open.
-fn cursor_of(focused: bool, time: f64) -> Cursor {
+/// How long the block stays lit after the last key, in seconds.
+///
+/// Longer than one blink cycle on purpose: while a person is typing the cursor must not be caught
+/// mid-dark, and the pause between two words is not "gone quiet" yet.
+const STEADY_AFTER_A_KEY: f64 = 1.0;
+
+/// The cursor of a frame.
+///
+/// `focused` is the terminal's own "these keys are mine" flag, `time` the seconds the window has been
+/// open, and `working` whether a key has gone to the shell a moment ago. While the keys are being used
+/// the block is simply lit; it blinks only once they have gone quiet.
+fn cursor_of(focused: bool, time: f64, working: bool) -> Cursor {
     if !focused {
         return Cursor::Hollow;
+    }
+    if working {
+        return Cursor::Block;
     }
     if time % 1.0 < 0.5 {
         Cursor::Block
