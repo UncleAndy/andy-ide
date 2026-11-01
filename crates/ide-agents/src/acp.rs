@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -21,12 +21,15 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, CancelNotification, ContentBlock,
-    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationContentValue, ElicitationMode, Implementation, InitializeRequest,
-    ListSessionsRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionValue,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason, TextContent, ToolCallStatus,
+    CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
+    ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
+    ErrorCode, Implementation, InitializeRequest, KillTerminalRequest, ListSessionsRequest,
+    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalOutputRequest,
+    TextContent, ToolCallStatus, WaitForTerminalExitRequest, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client, Responder};
 use anyhow::Context as _;
@@ -240,6 +243,10 @@ const SESSIONS: Duration = Duration::from_secs(10);
 /// How many conversations the panel keeps from a list that goes on forever.
 const SESSIONS_KEPT: usize = 200;
 
+/// What the panel says when the agent asks for something the panel does not serve.
+const NO_TERMINAL: &str =
+    "this window gives the agent no terminal: the one it was started with is its own";
+
 /// The name the standard gives the setting that picks the model.
 ///
 /// The standard has no request of its own for the model: it is a setting of the agent's, so this is what
@@ -345,6 +352,8 @@ pub struct Session {
     usage: Option<Usage>,
     /// The agent's own error output, as it arrives.
     complaints: Arc<Mutex<String>>,
+    /// Whether the panel has agreed that the agent may write files through this window.
+    writes: Arc<AtomicBool>,
     /// Whether the process is gone.
     closed: bool,
 }
@@ -379,6 +388,7 @@ impl Session {
         let waiting: Arc<Mutex<HashMap<u64, Waiting>>> = Arc::new(Mutex::new(HashMap::new()));
         let questions = Arc::new(AtomicU64::new(1));
         let settings: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
+        let writes = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(started.child));
 
         let cwd = root.to_path_buf();
@@ -388,6 +398,7 @@ impl Session {
             let waiting = Arc::clone(&waiting);
             let questions = Arc::clone(&questions);
             let settings = Arc::clone(&settings);
+            let writes = Arc::clone(&writes);
             let wire = Arc::clone(&wire);
             let record = Arc::clone(&wire);
             std::thread::Builder::new()
@@ -405,6 +416,7 @@ impl Session {
                         waiting,
                         questions,
                         settings,
+                        writes,
                         policy,
                         resume,
                         cwd,
@@ -441,6 +453,7 @@ impl Session {
             state,
             usage: None,
             complaints,
+            writes,
             closed: false,
         })
     }
@@ -551,6 +564,14 @@ impl Session {
                 chosen: chosen.map(<[String]>::to_vec),
             })
             .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
+    /// Allows or forbids the agent to write files through this window.
+    ///
+    /// A write the panel has not agreed to is refused in the protocol's own words. The agreement is the
+    /// panel's to give: the mode the agent was switched to is the agent's own word, not this.
+    pub fn allow_writes(&mut self, allow: bool) {
+        self.writes.store(allow, Ordering::Relaxed);
     }
 
     /// Opens a fresh conversation with the agent.
@@ -712,6 +733,7 @@ async fn converse(
     waiting: Arc<Mutex<HashMap<u64, Waiting>>>,
     questions: Arc<AtomicU64>,
     settings: Arc<Mutex<SessionState>>,
+    writes: Arc<AtomicBool>,
     policy: PermissionPolicy,
     resume: Option<String>,
     cwd: PathBuf,
@@ -719,6 +741,9 @@ async fn converse(
     let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
     let told = events.clone();
     let notes = Arc::clone(&settings);
+    let reads_root = cwd.clone();
+    let writes_root = cwd.clone();
+    let allowed = Arc::clone(&writes);
     // Each handler is a `move` closure of its own, so each gets its own share of the same state.
     let asking_permission = events.clone();
     let waiting_permission = Arc::clone(&waiting);
@@ -790,6 +815,83 @@ async fn converse(
                     id,
                     request: ChoiceRequest::from_params(&json_of(&request)),
                 });
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ReadTextFileRequest, responder, _cx| {
+                // A request nobody answers is a turn that never ends, and a hidden line looks exactly like
+                // silence: every request the panel is asked is answered, even when the answer is a refusal.
+                match serve_read(&reads_root, &request.path) {
+                    Ok(text) => {
+                        let _ = responder.respond(ReadTextFileResponse::new(text));
+                    }
+                    Err((code, words)) => {
+                        let _ = responder.respond_with_error(refusal(code, &words));
+                    }
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WriteTextFileRequest, responder, _cx| {
+                if !allowed.load(Ordering::Relaxed) {
+                    let _ = responder.respond_with_error(refusal(
+                        ErrorCode::MethodNotFound,
+                        "the panel has not allowed the agent to write files",
+                    ));
+                    return Ok(());
+                }
+                match serve_write(&writes_root, &request.path, &request.content) {
+                    Ok(()) => {
+                        let _ = responder.respond(WriteTextFileResponse::new());
+                    }
+                    Err((code, words)) => {
+                        let _ = responder.respond_with_error(refusal(code, &words));
+                    }
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: CreateTerminalRequest, responder, _cx| {
+                let _ =
+                    responder.respond_with_error(refusal(ErrorCode::MethodNotFound, NO_TERMINAL));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: KillTerminalRequest, responder, _cx| {
+                let _ =
+                    responder.respond_with_error(refusal(ErrorCode::MethodNotFound, NO_TERMINAL));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: ReleaseTerminalRequest, responder, _cx| {
+                let _ =
+                    responder.respond_with_error(refusal(ErrorCode::MethodNotFound, NO_TERMINAL));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: WaitForTerminalExitRequest, responder, _cx| {
+                let _ =
+                    responder.respond_with_error(refusal(ErrorCode::MethodNotFound, NO_TERMINAL));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: TerminalOutputRequest, responder, _cx| {
+                let _ =
+                    responder.respond_with_error(refusal(ErrorCode::MethodNotFound, NO_TERMINAL));
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -1020,6 +1122,47 @@ async fn converse(
 /// translated into a second set of types that could drift.
 fn json_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// A refusal in the protocol's own words.
+fn refusal(code: ErrorCode, message: &str) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::new(code.into(), message.to_owned())
+}
+
+/// Reads a file the agent asked for, if it lives in the project.
+fn serve_read(root: &Path, path: &Path) -> Result<String, (ErrorCode, String)> {
+    let full = inside_project(root, path)?;
+    std::fs::read_to_string(&full).map_err(|error| (ErrorCode::InternalError, error.to_string()))
+}
+
+/// Writes a file the agent asked for, once the panel has agreed to it.
+fn serve_write(root: &Path, path: &Path, content: &str) -> Result<(), (ErrorCode, String)> {
+    let full = inside_project(root, path)?;
+    std::fs::write(&full, content).map_err(|error| (ErrorCode::InternalError, error.to_string()))
+}
+
+/// A path the agent named, if it lives in the project.
+///
+/// `..` and absolute paths outside the root are refused: an agent may reach the project it was started in,
+/// and nothing else.
+fn inside_project(root: &Path, path: &Path) -> Result<PathBuf, (ErrorCode, String)> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let full = joined.canonicalize().unwrap_or(joined);
+    if !full.starts_with(&root) {
+        return Err((
+            ErrorCode::InvalidParams,
+            format!(
+                "{} is outside the project; this editor serves nothing else",
+                path.display()
+            ),
+        ));
+    }
+    Ok(full)
 }
 
 /// The conversation the agent opened, out of its own answer.

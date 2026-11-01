@@ -115,6 +115,14 @@ fn model_as_setting() -> bool {
     std::env::args().any(|arg| arg == "--model-as-setting")
 }
 
+/// The path the stand-in asks the client for.
+///
+/// `ACP_TEST_ASK_PATH` makes it ask for a path of the test's choosing — a file outside the project, to see
+/// whether the boundary holds.
+fn asked_path(default: &str) -> String {
+    std::env::var("ACP_TEST_ASK_PATH").unwrap_or_else(|_| default.to_owned())
+}
+
 /// The models as Hermes names them, or nothing when the stand-in answers by the book.
 fn models_field(model: &str) -> Value {
     if !models_named() {
@@ -817,7 +825,7 @@ fn main() {
                         request(
                             asked,
                             "fs/read_text_file",
-                            json!({"sessionId": session, "path": "a.txt"}),
+                            json!({"sessionId": session, "path": asked_path("a.txt")}),
                         );
                         let content = wait_for_answer(&lines_rx, asked)
                             .and_then(|value| value.get("content").cloned())
@@ -834,7 +842,7 @@ fn main() {
                             "fs/write_text_file",
                             json!({
                                 "sessionId": session,
-                                "path": "written.txt",
+                                "path": asked_path("written.txt"),
                                 "content": "from the agent\n"
                             }),
                         );
