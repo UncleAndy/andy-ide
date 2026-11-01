@@ -78,6 +78,10 @@ pub struct Terminal {
 /// The colour under selected cells.
 const SELECTION: egui::Color32 = egui::Color32::from_rgb(38, 79, 120);
 
+/// The panel the terminal's text stands on. A cursor cell is the one place where it is drawn *over*
+/// the text, so it has to be known by name: the letter under the block is put back in this colour.
+const PAPER: egui::Color32 = egui::Color32::from_rgb(16, 18, 20);
+
 /// Text picked out with the mouse, in cells of the screen.
 ///
 /// The two ends are kept as they were clicked rather than sorted, so dragging back
@@ -414,7 +418,7 @@ impl Terminal {
         let hovered = self.link_under_pointer(ui, rect, cell_size, cols, rows);
         self.follow_clicked_link(ui, &hovered);
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(16, 18, 20));
+        painter.rect_filled(rect, 0.0, PAPER);
         // A shell that has finished is worth saying out loud; otherwise the tab looks
         // frozen rather than done.
         if !self.panes.is_empty() && !self.is_alive() {
@@ -509,7 +513,28 @@ impl Terminal {
                     egui::Rect::from_min_size(position, egui::vec2(cell_width, cell_height));
                 match cursor_of(has_keyboard, ui.input(|input| input.time)) {
                     Cursor::Block => {
-                        painter.rect_filled(cursor_cell, 0.0, egui::Color32::from_gray(200));
+                        // The cell turned over: the block takes the colour the letter had, and the
+                        // letter is put back in the colour of the paper. That is what makes the
+                        // character readable under the cursor instead of hidden for the half second
+                        // the block is lit.
+                        let under = screen.cell(row, col);
+                        let (ink, paper) = cursor_ink_and_paper(
+                            under.map(|cell| cell.fgcolor()),
+                            under.map(|cell| cell.bgcolor()),
+                        );
+                        painter.rect_filled(cursor_cell, 0.0, ink);
+                        if let Some(cell) = under {
+                            let contents = cell.contents();
+                            if !contents.trim().is_empty() {
+                                painter.text(
+                                    cursor_cell.left_top(),
+                                    egui::Align2::LEFT_TOP,
+                                    contents,
+                                    font.clone(),
+                                    paper,
+                                );
+                            }
+                        }
                     }
                     Cursor::Hollow => {
                         painter.rect_stroke(
@@ -1070,6 +1095,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_cursor_cell_is_the_cell_turned_over() {
+        // The usual case: the program left both colours alone. The block is the ink of the text, and
+        // the letter goes back onto the paper of the terminal — and the two must differ, or the
+        // character under the cursor would be invisible.
+        let (ink, paper) =
+            cursor_ink_and_paper(Some(vt100::Color::Default), Some(vt100::Color::Default));
+        assert_eq!(ink, colour(vt100::Color::Default));
+        assert_eq!(paper, PAPER);
+        assert_ne!(ink, paper, "the letter under the block must be readable");
+
+        // A cell the program coloured itself is turned over in its own colours.
+        let (ink, paper) =
+            cursor_ink_and_paper(Some(vt100::Color::Idx(1)), Some(vt100::Color::Idx(4)));
+        assert_eq!(ink, colour(vt100::Color::Idx(1)));
+        assert_eq!(paper, colour(vt100::Color::Idx(4)));
+    }
+
+    #[test]
     fn the_cursor_blinks_where_the_keys_go_and_stands_still_where_they_do_not() {
         // The terminal that is taking the strokes: a block, and it blinks.
         assert_eq!(cursor_of(true, 0.1), Cursor::Block);
@@ -1223,6 +1266,26 @@ enum Cursor {
     Nothing,
     /// The keys are elsewhere: the terminal is here, and so is a still hollow frame.
     Hollow,
+}
+
+/// The two colours a cursor cell is drawn with: the block itself, and the letter put back over it.
+///
+/// The block takes the colour the letter had and the letter takes the colour that was behind it, so
+/// the pair is a true inversion whichever way the program coloured the cell. `None` means the screen
+/// has no cell there at all, and then the terminal's own two colours are used.
+fn cursor_ink_and_paper(
+    foreground: Option<vt100::Color>,
+    background: Option<vt100::Color>,
+) -> (egui::Color32, egui::Color32) {
+    let ink = match foreground {
+        Some(colour_of_cell) => colour(colour_of_cell),
+        None => colour(vt100::Color::Default),
+    };
+    let paper = match background {
+        Some(vt100::Color::Default) | None => PAPER,
+        Some(other) => colour(other),
+    };
+    (ink, paper)
 }
 
 /// The cursor of a frame: `focused` is the terminal's own "these keys are mine" flag, `time` the
