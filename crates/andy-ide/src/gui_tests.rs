@@ -7028,7 +7028,9 @@ mod the_agent_panel {
             return;
         };
         let words = an_answer_in_the_panel(&mut gui);
-        let from = egui::pos2(words.left() + 2.0, words.center().y);
+        // From the middle of the answer's line, upwards. The line the drag leaves is cut where the drag
+        // left it, so its *tail* comes back — which is the whole point of a character-precise selection.
+        let from = egui::pos2(words.left() + words.width() * 0.5, words.center().y);
         drag_with_the_left_button(&mut gui, from, egui::pos2(from.x, from.y - 60.0));
 
         let picked = gui
@@ -7053,12 +7055,49 @@ mod the_agent_panel {
 
         let copied = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
         assert!(
-            copied.contains("Hello"),
-            "the picked lines did not come back: {copied:?}"
-        );
-        assert!(
             copied.lines().count() > 1,
             "only one line came back out of two: {copied:?}"
+        );
+        assert!(
+            copied.contains("pondering the greeting"),
+            "the line wholly inside the drag did not come back: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn a_drag_that_starts_inside_a_word_copies_from_that_letter() {
+        // Character precision — what Andy asked for after meeting two selections, one of them whole
+        // messages. A drag begun inside a word must bring back the *rest* of the word, not the whole
+        // line: a selection kept by lines cannot pass this.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let words = an_answer_in_the_panel(&mut gui);
+        let whole = answer(&gui).trim().to_owned();
+        assert!(!whole.is_empty(), "the answer has no words to pick from");
+
+        // Somewhere past the first letter, and then to the right of the word's end.
+        let from = egui::pos2(words.left() + words.width() * 0.6, words.center().y);
+        let to = egui::pos2(words.right() + 40.0, words.center().y);
+        drag_with_the_left_button(&mut gui, from, to);
+
+        let picked = gui
+            .app()
+            .state
+            .agent
+            .picked_lines
+            .expect("the drag picked nothing out");
+        let (start, _) = picked.ordered();
+        assert!(
+            start.column > 0,
+            "the drag began at the very start of the line: {picked:?}"
+        );
+
+        let copied = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
+        assert!(
+            copied.len() < whole.len() && whole.ends_with(copied.trim_end()),
+            "the copy is not the tail of the line: {copied:?} out of {whole:?}"
         );
     }
 
@@ -7078,7 +7117,7 @@ mod the_agent_panel {
 
         let before = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
         assert!(
-            before.contains("Hello"),
+            !before.trim().is_empty(),
             "nothing was picked out: {before:?}"
         );
 

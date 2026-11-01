@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use egui::Ui;
 
-use crate::agent::{Line, Picked};
+use crate::agent::{Line, LineLayout, Picked, Spot};
 use crate::state::AppState;
 use ide_agents::{AgentCommand, Model};
 
@@ -825,8 +825,7 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // a selection the panel keeps itself is otherwise invisible — the highlight looks much like
             // any other, and a person reading the panel cannot tell the two apart.
             if let Some(picked) = state.agent.picked_lines {
-                let (from, to) = picked.ordered();
-                let picked_note = format!("{} lines picked", to - from + 1);
+                let picked_note = format!("{} lines picked", picked.lines());
                 if !room_for(ui, &picked_note) {
                     dropped = true;
                     break 'facts;
@@ -1229,7 +1228,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             .auto_shrink([false, false])
             .max_height(height)
             .show(ui, |ui| {
-                state.agent.line_rects.clear();
+                state.agent.line_layouts.clear();
                 for (index, line) in lines.iter().enumerate() {
                     let drawn = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
                         match line {
@@ -1309,18 +1308,28 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                             }
                         }
                     });
-                    // Where the line really is, in the window's own coordinates. A `Response::rect` is
-                    // always that; `ui.cursor()` inside a scroll area is not — and a drag read against
-                    // the cursor picked the wrong line the moment the conversation was scrolled, which
-                    // is why the panel's own selection came and went while a hand dragged over it.
-                    state.agent.line_rects.push(drawn.response.rect);
+                    // Where the line really is, in the window's own coordinates, and how its words
+                    // were laid out: a pointer is turned into a place inside a line by laying those
+                    // words out again the same way. A `Response::rect` is always in window space,
+                    // while `ui.cursor()` inside a scroll area is not.
+                    let font = ui.style().text_styles[&egui::TextStyle::Body].clone();
+                    let wrap = ui.available_width();
+                    state.agent.line_layouts.push(LineLayout {
+                        rect: drawn.response.rect,
+                        font,
+                        wrap,
+                    });
                 }
-                // The panel's own highlight, over the words: a wash thin enough to read through.
+                // The panel's own highlight, over the words: a wash thin enough to read through. The
+                // first and the last line are painted only as far as the drag went; the lines between
+                // them are painted whole.
                 if let Some(picked) = state.agent.picked_lines {
+                    let (from, to) = picked.ordered();
                     let painter = ui.painter();
-                    for (index, rect) in state.agent.line_rects.iter().enumerate() {
-                        if picked.contains(index) {
-                            painter.rect_filled(*rect, 0.0, PICKED_LINE);
+                    let _ = (from, to);
+                    for bands in picked_bands(ui, state, picked) {
+                        for band in bands {
+                            painter.rect_filled(band, 0.0, PICKED_LINE);
                         }
                     }
                 }
@@ -1332,10 +1341,7 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     // who has just dragged over three lines should not have to guess what "the text" means — and an
     // item that never counts anything is the sign that the panel read no drag at all.
     let label = match state.agent.picked_lines {
-        Some(picked) => {
-            let (from, to) = picked.ordered();
-            format!("Copy text ({} lines)", to - from + 1)
-        }
+        Some(picked) => format!("Copy text ({} lines)", picked.lines()),
         None => "Copy text".to_owned(),
     };
     menu.show(|ui| {
@@ -1374,7 +1380,7 @@ fn pick_over_the_conversation(ui: &egui::Ui, state: &mut AppState, conversation:
     }
     if pressed && conversation.contains(pos) {
         state.agent.picked_lines = None;
-        state.agent.picked_anchor = line_at(state, pos.y);
+        state.agent.picked_anchor = spot_at(ui, state, pos);
         return;
     }
     let Some(anchor) = state.agent.picked_anchor else {
@@ -1383,15 +1389,118 @@ fn pick_over_the_conversation(ui: &egui::Ui, state: &mut AppState, conversation:
     if !down {
         return;
     }
-    let Some(head) = line_at(state, pos.y) else {
+    let Some(head) = spot_at(ui, state, pos) else {
         return;
     };
     state.agent.picked_lines = (head != anchor).then_some(Picked { anchor, head });
 }
 
+/// The rectangles a line's picked-out part covers.
+///
+/// A line that is wholly inside the selection is its own rectangle; the first and last lines are
+/// painted only as far as the drag went, wrapped over as many visual rows as that part runs over. The
+/// words are laid out again exactly as the line was drawn — the panel does not own the widgets that
+/// draw them, so this is how their extent is known at all.
+fn picked_bands(ui: &egui::Ui, state: &AppState, picked: Picked) -> Vec<Vec<egui::Rect>> {
+    let (from, to) = picked.ordered();
+    let mut out = Vec::new();
+    for (index, layout) in state.agent.line_layouts.iter().enumerate() {
+        if !picked.contains(index) {
+            continue;
+        }
+        let Some(line) = state.agent.transcript.get(index) else {
+            continue;
+        };
+        if index != from.line && index != to.line {
+            out.push(vec![layout.rect]);
+            continue;
+        }
+        let said = line.said();
+        let chars = said.chars().count();
+        let start = if index == from.line {
+            from.column.min(chars)
+        } else {
+            0
+        };
+        let end = if index == to.line {
+            to.column.min(chars)
+        } else {
+            chars
+        };
+        if end <= start {
+            continue;
+        }
+        let galley = ui.painter().layout(
+            said.to_owned(),
+            layout.font.clone(),
+            egui::Color32::PLACEHOLDER,
+            layout.wrap,
+        );
+        let shift = layout.rect.min.to_vec2();
+        let start_at = galley
+            .pos_from_cursor(egui::text::CCursor::new(start))
+            .translate(shift);
+        let end_at = galley
+            .pos_from_cursor(egui::text::CCursor::new(end))
+            .translate(shift);
+        let mut bands = Vec::new();
+        for row in galley.rows.iter() {
+            let row = row.rect().translate(shift);
+            if row.bottom() <= start_at.top() || row.top() >= end_at.bottom() {
+                continue;
+            }
+            let left = if row.contains(start_at.center()) {
+                start_at.left()
+            } else {
+                row.left()
+            };
+            let right = if row.contains(end_at.center()) {
+                end_at.left()
+            } else {
+                row.right()
+            };
+            bands.push(egui::Rect::from_min_max(
+                egui::pos2(left, row.top()),
+                egui::pos2(right, row.bottom()),
+            ));
+        }
+        out.push(bands);
+    }
+    out
+}
+
+/// The place in the conversation under a pointer: which line, and which character of it.
+fn spot_at(ui: &egui::Ui, state: &AppState, pos: egui::Pos2) -> Option<Spot> {
+    let index = line_at(state, pos.y)?;
+    let layout = state.agent.line_layouts.get(index)?;
+    let said = state.agent.transcript.get(index)?.said();
+    let galley = ui.painter().layout(
+        said.to_owned(),
+        layout.font.clone(),
+        egui::Color32::PLACEHOLDER,
+        layout.wrap,
+    );
+    // A line's rectangle is taller than the words in it — the space under the last row belongs to the
+    // gap between lines, not to the text — and a position below the glyphs is read by the layout as
+    // "the end of the row". That is what made a press in the middle of a word and a press past its end
+    // land on the same character. The height is clamped to the words, the width is not: past the end
+    // of a line really is the end of it.
+    let local = pos - layout.rect.min;
+    let local = egui::vec2(
+        local.x,
+        local.y.clamp(0.0, (galley.size().y - 1.0).max(0.0)),
+    );
+    let cursor = galley.cursor_from_pos(local);
+    Some(Spot {
+        line: index,
+        column: cursor.index.into(),
+    })
+}
+
 /// The line of the conversation a height falls on, or the nearest one when it falls between lines.
 fn line_at(state: &AppState, y: f32) -> Option<usize> {
-    let rects = &state.agent.line_rects;
+    let rects: Vec<egui::Rect> = state.agent.line_layouts.iter().map(|l| l.rect).collect();
+    let rects = &rects;
     rects
         .iter()
         .position(|rect| y >= rect.top() && y <= rect.bottom())
