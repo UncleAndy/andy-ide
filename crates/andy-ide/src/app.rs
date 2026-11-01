@@ -268,13 +268,18 @@ impl App {
             let mut viewer = Viewer {
                 state: &mut self.state,
             };
-            // The body of a tab keeps four points of margin on every side of its own
-            // (`egui_dock::TabBodyStyle`, `Margin::same(4)`), and at the bottom that margin is blank
-            // space under the last row of a panel — between the row of facts and the edge a person
-            // sees as the panel's end. The sides and the top keep theirs: there the margin is what
-            // holds the text off the border.
+            // The body of a tab adds the style's window margin, six points, on its sides and top; at
+            // the bottom that was blank space under the last row of a panel — between the row of facts
+            // and the edge a person reads as the panel's end. Cut to two points: the text stays off the
+            // border without banding every panel with empty space. (The central frame's own eight points
+            // stay: taking them away makes the hover hint stop scrolling — see references/panel-layout.md.)
             let mut style = Style::from_egui(ui.style().as_ref());
-            style.tab.tab_body.inner_margin.bottom = 0;
+            style.tab.tab_body.inner_margin = egui::Margin {
+                left: 2,
+                right: 2,
+                top: 2,
+                bottom: 0,
+            };
             DockArea::new(&mut self.dock)
                 .style(style)
                 .show_inside(ui, &mut viewer);
