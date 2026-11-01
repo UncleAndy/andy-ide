@@ -23,6 +23,9 @@ struct Pane {
     selection: Option<Selection>,
     /// Whether a drag is in progress, so a moving pointer keeps extending it.
     dragging: bool,
+    /// Where the press landed. A press is not a selection by itself: a click that never moves picks
+    /// nothing out, and the selection appears when the pointer reaches another cell.
+    anchor: Option<(u16, u16)>,
     /// The cell the pointer was over last frame, so a movement is reported once
     /// rather than sixty times a second.
     mouse_cell: Option<(u16, u16)>,
@@ -38,6 +41,7 @@ impl Pane {
             title,
             selection: None,
             dragging: false,
+            anchor: None,
             mouse_cell: None,
             scroll_left: 0.0,
         }
@@ -400,6 +404,8 @@ impl Terminal {
             self.focused = focused;
         }
         let cell_size = egui::vec2(cell_width, cell_height);
+        // Whose keys these are: the canvas holds the keyboard when the terminal is the panel in front.
+        let has_keyboard = response.has_focus();
         self.track_selection(ui, rect, cell_size, cols, rows);
         let hovered = self.link_under_pointer(ui, rect, cell_size, cols, rows);
         self.follow_clicked_link(ui, &hovered);
@@ -488,17 +494,31 @@ impl Terminal {
                 );
                 painter.rect_filled(underline, 0.0, egui::Color32::from_rgb(120, 180, 255));
             }
-            // The cursor is drawn last so that a block under a glyph is visible.
+            // The cursor is drawn last so that a block under a glyph is visible. Filled and blinking
+            // it says the keys go here; hollow and still it says the terminal is there with the
+            // keyboard somewhere else — the one thing a person has to be able to tell at a glance.
             if !screen.hide_cursor() {
                 let (row, col) = screen.cursor_position();
                 let position =
                     rect.left_top() + egui::vec2(col as f32 * cell_width, row as f32 * cell_height);
-                painter.rect_stroke(
-                    egui::Rect::from_min_size(position, egui::vec2(cell_width, cell_height)),
-                    0.0,
-                    egui::Stroke::new(1.0, egui::Color32::LIGHT_GRAY),
-                    egui::StrokeKind::Inside,
-                );
+                let cursor_cell =
+                    egui::Rect::from_min_size(position, egui::vec2(cell_width, cell_height));
+                if has_keyboard {
+                    // Half a second on, half a second off. A frame is asked for while the terminal is
+                    // on screen, or the blink would be a still block that is on half the time.
+                    if ui.input(|input| input.time) % 1.0 < 0.5 {
+                        painter.rect_filled(cursor_cell, 0.0, egui::Color32::from_gray(200));
+                    }
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(120));
+                } else {
+                    painter.rect_stroke(
+                        cursor_cell,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::LIGHT_GRAY),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
         });
         self.forward_mouse(ui, rect, egui::vec2(cell_width, cell_height), cols, rows);
@@ -559,6 +579,7 @@ impl Terminal {
 
         if released {
             pane.dragging = false;
+            pane.anchor = None;
         }
         let Some(pos) = pos.filter(|pos| rect.contains(*pos)) else {
             return;
@@ -567,23 +588,31 @@ impl Terminal {
 
         if pressed {
             if selecting {
-                pane.selection = Some(Selection {
-                    anchor: target,
-                    head: target,
-                });
+                // Where a drag would begin, and nothing picked out yet: a click that never moves
+                // leaves no highlight behind — a single cell lit up by a click reads as a selection
+                // nobody asked for.
+                pane.selection = None;
+                pane.anchor = Some(target);
                 pane.dragging = true;
             } else {
                 // A plain click belongs to the program; the old selection goes.
                 pane.selection = None;
+                pane.anchor = None;
                 pane.dragging = false;
             }
             return;
         }
-        if pane.dragging
-            && down
-            && let Some(selection) = pane.selection.as_mut()
-        {
-            selection.head = target;
+        if pane.dragging && down {
+            let anchor = pane.anchor.unwrap_or(target);
+            if anchor == target {
+                // Still on the cell the press landed on: nothing is picked out yet.
+                pane.selection = None;
+            } else {
+                pane.selection = Some(Selection {
+                    anchor,
+                    head: target,
+                });
+            }
         }
     }
 
