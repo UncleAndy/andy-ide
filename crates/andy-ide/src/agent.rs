@@ -717,7 +717,16 @@ impl AgentState {
     /// `Ctrl`+`C` — `Ctrl`+`Insert` is a copy only on Windows. So both are recognised
     /// here, and the event is put back into the input by the panel itself, after the
     /// editor has had its turn and found nothing to copy.
-    pub fn take_copy_shortcut(&mut self, ctx: &egui::Context) {
+    /// Hands the copy chord to the panel, unless the terminal is the one with the keyboard.
+    ///
+    /// `terminal_has_the_keys` is the terminal's own "these keys are mine" flag: while it is set, a
+    /// `Ctrl+Insert` — or a `Ctrl+C`, which there means *stop* — belongs to the shell, and a window
+    /// that took it first would leave the terminal's own copy key doing nothing. Andy's report,
+    /// verbatim: "Ctrl-Insert does not copy even right after the selection".
+    pub fn take_copy_shortcut(&mut self, ctx: &egui::Context, terminal_has_the_keys: bool) {
+        if terminal_has_the_keys {
+            return;
+        }
         let Some(rect) = self.shown_rect else {
             return;
         };

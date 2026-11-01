@@ -1161,8 +1161,15 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
         egui::pos2(room.left(), ui.cursor().top()),
         egui::pos2(room.right(), ui.cursor().top() + height),
     );
+    // The sensor that carries the menu is a *point*, not the conversation: a widget with a hover
+    // sense over the whole conversation is a widget that can be the one under the pointer — and egui
+    // drops a label's selection on any press that no selected label was hovered by. The anchor is
+    // only ever needed to hang the menu on; the pointer's own position is what the menu opens at.
+    let anchor_at = ui
+        .input(|input| input.pointer.interact_pos())
+        .unwrap_or_else(|| conversation.center());
     let sensor = ui.interact(
-        conversation,
+        egui::Rect::from_min_size(anchor_at, egui::Vec2::ZERO),
         egui::Id::new("agent-conversation-menu"),
         egui::Sense::hover(),
     );

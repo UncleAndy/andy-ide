@@ -182,7 +182,11 @@ impl App {
         // first and it copies its own line out of the file being edited: the selection
         // made in the panel is the one the person means. The shortcut is taken here,
         // before any panel is drawn, and handed to the panel below.
-        self.state.agent.take_copy_shortcut(ui.ctx());
+        // The terminal's own copy keys are read by the terminal, out of the same queue: the window
+        // must not take them first, or `Ctrl+Insert` there copies nothing at all.
+        self.state
+            .agent
+            .take_copy_shortcut(ui.ctx(), self.state.terminal.focused);
         if !self.state.fonts_set {
             // Once per window: egui rebuilds its atlas when the fonts change, so this belongs to
             // the first frame and to no other.

@@ -411,18 +411,18 @@ impl Terminal {
         // menu — which stands over the canvas — used to arrive here as a click on the canvas, and
         // wiped the very selection that menu was about to copy. `hovered` is false as soon as a
         // popup covers the pointer, which is exactly the difference.
+        // The selection needs the gate above; the keyboard does not. A press outside the terminal is
+        // a person going back to the code and must take the keys away from here (`focus_after`), and a
+        // press that is *inside* the rectangle but aimed at the menu standing over it does nothing to
+        // the focus either way.
         let mine = response.hovered() || response.is_pointer_button_down_on();
-        let pressed_at = if mine {
-            ui.input(|input| {
-                if input.pointer.any_pressed() {
-                    input.pointer.interact_pos()
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let pressed_at = ui.input(|input| {
+            if input.pointer.any_pressed() {
+                input.pointer.interact_pos()
+            } else {
+                None
+            }
+        });
         if let Some(focused) = focus_after(rect, pressed_at, response.clicked()) {
             self.focused = focused;
         }
