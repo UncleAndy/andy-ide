@@ -349,6 +349,16 @@ impl Terminal {
         let cols = (width / cell_width).floor().max(1.0) as u16;
         let rows = (height / cell_height).floor().max(1.0) as u16;
         self.ensure_started(cols, rows);
+        // The reader thread has nothing of its own to ask for a frame with, and a terminal whose screen
+        // moves only when the mouse passes over it is what that looks like. Handed in on every frame the
+        // terminal is drawn, so the ask always reaches the window that is drawing.
+        {
+            let ctx = ui.ctx().clone();
+            let change: ide_term::Change = std::sync::Arc::new(move || ctx.request_repaint());
+            for pane in &self.panes {
+                pane.session.watch(std::sync::Arc::clone(&change));
+            }
+        }
         if (cols, rows) != (self.cols, self.rows) {
             for pane in &mut self.panes {
                 let _ = pane.session.resize(cols, rows);
@@ -839,6 +849,12 @@ impl Terminal {
         self.pane()
             .map(|pane| pane.session.contents())
             .unwrap_or_default()
+    }
+
+    /// The sessions, for the checks that ask whether the screen has someone to tell.
+    #[cfg(test)]
+    pub(crate) fn sessions(&self) -> impl Iterator<Item = &Session> {
+        self.panes.iter().map(|pane| &pane.session)
     }
 
     pub fn is_alive(&self) -> bool {

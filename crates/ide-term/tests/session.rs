@@ -118,3 +118,70 @@ fn a_program_starts_in_the_directory_it_was_given() {
         session.contents()
     );
 }
+
+#[test]
+fn the_reader_tells_the_interface_when_there_is_news() {
+    // A window draws on demand, so nothing in it moves unless something asks for a frame — and the only
+    // thing here that knows there is something to draw is the reader thread. Without this the screen moves
+    // only while the mouse passes over it, which is how the missing ask looked from the outside.
+    let mut session = Session::spawn(
+        "bash",
+        &["-c".to_owned(), "sleep 1; printf news; sleep 30".to_owned()],
+        80,
+        24,
+    )
+    .expect("a session starts");
+
+    let told = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&told);
+    session.watch(std::sync::Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    assert!(session.is_watched(), "the session did not take the watcher");
+
+    assert!(
+        wait_for(&session, "news"),
+        "the output never reached the screen: {:?}",
+        session.contents()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while told.load(std::sync::atomic::Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        told.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the reader never told the interface that the screen had changed"
+    );
+
+    // A second watcher replaces the first, and hears nothing until there is news of its own: what is being
+    // counted is the reader's call, not something ticking by itself.
+    let quiet = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&quiet);
+    session.watch(std::sync::Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        quiet.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the new watcher was called with nothing to say"
+    );
+
+    session
+        .write(b"echo typed-again\n")
+        .expect("the write goes through");
+    assert!(
+        wait_for(&session, "typed-again"),
+        "the written words never reached the screen: {:?}",
+        session.contents()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while quiet.load(std::sync::atomic::Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        quiet.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the new watcher was not told about the news it exists for"
+    );
+    session.kill();
+}

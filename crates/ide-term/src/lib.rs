@@ -23,12 +23,22 @@ pub mod link;
 pub const SCROLLBACK: usize = 2000;
 
 /// One terminal session: a child process, its pty and the screen it painted.
+/// Something to tell when the screen has changed.
+///
+/// A window draws on demand: nothing in it moves unless something asks for a frame. What has news here is
+/// the reader thread — output arriving, or the shell ending — so it is the reader that asks, through
+/// whatever the interface handed in (its own `request_repaint`). Without it the screen only moves when the
+/// mouse happens to pass over it, which is exactly what a terminal that is not asking looks like.
+pub type Change = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 pub struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     parser: Arc<Mutex<vt100::Parser>>,
     alive: Arc<AtomicBool>,
+    /// Whom the reader tells, once an interface has said.
+    watcher: Arc<Mutex<Option<Change>>>,
     size: PtySize,
 }
 
@@ -85,9 +95,20 @@ impl Session {
         let cols = std::num::NonZeroU16::new(size.cols).unwrap_or(std::num::NonZeroU16::MIN);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let alive = Arc::new(AtomicBool::new(true));
+        let watcher: Arc<Mutex<Option<Change>>> = Arc::new(Mutex::new(None));
         {
             let parser = Arc::clone(&parser);
             let alive = Arc::clone(&alive);
+            let watcher = Arc::clone(&watcher);
+            // Called outside the lock: the window's own work is not run under ours, and it may hand in a
+            // fresh watcher on the frame we are waking it for.
+            let tell = move || {
+                let change = watcher.lock().ok().and_then(|held| held.clone());
+                if let Some(change) = change {
+                    change();
+                }
+            };
+            let tell = std::sync::Arc::new(tell);
             std::thread::Builder::new()
                 .name("term-reader".to_owned())
                 .spawn(move || {
@@ -99,12 +120,17 @@ impl Session {
                                 if let Ok(mut parser) = parser.lock() {
                                     parser.process(&buffer[..count]);
                                 }
+                                // There is something to draw now, and this thread is the only thing
+                                // that knows it.
+                                tell();
                             }
                         }
                     }
                     // A locked parser at this point means the screen is being drawn;
                     // the flag is what the interface watches, so it is set regardless.
                     alive.store(false, Ordering::Relaxed);
+                    // A shell that has ended is news too: the tab has something new to say about itself.
+                    tell();
                 })
                 .context("cannot start the reader thread")?;
         }
@@ -115,6 +141,7 @@ impl Session {
             child,
             parser,
             alive,
+            watcher,
             size,
         })
     }
@@ -151,6 +178,25 @@ impl Session {
     /// Starts the user's shell where the editor itself was started.
     pub fn shell(cols: u16, rows: u16) -> Result<Self> {
         Self::shell_in(cols, rows, None)
+    }
+
+    /// Tells this session to ask for a frame whenever the screen changes.
+    ///
+    /// The interface hands in its own `request_repaint`, and hands it in again on every frame it draws: the
+    /// last one wins, so the ask always reaches the window that is actually drawing. Nothing is asked of a
+    /// session no interface is watching — it simply has no one to tell.
+    pub fn watch(&self, change: Change) {
+        if let Ok(mut held) = self.watcher.lock() {
+            *held = Some(change);
+        }
+    }
+
+    /// Whether an interface has handed in something to tell.
+    pub fn is_watched(&self) -> bool {
+        self.watcher
+            .lock()
+            .map(|held| held.is_some())
+            .unwrap_or(false)
     }
 
     /// Sends bytes as if typed.

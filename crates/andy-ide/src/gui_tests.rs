@@ -2905,6 +2905,33 @@ mod the_terminal_click {
     use super::*;
 
     #[test]
+    fn the_terminal_gives_every_session_a_window_to_ask_for_a_frame() {
+        // The reader thread is what makes new output appear, and only a frame knows which window is drawing
+        // it. What this looked like without the ask: the terminal moved only while the mouse passed over it.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::F12);
+        gui.settle();
+
+        let watched: Vec<bool> = gui
+            .app()
+            .state
+            .terminal
+            .sessions()
+            .map(|session| session.is_watched())
+            .collect();
+        assert!(
+            !watched.is_empty(),
+            "the terminal started no session at all"
+        );
+        assert!(
+            watched.iter().all(|told| *told),
+            "a session of the terminal has nobody to ask for a frame: {watched:?}"
+        );
+    }
+
+    #[test]
     fn a_click_into_the_panel_puts_the_shell_in_charge() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let path = gui
