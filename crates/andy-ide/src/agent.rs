@@ -395,6 +395,14 @@ pub struct AgentState {
     pub contexts: std::collections::BTreeMap<String, Usage>,
     /// Where the panel was last drawn, for the tests that point at it.
     pub shown_rect: Option<egui::Rect>,
+    /// Whether the panel was drawn at all in the last frame.
+    ///
+    /// `shown_rect` alone is not that answer: it is written as the panel draws and **never cleared**, so a
+    /// panel standing as a tab *behind* the editor keeps the rectangle of the place it used to occupy —
+    /// which is where the editor is now. The window asks this flag before it hands the panel the copy
+    /// chord for that very reason: a stale rectangle would take `Ctrl+C` and `Ctrl+Insert` away from the
+    /// file being edited, and the editor would copy nothing at all.
+    pub shown: bool,
     /// Set when the person asked to copy from the panel.
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
@@ -497,6 +505,7 @@ impl Default for AgentState {
             sessions_button: None,
             sessions_loading: false,
             shown_rect: None,
+            shown: false,
             started: None,
             took: None,
             busy: false,
@@ -725,6 +734,9 @@ impl AgentState {
     /// verbatim: "Ctrl-Insert does not copy even right after the selection".
     pub fn take_copy_shortcut(&mut self, ctx: &egui::Context, terminal_has_the_keys: bool) {
         if terminal_has_the_keys {
+            return;
+        }
+        if !self.shown {
             return;
         }
         let Some(rect) = self.shown_rect else {

@@ -177,6 +177,9 @@ impl App {
         // The worker is given a door into this window: an event that arrives while the window
         // is away has nobody to read it, and the frame that would read it may never come.
         self.state.agent.waker.watch(ui.ctx());
+        // Whether the panel is on screen this frame is the panel's own business to say, exactly as the
+        // terminal does below: a flag that is only ever set true would let a panel behind another tab
+        // claim the copy chord for a place it does not occupy.
         // Copying from the agent panel is the panel's business. The editor holds the
         // keyboard whenever nothing else does, so the copy shortcut arrives at the editor
         // first and it copies its own line out of the file being edited: the selection
@@ -187,6 +190,9 @@ impl App {
         self.state
             .agent
             .take_copy_shortcut(ui.ctx(), self.state.terminal.focused);
+        // Reset *after* the chord has been offered: the flag read above is the one the previous frame's
+        // drawing left behind, and a reset placed first would make it always false.
+        self.state.agent.shown = false;
         if !self.state.fonts_set {
             // Once per window: egui rebuilds its atlas when the fonts change, so this belongs to
             // the first frame and to no other.

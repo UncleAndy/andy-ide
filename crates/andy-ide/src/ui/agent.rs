@@ -15,6 +15,7 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // the window every frame (see `App::draw`): a panel that is not on screen is not drawn, and
     // its conversation would go unread.
     state.agent.shown_rect = Some(ui.max_rect());
+    state.agent.shown = true;
     // The copy shortcut was taken before the editor drew, so that it did not copy a line
     // of code instead; here it becomes the event egui's text selection listens for, while
     // the words are being drawn.
