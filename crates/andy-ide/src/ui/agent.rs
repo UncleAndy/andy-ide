@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use egui::Ui;
 
-use crate::agent::Line;
+use crate::agent::{Line, Picked};
 use crate::state::AppState;
 use ide_agents::{AgentCommand, Model};
 
@@ -21,8 +21,15 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // the words are being drawn.
     if state.agent.wants_copy {
         state.agent.wants_copy = false;
-        ui.ctx()
-            .input_mut(|input| input.events.push(egui::Event::Copy));
+        if let Some(text) = state.agent.picked_text() {
+            // The panel's own selection: copied here, so that egui's own state — which a press may
+            // have dropped, and which a right-click on the words did drop — cannot answer with
+            // something else, or with nothing.
+            ui.ctx().copy_text(text);
+        } else {
+            ui.ctx()
+                .input_mut(|input| input.events.push(egui::Event::Copy));
+        }
     }
     // `Shift+Insert` pastes and `Ctrl+Insert` copies in every panel, and each panel maps them for
     // itself: the editor and the terminal read the key, and the field the agent is asked in is egui's
@@ -1197,6 +1204,10 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     if asked {
         state.agent.wants_copy = true;
     }
+    // The panel's own selection, read from the pointer before the conversation is drawn: the line
+    // rectangles it works from are the ones the frame before left behind. A right-click is not a
+    // reason to lose it — nothing but a new drag, or a click that picks nothing out, writes it.
+    pick_over_the_conversation(ui, state, conversation);
     // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
     // no room for the conversation must not hand that card a sliver of what the answer needs.
     if height > 0.0 {
@@ -1206,7 +1217,9 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             .auto_shrink([false, false])
             .max_height(height)
             .show(ui, |ui| {
+                state.agent.line_rects.clear();
                 for (index, line) in lines.iter().enumerate() {
+                    let top = ui.cursor().top();
                     match line {
                         Line::You(text) => {
                             // The request is a block of its own, square and set in bold: an answer
@@ -1283,6 +1296,22 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                                 .on_hover_text(format!("service row: {kind}"));
                         }
                     }
+                    // Where this line was drawn, so that a drag over it can be read back as this
+                    // line: the words themselves are laid out by widgets the panel does not own.
+                    let bottom = ui.cursor().top().max(top + 1.0);
+                    state.agent.line_rects.push(egui::Rect::from_min_max(
+                        egui::pos2(conversation.left(), top),
+                        egui::pos2(conversation.right(), bottom),
+                    ));
+                }
+                // The panel's own highlight, over the words: a wash thin enough to read through.
+                if let Some(picked) = state.agent.picked_lines {
+                    let painter = ui.painter();
+                    for (index, rect) in state.agent.line_rects.iter().enumerate() {
+                        if picked.contains(index) {
+                            painter.rect_filled(*rect, 0.0, PICKED_LINE);
+                        }
+                    }
                 }
             });
     }
@@ -1297,6 +1326,65 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     if copy {
         state.agent.wants_copy = true;
     }
+}
+
+/// A wash over the lines of the conversation the person picked out. Light enough that the words
+/// under it stay readable: the highlight is drawn over them, not behind them.
+const PICKED_LINE: egui::Color32 = egui::Color32::from_rgba_premultiplied(38, 56, 80, 90);
+
+/// Reads a drag over the conversation back as lines, and keeps the panel's own selection.
+///
+/// A press that never moves picks nothing out — the same rule the terminal follows — and a new drag
+/// replaces whatever was picked out before. `released` only forgets where the drag began.
+fn pick_over_the_conversation(ui: &egui::Ui, state: &mut AppState, conversation: egui::Rect) {
+    let (pos, pressed, down, released) = ui.input(|input| {
+        (
+            input.pointer.interact_pos(),
+            input.pointer.button_pressed(egui::PointerButton::Primary),
+            input.pointer.primary_down(),
+            input.pointer.button_released(egui::PointerButton::Primary),
+        )
+    });
+    let Some(pos) = pos else {
+        return;
+    };
+    if released {
+        state.agent.picked_anchor = None;
+    }
+    if pressed && conversation.contains(pos) {
+        state.agent.picked_lines = None;
+        state.agent.picked_anchor = line_at(state, pos.y);
+        return;
+    }
+    let Some(anchor) = state.agent.picked_anchor else {
+        return;
+    };
+    if !down {
+        return;
+    }
+    let Some(head) = line_at(state, pos.y) else {
+        return;
+    };
+    state.agent.picked_lines = (head != anchor).then_some(Picked { anchor, head });
+}
+
+/// The line of the conversation a height falls on, or the nearest one when it falls between lines.
+fn line_at(state: &AppState, y: f32) -> Option<usize> {
+    let rects = &state.agent.line_rects;
+    rects
+        .iter()
+        .position(|rect| y >= rect.top() && y <= rect.bottom())
+        .or_else(|| {
+            rects
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    (a.center().y - y)
+                        .abs()
+                        .total_cmp(&(b.center().y - y).abs())
+                })
+                .map(|(index, _)| index)
+        })
 }
 
 /// The permission question, when the agent is waiting on one.

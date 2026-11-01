@@ -6947,6 +6947,182 @@ mod the_agent_panel {
         );
     }
 
+    /// An answer in the panel, and the rectangle the words "Hello" were drawn in.
+    fn an_answer_in_the_panel(gui: &mut Gui) -> egui::Rect {
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(gui, "the answer", |gui| !answer(gui).is_empty());
+        gui.settle();
+        gui.harness
+            .query_by_label_contains("Hello")
+            .expect("the answer is not on screen")
+            .rect()
+    }
+
+    /// What the panel copied in the last frame, if anything.
+    fn copied_now(gui: &Gui) -> Option<String> {
+        gui.harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+    }
+
+    /// `Ctrl+Insert`, one frame, and what came of it.
+    fn copy_with_ctrl_insert(gui: &mut Gui) -> Option<String> {
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
+        gui.harness.event(egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        gui.harness.step();
+        let copied = copied_now(gui);
+        gui.harness
+            .event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        copied
+    }
+
+    /// A press, a move and a release: how a hand picks words out.
+    fn drag_with_the_left_button(gui: &mut Gui, from: egui::Pos2, to: egui::Pos2) {
+        gui.harness.event(egui::Event::PointerMoved(from));
+        gui.harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.step();
+        gui.harness.event(egui::Event::PointerMoved(to));
+        gui.harness.step();
+        gui.harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.harness.step();
+    }
+
+    #[test]
+    fn a_drag_over_the_conversation_picks_its_lines_out() {
+        // The panel keeps its own selection, so it has to read a drag as lines. Two of them are
+        // picked out here — the answer and the question above it — and both come back in one copy.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let words = an_answer_in_the_panel(&mut gui);
+        let from = egui::pos2(words.left() + 2.0, words.center().y);
+        drag_with_the_left_button(&mut gui, from, egui::pos2(from.x, from.y - 60.0));
+
+        let picked = gui
+            .app()
+            .state
+            .agent
+            .picked_lines
+            .expect("a drag of sixty points picked no second line out");
+        assert!(
+            picked.ordered().1 > picked.ordered().0,
+            "the two ends of the drag are the same line: {picked:?}"
+        );
+
+        let copied = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
+        assert!(
+            copied.contains("Hello"),
+            "the picked lines did not come back: {copied:?}"
+        );
+        assert!(
+            copied.lines().count() > 1,
+            "only one line came back out of two: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn the_right_click_leaves_the_panels_own_selection_alone() {
+        // Andy's report: the highlight went the moment the right button came down, and the copy
+        // after it brought something else. The selection is the panel's own now, and a menu is not a
+        // new drag: what is copied before the right-click is copied after it as well.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let words = an_answer_in_the_panel(&mut gui);
+        let from = egui::pos2(words.left() + 2.0, words.center().y);
+        let to = egui::pos2(from.x, from.y - 60.0);
+        drag_with_the_left_button(&mut gui, from, to);
+
+        let before = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
+        assert!(
+            before.contains("Hello"),
+            "nothing was picked out: {before:?}"
+        );
+
+        // The right button, on the picked words.
+        gui.harness.event(egui::Event::PointerMoved(to));
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.harness.step();
+        assert!(
+            gui.harness.query_by_label("Copy text").is_some(),
+            "the right-click offered no menu"
+        );
+
+        let after = copy_with_ctrl_insert(&mut gui);
+        assert_eq!(
+            after.as_deref(),
+            Some(before.as_str()),
+            "the right-click took the selection away: the copy after it brought {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_without_a_drag_picks_nothing_out_in_the_panel() {
+        // The same rule the terminal follows: a press is not a selection by itself.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let words = an_answer_in_the_panel(&mut gui);
+        let at = egui::pos2(words.left() + 2.0, words.center().y);
+        gui.harness.event(egui::Event::PointerMoved(at));
+        gui.harness.step();
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.harness.step();
+        assert!(
+            gui.app().state.agent.picked_lines.is_none(),
+            "a click that never moved picked lines out"
+        );
+    }
+
     #[test]
     fn a_permission_is_a_question_with_buttons_and_the_turn_waits() {
         let Some(mut gui) = with_agent() else {

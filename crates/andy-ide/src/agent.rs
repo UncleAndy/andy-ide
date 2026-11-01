@@ -93,6 +93,24 @@ pub fn listed_name(name: &str) -> &str {
     }
 }
 
+/// The words of a line, whichever kind of line it is.
+impl Line {
+    /// What the line says: the words of the person, of the agent, or of the panel itself.
+    ///
+    /// A service row keeps its one painted line in `text`, so it answers with that rather than with
+    /// the whole row the runtime wrote.
+    pub fn said(&self) -> &str {
+        match self {
+            Line::You(text)
+            | Line::Agent(text)
+            | Line::Thinking(text)
+            | Line::Tool(text)
+            | Line::Note(text) => text,
+            Line::Notice { text, .. } => text,
+        }
+    }
+}
+
 /// One line of the transcript.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Line {
@@ -116,6 +134,33 @@ pub enum Line {
     Tool(String),
     /// Something the panel says on its own account.
     Note(String),
+}
+
+/// Which lines of a conversation are picked out, by their places in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picked {
+    /// Where the drag began.
+    pub anchor: usize,
+    /// Where the pointer is now.
+    pub head: usize,
+}
+
+impl Picked {
+    /// The two ends in reading order, so that a drag upwards picks out the same lines as one
+    /// downwards.
+    pub fn ordered(self) -> (usize, usize) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// Whether a line is inside what was picked out.
+    pub fn contains(self, line: usize) -> bool {
+        let (from, to) = self.ordered();
+        (from..=to).contains(&line)
+    }
 }
 
 /// The shapes of a service row of the runtime, the name each kind goes by, and the one line to
@@ -403,6 +448,20 @@ pub struct AgentState {
     /// chord for that very reason: a stale rectangle would take `Ctrl+C` and `Ctrl+Insert` away from the
     /// file being edited, and the editor would copy nothing at all.
     pub shown: bool,
+    /// The lines of the conversation the person has picked out, by their places in it.
+    ///
+    /// The panel keeps this itself instead of leaving the selection to egui. egui drops a label's
+    /// selection on any press that no label was under — a right-click on the picked words included —
+    /// and the highlight went exactly that way. This one does not move for a menu, because nothing
+    /// but a new drag writes it.
+    pub picked_lines: Option<Picked>,
+    /// The line a drag began on, so that a moving pointer keeps extending from there.
+    pub picked_anchor: Option<usize>,
+    /// Where each line of the conversation was drawn, so that a pointer can be read back as a line.
+    ///
+    /// Written on every frame the conversation is drawn; a drag is far slower than a frame, and the
+    /// rectangles of the frame before the press are the ones a press is read against.
+    pub line_rects: Vec<egui::Rect>,
     /// Set when the person asked to copy from the panel.
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
@@ -506,6 +565,9 @@ impl Default for AgentState {
             sessions_loading: false,
             shown_rect: None,
             shown: false,
+            picked_lines: None,
+            picked_anchor: None,
+            line_rects: Vec::new(),
             started: None,
             took: None,
             busy: false,
@@ -536,6 +598,28 @@ impl Default for AgentState {
 }
 
 impl AgentState {
+    /// The words of the lines the person has picked out, ready for the clipboard.
+    ///
+    /// The places are read against the transcript as it stands now: a conversation that has moved on
+    /// since the drag (an answer arrived, another session was opened) must not hand back words that
+    /// are no longer there.
+    pub fn picked_text(&self) -> Option<String> {
+        let picked = self.picked_lines?;
+        let (from, to) = picked.ordered();
+        let lines: Vec<&str> = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (from..=to).contains(index))
+            .map(|(_, line)| line.said())
+            .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let text = lines.join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// Points the panel at a project, reading its `agents.toml`.
     ///
     /// The worker is left alone when the root has not changed: a conversation survives
