@@ -56,11 +56,31 @@ cargo run -p ide-agents --example acp_probe -- "docker exec -i hermes-agent herm
 3. **`docs` в `_meta` и `Notice`/`Compaction*`** — то, что стоит начать читать стандартно, но с оговоркой:
    наш агент их не шлёт, поэтому распознавание сводки по тексту убирать нельзя.
 
+
+## Замер на настоящем Hermes (`hermes-agent 0.22.5`, 2026-11-01)
+
+Одна реплика, полный протокол, 11 строк вывода:
+
+- `initialize` → `protocolVersion: 1`, `agentInfo: hermes-agent 0.22.5`,
+  `loadSession: true`, `promptCapabilities: {image: true}`,
+  `sessionCapabilities: {list, resume}` — то есть **и список разговоров, и продолжение разговора в
+  стандарте есть**, и наш слой их уже использует (`session/list`, `session/load`).
+- `authMethods`: `nous` (credentials) и `hermes-setup` (`--setup`) — панель их никак не показывает.
+- `available_commands_update` — 14 команд, с `input.hint` у тех, что просят довод.
+- **`session_info_update` с заголовком разговора** — и агент переписывает его по ходу («Ответь одним
+  словом: проба» → «Проба»). У нас для этого свой склад (`session_names`) и своя кнопка переименования;
+  стандарт предлагает и то, и другое на проводе.
+- `agent_message_chunk` несёт `messageId` — поля, которого наш разбор не знает.
+- `usage_update {used: 25948, size: 1048576}` — настоящие числа контекста.
+- `PromptResponse.stop_reason: EndTurn`.
+
+Чего в коротком ходе не было: `_meta.sessionProvenance` (приходит со сжатием), `Notice`,
+`CompactionUpdate`. Поэтому распознавание сводки по форме текста остаётся до отдельного замера на сжатии.
+
 ## Открытые вопросы
 
-- Проба на **настоящем** Hermes (`docker exec -i hermes-agent hermes acp`): одна короткая реплика, чтобы
-  увидеть настоящие `_meta`, `sessionProvenance`, состав `availableCommands` и поведение при сжатии.
-  Заглушка — наша собственная выдумка, и таблица, снятая только с неё, рискует быть таблицей о себе.
+- ~~Проба на настоящем Hermes~~ — сделана (см. выше). Осталась проба **на сжатии**: иначе состав
+  `_meta.sessionProvenance` и наличие `CompactionUpdate` у нашего агента неизвестны.
 - Реплики заглушки `ask`, `read`, `write`, `slow`, `die` — ими добираются дозволение, файлы, отмена и
   падение.
 - Что SDK делает с запросом, для которого у клиента нет обработчика (наш случай для `fs`/`terminal`):
