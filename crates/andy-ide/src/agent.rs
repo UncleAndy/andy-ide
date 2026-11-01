@@ -550,6 +550,16 @@ impl Default for AgentState {
     }
 }
 
+/// What a person saw next to a value they chose: the option's own title, because a machine value
+/// (`choice-2`) says nothing to a reader coming back to the conversation. A value with no title of its own
+/// is shown as it is — better than showing nothing.
+fn words_of<'a>(mut options: impl Iterator<Item = (&'a str, &'a str)>, value: &str) -> String {
+    options
+        .find(|(candidate, _)| *candidate == value)
+        .map(|(_, title)| title.to_owned())
+        .unwrap_or_else(|| value.to_owned())
+}
+
 impl AgentState {
     /// Points the panel at a project, reading its `agents.toml`.
     ///
@@ -1103,7 +1113,19 @@ impl AgentState {
         // comes back to a conversation for: keep the question and the answer in it. Written in the panel's
         // own tone for its own rows (`model: …`, `mode: …`), so it never reads as the agent's words.
         let chosen = match &values {
-            Some(values) if !values.is_empty() => values.join(", "),
+            Some(values) if !values.is_empty() => values
+                .iter()
+                .map(|value| {
+                    words_of(
+                        request
+                            .options
+                            .iter()
+                            .map(|offer| (offer.value.as_str(), offer.title.as_str())),
+                        value,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
             _ => "nothing".to_owned(),
         };
         self.transcript
@@ -1280,12 +1302,29 @@ impl AgentState {
 
     /// Answers the question the agent is waiting on.
     pub fn answer(&mut self, option: Option<String>) {
-        let Some((id, _)) = self.asking.take() else {
+        let Some((id, request)) = self.asking.take() else {
             return;
         };
         let Some(worker) = &self.worker else {
             return;
         };
+        // The card leaves no trace of itself once it is answered, so the question and the answer are kept
+        // here — in the panel's own tone for its own rows. Andy's report: after answering, the conversation
+        // showed neither what was asked nor what was chosen. This is the path the `clarify` card takes;
+        // `answer_choice` is the other one, for a question of several answers.
+        let title = request.title().to_owned();
+        let chosen = match &option {
+            Some(value) => words_of(
+                request
+                    .options
+                    .iter()
+                    .map(|offer| (offer.option_id.as_str(), offer.name.as_str())),
+                value,
+            ),
+            None => "nothing".to_owned(),
+        };
+        self.transcript
+            .push(Line::Note(format!("asked «{title}»; chose {chosen}")));
         let _ = worker.commands.send(Command::Permission { id, option });
         self.status = "answered".to_owned();
     }
@@ -1467,8 +1506,14 @@ impl AgentState {
                     self.agent_line_open = false;
                 }
                 AgentEvent::ToolCall { title, status, .. } => {
-                    self.transcript
-                        .push(Line::Tool(format!("{title} ({status})")));
+                    // An update that carries only a new status has no title of its own, and a row for it
+                    // said nothing but "(completed)" — the empty lines Andy found under the question. The
+                    // question is a row of its own already, and the answer is kept when the card is
+                    // answered, so nothing is lost by leaving these out.
+                    if !title.trim().is_empty() {
+                        self.transcript
+                            .push(Line::Tool(format!("{title} ({status})")));
+                    }
                     self.agent_line_open = false;
                 }
                 AgentEvent::Plan(steps) => {

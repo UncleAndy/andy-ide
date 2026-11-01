@@ -7082,6 +7082,16 @@ mod the_agent_panel {
         wait(&mut gui, "the answer to the question", |gui| {
             answer(gui) == "allowed"
         });
+        // The question and the answer stay in the conversation: the card itself vanishes when it is
+        // answered, and Andy could not find either of them afterwards.
+        assert!(
+            gui.app().state.agent.transcript.iter().any(|line| matches!(
+                line,
+                Line::Note(text) if text.contains("asked") && text.contains("chose")
+            )),
+            "the question and the answer are not kept in the conversation: {:?}",
+            gui.app().state.agent.transcript
+        );
         assert!(
             gui.app().state.agent.asking.is_none(),
             "the question stayed after it was answered"
