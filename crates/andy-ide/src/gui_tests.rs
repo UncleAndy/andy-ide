@@ -7042,6 +7042,15 @@ mod the_agent_panel {
             "the two ends of the drag are the same line: {picked:?}"
         );
 
+        // The row of facts says it too, so that a person can see the panel's own selection without
+        // opening a menu.
+        assert!(
+            gui.harness
+                .query_by_label_contains("lines picked")
+                .is_some(),
+            "the row of facts does not say what is picked out"
+        );
+
         let copied = copy_with_ctrl_insert(&mut gui).expect("Ctrl+Insert copied nothing");
         assert!(
             copied.contains("Hello"),

@@ -821,6 +821,18 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                 break 'facts;
             }
             ui.label(elapsed);
+            // What is picked out in the conversation, said in the row of facts as well as in the menu:
+            // a selection the panel keeps itself is otherwise invisible — the highlight looks much like
+            // any other, and a person reading the panel cannot tell the two apart.
+            if let Some(picked) = state.agent.picked_lines {
+                let (from, to) = picked.ordered();
+                let picked_note = format!("{} lines picked", to - from + 1);
+                if !room_for(ui, &picked_note) {
+                    dropped = true;
+                    break 'facts;
+                }
+                ui.label(picked_note);
+            }
             if state.agent.busy {
                 // A running timer has to be repainted to move, and the panel is otherwise
                 // idle while an answer is coming.
@@ -1219,90 +1231,89 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             .show(ui, |ui| {
                 state.agent.line_rects.clear();
                 for (index, line) in lines.iter().enumerate() {
-                    let top = ui.cursor().top();
-                    match line {
-                        Line::You(text) => {
-                            // The request is a block of its own, square and set in bold: an answer
-                            // is read against the question, and the question has to be findable by
-                            // looking rather than by reading.
-                            // A shade above the panel and square corners, so that the question and
-                            // the answer are two things and not one column of words — the shade and
-                            // the edge from the theme, against the words of the person, which are
-                            // drawn from the theme as well.
-                            egui::Frame::group(ui.style())
-                                .corner_radius(0)
-                                .inner_margin(egui::Margin::symmetric(8, 5))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    super::markdown::bold_label_in(
+                    let drawn = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
+                        match line {
+                            Line::You(text) => {
+                                // The request is a block of its own, square and set in bold: an answer
+                                // is read against the question, and the question has to be findable by
+                                // looking rather than by reading.
+                                // A shade above the panel and square corners, so that the question and
+                                // the answer are two things and not one column of words — the shade and
+                                // the edge from the theme, against the words of the person, which are
+                                // drawn from the theme as well.
+                                egui::Frame::group(ui.style())
+                                    .corner_radius(0)
+                                    .inner_margin(egui::Margin::symmetric(8, 5))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        super::markdown::bold_label_in(
+                                            ui,
+                                            text,
+                                            true,
+                                            request_text(ui),
+                                        );
+                                    });
+                                ui.add_space(2.0);
+                            }
+                            Line::Agent(text) => {
+                                ui.horizontal(|ui| {
+                                    ui.strong("Agent");
+                                });
+                                // An id of its own per answer, from its place in the conversation:
+                                // several answers share the panel's ui, and a Grid under a shared
+                                // id is what egui answers with "Second use of GRID ID …" over the
+                                // block.
+                                //
+                                // The body is drawn in `answer_ink`, one step brighter than the theme's
+                                // ordinary text: a markdown paragraph lays its glyphs with
+                                // `Color32::PLACEHOLDER` sections, and what those glyphs look like is
+                                // decided by the text colour of the ui (`epaint/tessellator.rs`: a
+                                // placeholder becomes the fallback colour of the shape).
+                                ui.scope(|ui| {
+                                    ui.visuals_mut().widgets.noninteractive.fg_stroke.color =
+                                        answer_ink(ui);
+                                    super::markdown::answer(
                                         ui,
+                                        &mut state.commonmark,
+                                        egui::Id::new(("agent-answer", index)),
                                         text,
-                                        true,
-                                        request_text(ui),
                                     );
                                 });
-                            ui.add_space(2.0);
+                            }
+                            Line::Thinking(thought) => {
+                                // The id is the block's place in the conversation, not the length
+                                // of what was thought: a restored conversation holds thoughts of
+                                // equal length, and a thought being written changes length with
+                                // every chunk — two blocks on one id is what egui draws its warning
+                                // box over (red frames over the transcript after a session is
+                                // restored, and a box that flickers while an answer streams).
+                                egui::CollapsingHeader::new("Thinking…")
+                                    .id_salt(("thinking", index))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        ui.weak(thought);
+                                    });
+                            }
+                            Line::Tool(text) => {
+                                ui.weak(format!("  ↳ {text}"));
+                            }
+                            Line::Note(text) => {
+                                ui.colored_label(egui::Color32::from_rgb(200, 120, 90), text);
+                            }
+                            Line::Notice { kind, text } => {
+                                // A service row of the conversation: the weak aside the panel gives
+                                // the business of the agent, with the kind of the row under the
+                                // pointer. Never a block, because it is not the words of the person.
+                                ui.weak(format!("  ↳ {text}"))
+                                    .on_hover_text(format!("service row: {kind}"));
+                            }
                         }
-                        Line::Agent(text) => {
-                            ui.horizontal(|ui| {
-                                ui.strong("Agent");
-                            });
-                            // An id of its own per answer, from its place in the conversation:
-                            // several answers share the panel's ui, and a Grid under a shared
-                            // id is what egui answers with "Second use of GRID ID …" over the
-                            // block.
-                            //
-                            // The body is drawn in `answer_ink`, one step brighter than the theme's
-                            // ordinary text: a markdown paragraph lays its glyphs with
-                            // `Color32::PLACEHOLDER` sections, and what those glyphs look like is
-                            // decided by the text colour of the ui (`epaint/tessellator.rs`: a
-                            // placeholder becomes the fallback colour of the shape).
-                            ui.scope(|ui| {
-                                ui.visuals_mut().widgets.noninteractive.fg_stroke.color =
-                                    answer_ink(ui);
-                                super::markdown::answer(
-                                    ui,
-                                    &mut state.commonmark,
-                                    egui::Id::new(("agent-answer", index)),
-                                    text,
-                                );
-                            });
-                        }
-                        Line::Thinking(thought) => {
-                            // The id is the block's place in the conversation, not the length
-                            // of what was thought: a restored conversation holds thoughts of
-                            // equal length, and a thought being written changes length with
-                            // every chunk — two blocks on one id is what egui draws its warning
-                            // box over (red frames over the transcript after a session is
-                            // restored, and a box that flickers while an answer streams).
-                            egui::CollapsingHeader::new("Thinking…")
-                                .id_salt(("thinking", index))
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.weak(thought);
-                                });
-                        }
-                        Line::Tool(text) => {
-                            ui.weak(format!("  ↳ {text}"));
-                        }
-                        Line::Note(text) => {
-                            ui.colored_label(egui::Color32::from_rgb(200, 120, 90), text);
-                        }
-                        Line::Notice { kind, text } => {
-                            // A service row of the conversation: the weak aside the panel gives
-                            // the business of the agent, with the kind of the row under the
-                            // pointer. Never a block, because it is not the words of the person.
-                            ui.weak(format!("  ↳ {text}"))
-                                .on_hover_text(format!("service row: {kind}"));
-                        }
-                    }
-                    // Where this line was drawn, so that a drag over it can be read back as this
-                    // line: the words themselves are laid out by widgets the panel does not own.
-                    let bottom = ui.cursor().top().max(top + 1.0);
-                    state.agent.line_rects.push(egui::Rect::from_min_max(
-                        egui::pos2(conversation.left(), top),
-                        egui::pos2(conversation.right(), bottom),
-                    ));
+                    });
+                    // Where the line really is, in the window's own coordinates. A `Response::rect` is
+                    // always that; `ui.cursor()` inside a scroll area is not — and a drag read against
+                    // the cursor picked the wrong line the moment the conversation was scrolled, which
+                    // is why the panel's own selection came and went while a hand dragged over it.
+                    state.agent.line_rects.push(drawn.response.rect);
                 }
                 // The panel's own highlight, over the words: a wash thin enough to read through.
                 if let Some(picked) = state.agent.picked_lines {
