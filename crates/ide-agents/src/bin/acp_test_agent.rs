@@ -602,6 +602,25 @@ fn main() {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                let session = params
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                // Hermes puts a switch of model over a large session to the person first; the stand-in mirrors
+                // that when asked to, so the panel's handling of a change that is a question first is covered.
+                if config == "model"
+                    && std::env::var_os("ACP_TEST_CONFIRM_MODEL_SWITCH").is_some()
+                    && !confirm(
+                        &lines_rx,
+                        &mut next_id,
+                        &session,
+                        "Large Context Switch Warning",
+                    )
+                {
+                    answer_error(id, "the switch was cancelled");
+                    continue;
+                }
                 match config {
                     "model" => model = value,
                     "reasoning_effort" => effort = value,
@@ -612,11 +631,6 @@ fn main() {
                 // update, so a panel hears about the change twice. The stand-in must do both or the panel's
                 // reading of that broadcast — which is where a frozen model read as a switch back — goes
                 // untested.
-                let session = params
-                    .and_then(|params| params.get("sessionId"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
                 send(json!({
                     "jsonrpc": "2.0",
                     "method": "session/update",
@@ -634,6 +648,23 @@ fn main() {
                 );
             }
             "session/set_model" => {
+                let session = message
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if std::env::var_os("ACP_TEST_CONFIRM_MODEL_SWITCH").is_some()
+                    && !confirm(
+                        &lines_rx,
+                        &mut next_id,
+                        &session,
+                        "Large Context Switch Warning",
+                    )
+                {
+                    answer_error(id, "the switch was cancelled");
+                    continue;
+                }
                 if let Some(chosen) = message
                     .get("params")
                     .and_then(|params| params.get("modelId"))
@@ -1059,6 +1090,44 @@ fn wait_for_answer(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> Option
 fn answer(id: Option<Value>, result: Value) {
     let Some(id) = id else { return };
     send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+}
+
+/// Answers one of the client's requests with a refusal.
+fn answer_error(id: Option<Value>, message: &str) {
+    let Some(id) = id else { return };
+    send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": message}}));
+}
+
+/// Puts a switch of model to the person, the way Hermes does over a large session, and reads the answer.
+///
+/// True when they allowed it. The request's own shape is Hermes's: an `other` tool call whose title is the
+/// warning, with `allow_once` / `reject_once` named "Switch anyway" and "Cancel".
+fn confirm(
+    lines: &std::sync::mpsc::Receiver<String>,
+    next_id: &mut u64,
+    session: &str,
+    title: &str,
+) -> bool {
+    *next_id += 1;
+    let asked = *next_id;
+    request(
+        asked,
+        "session/request_permission",
+        json!({
+            "sessionId": session,
+            "toolCall": {"toolCallId": "model-confirm", "title": title, "kind": "other"},
+            "options": [
+                {"optionId": "allow_once", "name": "Switch anyway", "kind": "allow_once"},
+                {"optionId": "deny", "name": "Cancel", "kind": "reject_once"}
+            ]
+        }),
+    );
+    wait_for_answer(lines, asked)
+        .and_then(|value| value.get("outcome").cloned())
+        .and_then(|outcome| outcome.get("optionId").cloned())
+        .and_then(|option| option.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("allow_once")
 }
 
 /// One line out.

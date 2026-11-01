@@ -1752,24 +1752,25 @@ fn work(
                 let _ = session.answer_choice(id, &field, multiple, values.as_deref());
             }
             Ok(Command::Model(model)) => {
-                if let Err(error) = session.set_model(&model)
+                // Asked, not waited on: the answer arrives through the event queue as a `Setup`, and a switch of
+                // model over a large session is confirmed by hand first (`session/request_permission`) — a
+                // worker that sat waiting here could neither show the card nor carry the answer back.
+                if let Err(error) = session.ask_model(&model)
                     && !replies.send(Reply::Event(AgentEvent::Failed(format!(
                         "the agent would not switch model: {error}"
                     ))))
                 {
                     return;
                 }
-                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
             Ok(Command::Setting { config, value }) => {
-                if let Err(error) = session.set_option(&config, &value)
+                if let Err(error) = session.ask_option(&config, &value)
                     && !replies.send(Reply::Event(AgentEvent::Failed(format!(
                         "the agent would not change {config}: {error}"
                     ))))
                 {
                     return;
                 }
-                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
             Ok(Command::Fresh) => match session.begin() {
                 Ok(()) => {
@@ -1821,14 +1822,13 @@ fn work(
                 let _ = session.cancel();
             }
             Ok(Command::Mode(mode)) => {
-                if let Err(error) = session.set_mode(&mode)
+                if let Err(error) = session.ask_mode(&mode)
                     && !replies.send(Reply::Event(AgentEvent::Failed(format!(
                         "the agent would not switch mode: {error}"
                     ))))
                 {
                     return;
                 }
-                let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,

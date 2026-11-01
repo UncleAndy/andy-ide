@@ -294,7 +294,9 @@ enum Order {
         /// What is being changed.
         what: Change,
         /// Where the settings the agent read back go.
-        done: std::sync::mpsc::Sender<anyhow::Result<Vec<ConfigOption>>>,
+        /// Where the settings the agent read back go, when a caller waits for them; `None` when the
+        /// change is the connection's own task and its answer comes through the event queue instead.
+        done: Option<std::sync::mpsc::Sender<anyhow::Result<Vec<ConfigOption>>>>,
     },
     /// The panel opens a conversation: a fresh one, or the one it names.
     Open {
@@ -669,17 +671,17 @@ impl Session {
     /// there is no standard road, it is written into the record when it is taken, and it retires itself the
     /// day the agent offers the setting.
     pub fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
-        if let Some(setting) = model_setting(&self.state.options).map(|setting| setting.id.clone())
-        {
-            let options = self.change(Change::Setting {
-                config: setting.clone(),
-                value: model.to_owned(),
-            })?;
-            self.settings_taken(&setting, model, options);
-        } else if !self.state.models.is_empty() {
-            self.change(Change::Model(model.to_owned()))?;
-        } else {
-            anyhow::bail!("this agent offers no way to change the model");
+        match self.model_road(model)? {
+            Change::Setting { config, value } => {
+                let options = self.change(Change::Setting {
+                    config: config.clone(),
+                    value,
+                })?;
+                self.settings_taken(&config, model, options);
+            }
+            road => {
+                self.change(road)?;
+            }
         }
         // Only after the agent agreed — and to what it read back, not to what was asked of it. An agent
         // that answers with its settings has said which model it now holds; one that answers without them
@@ -690,11 +692,61 @@ impl Session {
         Ok(())
     }
 
+    /// Asks for a model without waiting: the panel's road.
+    ///
+    /// The change runs on the connection and its answer comes back through the event queue as a `Setup`, so
+    /// the worker stays free to carry what the agent says meanwhile to the panel. That matters for a switch of
+    /// model over a large session, which the agent first puts to the person (`session/request_permission`): a
+    /// worker that sat waiting could neither show the card nor carry the answer back, and the switch would
+    /// never happen.
+    pub fn ask_model(&mut self, model: &str) -> anyhow::Result<()> {
+        let road = self.model_road(model)?;
+        self.ask(road)
+    }
+
+    /// The road a model change takes: the standard's setting when the agent offers one, the agent's own
+    /// method otherwise.
+    fn model_road(&self, model: &str) -> anyhow::Result<Change> {
+        if let Some(setting) = model_setting(&self.state.options) {
+            Ok(Change::Setting {
+                config: setting.id.clone(),
+                value: model.to_owned(),
+            })
+        } else if !self.state.models.is_empty() {
+            Ok(Change::Model(model.to_owned()))
+        } else {
+            anyhow::bail!("this agent offers no way to change the model")
+        }
+    }
+
+    /// Asks for one of the settings the agent offers, without waiting: the panel's road.
+    pub fn ask_option(&mut self, config: &str, value: &str) -> anyhow::Result<()> {
+        self.ask(Change::Setting {
+            config: config.to_owned(),
+            value: value.to_owned(),
+        })
+    }
+
+    /// Asks for another mode, without waiting: the panel's road.
+    pub fn ask_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+        self.ask(Change::Mode(mode.to_owned()))
+    }
+
+    /// Hands the connection a change to make on a task of its own, and does not wait for it.
+    fn ask(&self, what: Change) -> anyhow::Result<()> {
+        self.orders
+            .unbounded_send(Order::Change { what, done: None })
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
     /// Asks the connection to change a setting and waits for the agent's own settings back.
     fn change(&mut self, what: Change) -> anyhow::Result<Vec<ConfigOption>> {
         let (done, answer) = std::sync::mpsc::channel();
         self.orders
-            .unbounded_send(Order::Change { what, done })
+            .unbounded_send(Order::Change {
+                what,
+                done: Some(done),
+            })
             .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))?;
         answer
             .recv_timeout(ANSWER)
@@ -1120,59 +1172,92 @@ async fn converse(
                         }
                     }
                     Order::Change { what, done } => {
-                        // The record the panel reads between updates follows the change too: an agent that
-                        // names its models in a field of its own sends no update for them, and the next
-                        // broadcast about some other setting would otherwise rebuild the state from the
-                        // model of the session's first breath — read in the panel as a switch back.
-                        let mut chosen: Option<String> = None;
-                        let outcome = match what {
-                            Change::Mode(mode) => cx
-                                .send_request(SetSessionModeRequest::new(opened.clone(), mode))
-                                .block_task()
-                                .await
-                                .map(|_| Vec::new())
-                                .map_err(|error| anyhow::anyhow!("{error}")),
-                            Change::Model(model) => {
-                                // Written down as it goes: an agent's own method is not the standard's, and
-                                // whoever reads the record afterwards is the one who needs to know which road
-                                // was taken — and to see the day it stops being taken.
-                                wire.note(&format!(
-                                    "the model is being changed with the agent's own method \
-                                     (session/set_model), because it offers no setting for it: {model}"
-                                ));
-                                chosen = Some(model.clone());
-                                cx.send_request(SetModelRaw {
-                                    session_id: opened.clone(),
-                                    model_id: model,
-                                })
-                                .block_task()
-                                .await
-                                .map(|_| Vec::new())
-                                .map_err(|error| anyhow::anyhow!("{error}"))
+                        // The change runs as a task of the loop's own and not on the loop itself: a switch of
+                        // model over a large session is put to the person first (`session/request_permission`),
+                        // and a loop sitting on the change could not carry their answer back to the agent.
+                        let fresh = cx.clone();
+                        let target = opened.clone();
+                        let events = events.clone();
+                        let settings = Arc::clone(&settings);
+                        let wire = Arc::clone(&wire);
+                        cx.spawn(async move {
+                            let mut chosen: Option<String> = None;
+                            let outcome = match what {
+                                Change::Mode(mode) => fresh
+                                    .send_request(SetSessionModeRequest::new(target.clone(), mode))
+                                    .block_task()
+                                    .await
+                                    .map(|_| Vec::new())
+                                    .map_err(|error| anyhow::anyhow!("{error}")),
+                                Change::Model(model) => {
+                                    // Written down as it goes: an agent's own method is not the standard's, and
+                                    // whoever reads the record afterwards is the one who needs to know which road
+                                    // was taken — and to see the day it stops being taken.
+                                    wire.note(&format!(
+                                        "the model is being changed with the agent's own method \
+                                         (session/set_model), because it offers no setting for it: {model}"
+                                    ));
+                                    chosen = Some(model.clone());
+                                    fresh
+                                        .send_request(SetModelRaw {
+                                            session_id: target.clone(),
+                                            model_id: model,
+                                        })
+                                        .block_task()
+                                        .await
+                                        .map(|_| Vec::new())
+                                        .map_err(|error| anyhow::anyhow!("{error}"))
+                                }
+                                Change::Setting { config, value } => fresh
+                                    .send_request(SetSessionConfigOptionRequest::new(
+                                        target.clone(),
+                                        config,
+                                        SessionConfigOptionValue::value_id(value),
+                                    ))
+                                    .block_task()
+                                    .await
+                                    .map(|answer| options_of(&json_of(&answer)))
+                                    .map_err(|error| anyhow::anyhow!("{error}")),
+                            };
+                            // The record the panel reads between updates follows the change too: an agent that
+                            // names its models in a field of its own sends no update for them, and the next
+                            // broadcast about some other setting would otherwise rebuild the state from the
+                            // model of the session's first breath — read in the panel as a switch back.
+                            if let Ok(options) = &outcome
+                                && let Ok(mut known) = settings.lock()
+                            {
+                                if !options.is_empty() {
+                                    known.options = options.clone();
+                                }
+                                if let Some(model) = chosen {
+                                    known.current_model = Some(model);
+                                }
+                                fill_models(&mut known);
+                                if let Some(mode) = mode_reported_as_a_setting(&known) {
+                                    known.current_mode = Some(mode);
+                                }
                             }
-                            Change::Setting { config, value } => cx
-                                .send_request(SetSessionConfigOptionRequest::new(
-                                    opened.clone(),
-                                    config,
-                                    SessionConfigOptionValue::value_id(value),
-                                ))
-                                .block_task()
-                                .await
-                                .map(|answer| options_of(&json_of(&answer)))
-                                .map_err(|error| anyhow::anyhow!("{error}")),
-                        };
-                        if let Ok(options) = &outcome
-                            && let Ok(mut known) = settings.lock()
-                        {
-                            if !options.is_empty() {
-                                known.options = options.clone();
+                            match done {
+                                Some(done) => {
+                                    let _ = done.send(outcome);
+                                }
+                                None => {
+                                    let said = match outcome {
+                                        Ok(_) => settings
+                                            .lock()
+                                            .ok()
+                                            .map(|known| Event::Setup(known.clone())),
+                                        Err(error) => Some(Event::Failed(format!(
+                                            "the agent would not take the change: {error}"
+                                        ))),
+                                    };
+                                    if let Some(said) = said {
+                                        let _ = events.send(said);
+                                    }
+                                }
                             }
-                            if let Some(model) = chosen {
-                                known.current_model = Some(model);
-                            }
-                            fill_models(&mut known);
-                        }
-                        let _ = done.send(outcome);
+                            Ok(())
+                        })?;
                     }
                     Order::Open { session, done } => {
                         let outcome = match session {

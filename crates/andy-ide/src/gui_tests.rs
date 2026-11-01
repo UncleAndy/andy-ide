@@ -7099,6 +7099,54 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_switch_of_model_over_a_large_session_is_a_question_first() {
+        // Hermes guards a switch of model on a large session with a permission request
+        // (`model.switch_context_confirm_tokens`), and changes nothing until the person allows it. A panel
+        // whose worker sat waiting on the change could not show the card — and the switch hung forever.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_CONFIRM_MODEL_SWITCH", "1")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent with its models", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+                && gui.app().state.agent.models.len() == 4
+        });
+        let opening = gui.app().state.agent.current_model.clone();
+
+        // The switch is a question first: nothing changes until it is answered.
+        gui.app_mut().state.agent.set_model("openai/gpt-5");
+        gui.settle();
+        wait(&mut gui, "the question about the switch", |gui| {
+            gui.app().state.agent.asking.is_some()
+        });
+        assert!(
+            gui.harness.query_by_label("Switch anyway").is_some(),
+            "the confirmation is not on screen with its options"
+        );
+        assert_eq!(
+            gui.app().state.agent.current_model.clone(),
+            opening,
+            "the model changed before the switch was allowed"
+        );
+
+        // Allowed: now it changes, and it is said in the conversation.
+        gui.harness.get_by_label("Switch anyway").click();
+        wait(&mut gui, "the model switching", |gui| {
+            gui.app().state.agent.current_model.as_deref() == Some("openai/gpt-5")
+        });
+        assert_eq!(
+            switches(&gui).last().map(String::as_str),
+            Some("model: OpenAI \u{b7} GPT-5"),
+            "the switch was not said in the conversation: {:?}",
+            switches(&gui)
+        );
+    }
+
+    #[test]
     fn the_agent_can_ask_the_person_to_choose_a_variant() {
         // ACP's elicitation: the agent cannot decide which way to go, offers variants,
         // and waits. The panel draws them as buttons and sends back the value, not the
