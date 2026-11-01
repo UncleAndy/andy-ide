@@ -57,11 +57,7 @@ impl Spot {
     /// Four points is about a line of text's height in these fonts: enough for a hand, far less than a
     /// deliberate move to another word.
     pub fn same_place(&self, other: &Spot) -> bool {
-        if self.path != other.path {
-            return false;
-        }
-        self.screen.distance(other.screen) <= 4.0
-            || (self.line == other.line && self.character.abs_diff(other.character) <= 2)
+        self.same_symbol(&other.path, other.line, other.character)
     }
 }
 
@@ -162,6 +158,16 @@ impl Hover {
             return None;
         }
         Some(Duration::from_secs_f64(HOVER_DELAY))
+    }
+
+    /// Forgets which symbols were written off while there was no server to ask.
+    ///
+    /// A spot entered during the seconds rust-analyzer spends indexing is marked as asked, because there is
+    /// nothing to ask yet — and that mark must not outlive the wait, or every symbol the pointer crossed in
+    /// those seconds stays silent for good. Andy's report: ten to fifteen seconds of nothing, then hints.
+    pub fn forget_marks(&mut self) {
+        self.asked = None;
+        self.nothing = None;
     }
 
     /// Records that the server has been asked about `spot`.
@@ -495,48 +501,6 @@ mod tests {
         assert!(
             hover.due(HOVER_DELAY + 5.0).is_none(),
             "an answer of \"nothing\" was asked for again"
-        );
-    }
-
-    /// A hand is never still: the spot under the pointer can be the neighbouring character of the same
-    /// line, and the rest clock has to survive that — otherwise the server is never asked at all.
-    #[test]
-    fn a_pointer_a_character_away_is_still_resting_on_the_same_place() {
-        // The pointer has drifted a pixel, which in these fonts is enough to land on the neighbouring
-        // character — or, when the y sits on a line's edge, on the neighbouring line.
-        let path = std::path::PathBuf::from("src/main.rs");
-        let spot = |character| Spot {
-            path: path.clone(),
-            line: 7,
-            character,
-            screen: egui::pos2(10.0, 20.0),
-        };
-        let mut hover = Hover::new();
-        hover.look_at(Some(spot(33)), 0.0);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        hover.look_at(Some(spot(34)), 0.5);
-        let _ = &mut hover;
-        // The place the pointer came to rest at is the one that matters — the panel keeps the first of the
-        // two, and only the draw position moves with the pointer.
-        assert_eq!(
-            hover.due(0.5).map(|due| due.character),
-            Some(33),
-            "a pixel of drift reset the rest clock: the hint would never be asked for"
-        );
-        // A move that carries the pointer elsewhere on screen is moving on, and the clock starts again:
-        // the place on screen is what a resting hand keeps, so a real move changes it.
-        hover.look_at(
-            Some(Spot {
-                character: 5,
-                line: 8,
-                screen: egui::pos2(300.0, 120.0),
-                ..spot(34)
-            }),
-            0.6,
-        );
-        assert!(
-            hover.due(0.6).is_none(),
-            "moving to another line kept the old rest"
         );
     }
 

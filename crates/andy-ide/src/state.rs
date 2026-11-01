@@ -131,6 +131,9 @@ pub struct AppState {
     /// Whether the hints that follow the pointer are on: the switch lives in the
     /// View menu, and with it off the pointer is not watched at all.
     pub hints: bool,
+    /// Whether the last look at the hover path found no language server: a symbol entered then was written
+    /// off as unanswerable, and the mark is taken back when the server appears.
+    hover_was_held: bool,
     /// Whether the editor tab was drawn this frame: the hint belongs to the text under
     /// the pointer, and there is no such text while the panel is off screen.
     pub(crate) editor_drawn: bool,
@@ -220,6 +223,7 @@ impl AppState {
             symbols: crate::ui::symbols::SymbolSearch::new(),
             hover: crate::ui::hover::Hover::new(),
             hints: true,
+            hover_was_held: false,
             editor_drawn: false,
             blame: None,
             rename: crate::ui::rename::Rename::new(),
@@ -489,7 +493,12 @@ impl AppState {
             self.hover.forget();
             return None;
         }
-        self.hover.forget_if_modal(self.modal_open());
+        // What takes the hint away is a window *over* the editor: the pointer is on that window, and the text
+        // underneath it is not what it is on. A panel *beside* the editor — the file preview — is not such a
+        // window: hovering the code with the preview open left no hints at all, because `forget()` ran every
+        // frame and the spot was then placed anew, each time as a fresh arrival whose rest clock had just
+        // started. Andy's report, found with `ANDY_IDE_HOVER_PROBE` (`modal preview`, `rest 0.00s`).
+        self.hover.forget_if_modal(self.covers_the_editor());
         // The pointer is on the hint, which floats over the text. The text under it is
         // not what the pointer is on, so nothing is asked about it: asking replaced the
         // answer being read with the answer about a symbol hidden behind the hint.
@@ -509,8 +518,10 @@ impl AppState {
             return self.hover.wait().or_else(|| self.hover.leaving_in(now));
         };
         if !self.start_server_for(&spot.path) {
-            // Without a server there is nothing to ask; the spot is remembered as
-            // answered so the question is not repeated every frame.
+            // Nothing to ask yet — the server is still coming up (rust-analyzer indexes the crate for the
+            // first ten seconds or so). The spot is marked so the question is not repeated every frame, and
+            // that mark is taken back the moment the server appears (`forget_marks`), or every symbol the
+            // pointer crossed while loading would stay silent for good — which is what Andy saw.
             self.hover.asked(spot);
             return None;
         }
@@ -865,13 +876,37 @@ impl AppState {
     }
 
     /// Whether something is on top of the editor that the pointer is really over.
-    fn modal_open(&self) -> bool {
+    /// Which of the windows that cover the editor is open, by name — for the `ANDY_IDE_HOVER_PROBE` run.
+    /// "A modal takes the hint away" is right for a dialogue over the editor and wrong for a panel beside it,
+    /// and the difference is invisible from the outside: what shows is a hint that never appears.
+    pub fn modal_reason(&self) -> &'static str {
+        if self.results.open {
+            "search results"
+        } else if self.symbols.open {
+            "symbols"
+        } else if self.quick_open.open {
+            "quick open"
+        } else if self.rename.open {
+            "rename"
+        } else if self.prompt.is_some() {
+            "prompt"
+        } else if self.preview_open {
+            "preview"
+        } else {
+            "none"
+        }
+    }
+
+    /// Whether a window stands *over* the editor, hiding the text under the pointer.
+    ///
+    /// Narrower than [`Self::modal_open`], which also counts the panel beside the editor: a hint about the
+    /// code must not be taken away by a panel that is not on top of it.
+    fn covers_the_editor(&self) -> bool {
         self.results.open
             || self.symbols.open
             || self.quick_open.open
             || self.rename.open
             || self.prompt.is_some()
-            || self.preview_open
     }
 
     /// Remembers whether the window is maximized.
@@ -1376,7 +1411,13 @@ impl AppState {
         self.ensure_lsp(path);
         if self.lsp.is_none() {
             self.status = self.lsp_status.clone();
+            self.hover_was_held = true;
             return false;
+        }
+        // The server has just appeared: the symbols written off while it was loading may be asked about now.
+        if self.hover_was_held {
+            self.hover_was_held = false;
+            self.hover.forget_marks();
         }
         // Whatever is already open has to be announced: the server was not there
         // when those tabs were opened.

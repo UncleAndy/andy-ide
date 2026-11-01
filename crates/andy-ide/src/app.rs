@@ -1,6 +1,7 @@
 //! The application: dock layout, menu bar, status bar.
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabInsert, TabPath};
@@ -12,6 +13,13 @@ use crate::ui::{Place, Tab, Viewer};
 const LAYOUT_SERIALIZE_SECS: f64 = 0.5;
 
 /// The window's contents.
+/// How often the symbol under the pointer changed, and how often the place vanished, between two lines of
+/// the `ANDY_IDE_HOVER_PROBE` run: a place that vanishes for a single frame is invisible between prints, and
+/// it is what resets the rest clock.
+static PROBE_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static PROBE_CHANGES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static PROBE_GAPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub struct App {
     pub(crate) state: AppState,
     pub(crate) dock: DockState<Tab>,
@@ -359,10 +367,31 @@ impl App {
         // enough to see the pointer leave.
         let probing = std::env::var_os("ANDY_IDE_HOVER_PROBE").is_some();
         let over_text = self.state.hover_spot().is_some();
+        // Counters for the probe, and only for it: how often the symbol under the pointer changed, and how
+        // often the place vanished altogether, between two printed lines. Statics rather than fields, because
+        // a diagnostic must not widen the window's state or every place that builds it. A place that vanishes
+        // for a frame is invisible between prints, and it is what resets the rest clock — so it has to be
+        // counted, not guessed at.
+        if probing {
+            let packed = self.state.hover_spot().map_or(u64::MAX, |spot| {
+                (u64::from(spot.line) << 32) | u64::from(spot.character)
+            });
+            let before = PROBE_SEEN.swap(packed, Ordering::Relaxed);
+            if before != u64::MAX && packed != u64::MAX && before != packed {
+                PROBE_CHANGES.fetch_add(1, Ordering::Relaxed);
+            }
+            if before != u64::MAX && packed == u64::MAX {
+                PROBE_GAPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
         if probing && self.frames.is_multiple_of(if over_text { 12 } else { 60 }) {
             eprintln!(
-                "hover probe: hints {} | {}",
+                "hover probe: hints {} | modal {} | changes {} | gaps {} | {}",
                 self.state.hints,
+                self.state.modal_reason(),
+                PROBE_CHANGES.swap(0, Ordering::Relaxed),
+                PROBE_GAPS.swap(0, Ordering::Relaxed),
                 self.state.hover.probe_line(now)
             );
         }
