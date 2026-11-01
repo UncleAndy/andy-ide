@@ -210,7 +210,13 @@ fn waiting_card(
     // little that a couple of answers do not show.
     let floor = CARD_REFUSAL + CARD_GAP + 2.0 * (CARD_MARGIN + CARD_OUTLINE) + 2.0 * CARD_ROW;
     let allowed = (room.height() * CARD_SHARE).max(floor);
-    let window = allowed.min(ui.available_height().max(floor));
+    // Never taller than the room the panel has for it: a card that outgrows the room is a card whose
+    // answers are drawn past the bottom edge, where egui clips them and they take no click. A card
+    // with more answers than fit scrolls them (`agent-question` below).
+    let window = allowed
+        .min(ui.available_height())
+        .min(room.height())
+        .max(CARD_MARGIN * 2.0);
 
     let mut chosen = None;
     // The colours of the card come from the theme, like every other frame of a block in this
@@ -391,7 +397,13 @@ fn choice(ui: &mut Ui, state: &mut AppState) {
             },
         })
         .collect();
-    let room = room_of(state, ui);
+    // What the card may use: the panel less the foot under it — the field and its row come after the
+    // card, and a card drawn to the whole panel would push them both past the edge.
+    let foot = state.agent.field_rect.map_or(60.0, |rect| {
+        rect.height() + ui.spacing().interact_size.y + 6.0
+    });
+    let panel = room_of(state, ui);
+    let room = egui::Rect::from_min_max(panel.min, egui::pos2(panel.max.x, panel.max.y - foot));
     let multiple = request.multiple;
     let (answer, drawn) = waiting_card(
         ui,
@@ -1105,87 +1117,101 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     // grows a line at a time, and the room for that line has to be given up on the frame it is
     // typed, not the one after it.
     let below = state.agent.below + ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-    let height = (ui.available_height() - below).max(60.0);
-    egui::ScrollArea::vertical()
-        .id_salt("agent-transcript")
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .max_height(height)
-        .show(ui, |ui| {
-            for (index, line) in lines.iter().enumerate() {
-                match line {
-                    Line::You(text) => {
-                        // The request is a block of its own, square and set in bold: an answer
-                        // is read against the question, and the question has to be findable by
-                        // looking rather than by reading.
-                        // A shade above the panel and square corners, so that the question and
-                        // the answer are two things and not one column of words — the shade and
-                        // the edge from the theme, against the words of the person, which are
-                        // drawn from the theme as well.
-                        egui::Frame::group(ui.style())
-                            .corner_radius(0)
-                            .inner_margin(egui::Margin::symmetric(8, 5))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                super::markdown::bold_label_in(ui, text, true, request_text(ui));
+    // While the agent waits for an answer the card stands under the conversation, so the conversation
+    // gives up its floor: the question is what has to be answered, and its answers have to be inside
+    // the panel — in a short panel a floor here is exactly the room the answer needs.
+    let waiting = state.agent.asking.is_some() || state.agent.choice.is_some();
+    let floor = if waiting { 0.0 } else { 60.0 };
+    let height = (ui.available_height() - below).max(floor);
+    // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
+    // no room for the conversation must not hand that card a sliver of what the answer needs.
+    if height > 0.0 {
+        egui::ScrollArea::vertical()
+            .id_salt("agent-transcript")
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .max_height(height)
+            .show(ui, |ui| {
+                for (index, line) in lines.iter().enumerate() {
+                    match line {
+                        Line::You(text) => {
+                            // The request is a block of its own, square and set in bold: an answer
+                            // is read against the question, and the question has to be findable by
+                            // looking rather than by reading.
+                            // A shade above the panel and square corners, so that the question and
+                            // the answer are two things and not one column of words — the shade and
+                            // the edge from the theme, against the words of the person, which are
+                            // drawn from the theme as well.
+                            egui::Frame::group(ui.style())
+                                .corner_radius(0)
+                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    super::markdown::bold_label_in(
+                                        ui,
+                                        text,
+                                        true,
+                                        request_text(ui),
+                                    );
+                                });
+                            ui.add_space(2.0);
+                        }
+                        Line::Agent(text) => {
+                            ui.horizontal(|ui| {
+                                ui.strong("Agent");
                             });
-                        ui.add_space(2.0);
-                    }
-                    Line::Agent(text) => {
-                        ui.horizontal(|ui| {
-                            ui.strong("Agent");
-                        });
-                        // An id of its own per answer, from its place in the conversation:
-                        // several answers share the panel's ui, and a Grid under a shared
-                        // id is what egui answers with "Second use of GRID ID …" over the
-                        // block.
-                        //
-                        // The body is drawn in `answer_ink`, one step brighter than the theme's
-                        // ordinary text: a markdown paragraph lays its glyphs with
-                        // `Color32::PLACEHOLDER` sections, and what those glyphs look like is
-                        // decided by the text colour of the ui (`epaint/tessellator.rs`: a
-                        // placeholder becomes the fallback colour of the shape).
-                        ui.scope(|ui| {
-                            ui.visuals_mut().widgets.noninteractive.fg_stroke.color =
-                                answer_ink(ui);
-                            super::markdown::answer(
-                                ui,
-                                &mut state.commonmark,
-                                egui::Id::new(("agent-answer", index)),
-                                text,
-                            );
-                        });
-                    }
-                    Line::Thinking(thought) => {
-                        // The id is the block's place in the conversation, not the length
-                        // of what was thought: a restored conversation holds thoughts of
-                        // equal length, and a thought being written changes length with
-                        // every chunk — two blocks on one id is what egui draws its warning
-                        // box over (red frames over the transcript after a session is
-                        // restored, and a box that flickers while an answer streams).
-                        egui::CollapsingHeader::new("Thinking…")
-                            .id_salt(("thinking", index))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.weak(thought);
+                            // An id of its own per answer, from its place in the conversation:
+                            // several answers share the panel's ui, and a Grid under a shared
+                            // id is what egui answers with "Second use of GRID ID …" over the
+                            // block.
+                            //
+                            // The body is drawn in `answer_ink`, one step brighter than the theme's
+                            // ordinary text: a markdown paragraph lays its glyphs with
+                            // `Color32::PLACEHOLDER` sections, and what those glyphs look like is
+                            // decided by the text colour of the ui (`epaint/tessellator.rs`: a
+                            // placeholder becomes the fallback colour of the shape).
+                            ui.scope(|ui| {
+                                ui.visuals_mut().widgets.noninteractive.fg_stroke.color =
+                                    answer_ink(ui);
+                                super::markdown::answer(
+                                    ui,
+                                    &mut state.commonmark,
+                                    egui::Id::new(("agent-answer", index)),
+                                    text,
+                                );
                             });
-                    }
-                    Line::Tool(text) => {
-                        ui.weak(format!("  ↳ {text}"));
-                    }
-                    Line::Note(text) => {
-                        ui.colored_label(egui::Color32::from_rgb(200, 120, 90), text);
-                    }
-                    Line::Notice { kind, text } => {
-                        // A service row of the conversation: the weak aside the panel gives
-                        // the business of the agent, with the kind of the row under the
-                        // pointer. Never a block, because it is not the words of the person.
-                        ui.weak(format!("  ↳ {text}"))
-                            .on_hover_text(format!("service row: {kind}"));
+                        }
+                        Line::Thinking(thought) => {
+                            // The id is the block's place in the conversation, not the length
+                            // of what was thought: a restored conversation holds thoughts of
+                            // equal length, and a thought being written changes length with
+                            // every chunk — two blocks on one id is what egui draws its warning
+                            // box over (red frames over the transcript after a session is
+                            // restored, and a box that flickers while an answer streams).
+                            egui::CollapsingHeader::new("Thinking…")
+                                .id_salt(("thinking", index))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.weak(thought);
+                                });
+                        }
+                        Line::Tool(text) => {
+                            ui.weak(format!("  ↳ {text}"));
+                        }
+                        Line::Note(text) => {
+                            ui.colored_label(egui::Color32::from_rgb(200, 120, 90), text);
+                        }
+                        Line::Notice { kind, text } => {
+                            // A service row of the conversation: the weak aside the panel gives
+                            // the business of the agent, with the kind of the row under the
+                            // pointer. Never a block, because it is not the words of the person.
+                            ui.weak(format!("  ↳ {text}"))
+                                .on_hover_text(format!("service row: {kind}"));
+                        }
                     }
                 }
-            }
-        });
+            });
+    }
 }
 
 /// The permission question, when the agent is waiting on one.
@@ -1204,7 +1230,13 @@ fn question(ui: &mut Ui, state: &mut AppState) {
             hint: format!("the agent is told: {}", option.option_id),
         })
         .collect();
-    let room = room_of(state, ui);
+    // What the card may use: the panel less the foot under it — the field and its row come after the
+    // card, and a card drawn to the whole panel would push them both past the edge.
+    let foot = state.agent.field_rect.map_or(60.0, |rect| {
+        rect.height() + ui.spacing().interact_size.y + 6.0
+    });
+    let panel = room_of(state, ui);
+    let room = egui::Rect::from_min_max(panel.min, egui::pos2(panel.max.x, panel.max.y - foot));
     let mut none = Vec::new();
     let mut nothing_written = String::new();
     let mut no_focus = false;
