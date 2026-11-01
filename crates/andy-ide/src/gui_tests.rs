@@ -287,9 +287,9 @@ fn a_click_in_the_editor_puts_the_caret_there() {
 
     // The editor is the large area to the right of the tree; the click is aimed
     // at the first character, wherever the rows above the text put it.
-    // (315, 100) is on the first line of this window: the rows above the text
+    // (310, 100) is on the first line of this window: the rows above the text
     // (tab strip, the Preview row when it is drawn) decide where it is.
-    let pos = egui::pos2(315.0, 100.0);
+    let pos = egui::pos2(310.0, 100.0);
     gui.harness.event(egui::Event::PointerMoved(pos));
     gui.harness.event(egui::Event::PointerButton {
         pos,
@@ -332,9 +332,9 @@ fn click_at(harness: &mut Harness<'static, App>, pos: egui::Pos2) {
 #[test]
 fn typing_changes_the_buffer_and_marks_it_modified() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-    // (315, 100) is on the first line of this window: the rows above the text
+    // (310, 100) is on the first line of this window: the rows above the text
     // (tab strip, the Preview row when it is drawn) decide where it is.
-    let pos = egui::pos2(315.0, 100.0);
+    let pos = egui::pos2(310.0, 100.0);
     click_at(&mut gui.harness, pos);
     gui.settle();
 
@@ -1019,9 +1019,9 @@ mod closing_the_window {
 
     fn dirty_window() -> Gui {
         let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
         gui.harness.event(egui::Event::Text("X".to_owned()));
@@ -1158,9 +1158,9 @@ mod navigation_by_mouse {
         let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
         gui.settle();
 
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         ctrl_click_at(&mut gui.harness, pos);
 
         assert_eq!(
@@ -1175,9 +1175,9 @@ mod navigation_by_mouse {
         let mut gui = Gui::new(&[("notes.txt", "alpha\nbeta\n")], Some("notes.txt"));
         gui.settle();
 
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
 
@@ -1508,9 +1508,9 @@ mod blink {
     #[test]
     fn the_caret_blinks_and_comes_back() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
         assert!(caret_lit(&gui), "the caret is dark right after a click");
@@ -1531,9 +1531,9 @@ mod blink {
     #[test]
     fn typing_lights_the_caret_again() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
         advance(&mut gui, 0.7);
@@ -1553,9 +1553,9 @@ mod blink {
     #[test]
     fn a_dark_caret_is_not_drawn() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
         advance(&mut gui, 0.7);
@@ -1581,9 +1581,9 @@ mod blink_repaints {
     #[test]
     fn a_still_caret_asks_for_the_next_frame() {
         let mut gui = Gui::new(&[("a.rs", "hello\n")], Some("a.rs"));
-        // (315, 100) is on the first line of this window: the rows above the text
+        // (310, 100) is on the first line of this window: the rows above the text
         // (tab strip, the Preview row when it is drawn) decide where it is.
-        let pos = egui::pos2(315.0, 100.0);
+        let pos = egui::pos2(310.0, 100.0);
         click_at(&mut gui.harness, pos);
         gui.settle();
         // Nothing moved in the last frame, so only the blink can want a repaint.
@@ -2278,6 +2278,44 @@ mod the_hint {
         assert!(
             !hint_on_screen(&gui, "alpha"),
             "the hint stayed after the pointer left it"
+        );
+    }
+
+    #[test]
+    fn the_hint_does_not_move_when_the_pointer_goes_onto_it() {
+        // The hint is drawn after the spot under the pointer has been read, so the note that the pointer is on
+        // the hint is a frame behind. On that first frame the panel still asked about the text *underneath* and
+        // moved the hint to the spot it found there: a hint that jumps aside the very moment the pointer goes
+        // to scroll it — and whether it jumps at all came down to the panel's geometry.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        let body: String = (0..80)
+            .map(|line| format!("- line {line} of the documentation\n"))
+            .collect();
+        answer(&mut gui, &format!("```text\nalpha\n```\n---\n\n{body}"));
+
+        let before = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint is not on screen");
+        gui.harness.hover_at(before.center());
+        gui.settle();
+        let after = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint went away when the pointer went onto it");
+        assert_eq!(
+            after, before,
+            "the hint moved when the pointer went onto it: {before:?} then {after:?}"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("line 1 of").is_some(),
+            "the hint's answer is gone"
         );
     }
 

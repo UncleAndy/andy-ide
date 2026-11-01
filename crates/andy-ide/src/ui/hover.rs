@@ -258,6 +258,24 @@ impl Hover {
         self.over
     }
 
+    /// Whether the pointer is on the hint as it was last drawn — and a note that it is.
+    ///
+    /// The hint is drawn after the spot under the pointer has been read, so `over`, set once it is drawn, is a
+    /// frame behind. The frame that first brings the pointer onto the hint would otherwise still ask about the
+    /// text *under* it and move the hint to the spot found there: a hint that jumps aside the moment the
+    /// pointer goes to scroll it. Andy's report, and why the panel's geometry decided it — a symbol has to
+    /// happen to sit under the pointer for the jump to show.
+    pub fn pointer_on_the_hint(&mut self, pos: egui::Pos2) -> bool {
+        if self.over {
+            return true;
+        }
+        if self.rect.is_some_and(|rect| rect.contains(pos)) {
+            self.over = true;
+            return true;
+        }
+        false
+    }
+
     /// Where the hint was drawn, if it is on screen: where the pointer has to be for
     /// the hint to stay, and where a test looks for it.
     #[cfg_attr(not(test), allow(dead_code))]

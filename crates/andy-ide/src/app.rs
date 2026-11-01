@@ -264,7 +264,11 @@ impl App {
             ide_core::Theme::Light => egui::Visuals::light(),
         });
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        // Around the whole dock the central panel keeps eight points of margin on every side; four is
+        // enough to hold it off the window's edge without the band of empty space a person reads as the
+        // panel not filling the window.
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(4);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let mut viewer = Viewer {
                 state: &mut self.state,
             };
@@ -351,7 +355,7 @@ impl App {
 
         // The hint is asked for after the editor drew this frame, so the spot the
         // pointer is over is the one on screen, and painted above everything.
-        if let Some(wait) = self.state.track_hover(now) {
+        if let Some(wait) = self.state.track_hover(ui.ctx().pointer_hover_pos(), now) {
             ui.ctx().request_repaint_after(wait);
         }
         if let Some(wait) = self.state.track_highlights(now) {
@@ -4048,7 +4052,7 @@ mod real_hover_tests {
         while std::time::Instant::now() < deadline {
             now += 0.1;
             app.state.poll_lsp();
-            app.state.track_hover(now);
+            app.state.track_hover(None, now);
             if let Some(text) = app.state.hover.text() {
                 println!(
                     "hover after {:.1} s: {}",

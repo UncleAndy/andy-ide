@@ -486,7 +486,11 @@ impl AppState {
     ///
     /// Returns how long the window should wait before the question becomes due,
     /// so an idle window comes back to ask it; `None` means nothing is pending.
-    pub fn track_hover(&mut self, now: f64) -> Option<std::time::Duration> {
+    pub fn track_hover(
+        &mut self,
+        pointer: Option<egui::Pos2>,
+        now: f64,
+    ) -> Option<std::time::Duration> {
         if !self.hints {
             // The hints are off: the pointer is not watched at all, and a hint that
             // was on screen when the switch went off is gone with it.
@@ -503,7 +507,12 @@ impl AppState {
         // not what the pointer is on, so nothing is asked about it: asking replaced the
         // answer being read with the answer about a symbol hidden behind the hint.
         // Looking at the spot is skipped too, since that is the first step of asking.
-        if self.hover.is_over_hint() {
+        // `is_over_hint` is what the last drawn hint said; the pointer's own place against that rect says the
+        // same thing a frame earlier, before the draw that sets it — without it the first frame the pointer
+        // lands on the hint asks about the text underneath and moves the hint there.
+        if self.hover.is_over_hint()
+            || pointer.is_some_and(|pos| self.hover.pointer_on_the_hint(pos))
+        {
             self.hover.settle(now);
             return None;
         }
