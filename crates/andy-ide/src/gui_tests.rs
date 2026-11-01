@@ -9443,6 +9443,17 @@ mod the_agent_panel {
             format!("chose: {tests}, {docs}"),
             "the agent was not told both of the answers picked"
         );
+        // And the conversation keeps it. A card vanishes once it is answered, so without a row of its own a
+        // reader cannot tell afterwards what was asked or what was decided — Andy's report.
+        assert!(
+            gui.app().state.agent.transcript.iter().any(|line| matches!(
+                line,
+                Line::Note(text)
+                    if text.contains("asked") && text.contains(tests) && text.contains(docs)
+            )),
+            "the question and the answers picked are not kept in the conversation: {:?}",
+            gui.app().state.agent.transcript
+        );
         assert!(
             gui.app().state.agent.choice.is_none(),
             "the question stayed after it was answered"

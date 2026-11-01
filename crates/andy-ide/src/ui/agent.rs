@@ -201,6 +201,18 @@ fn plain_key(ui: &mut Ui, key: egui::Key) -> bool {
 /// margin and its outline, the gap under its heading, the room its refusal row takes, and one
 /// answer on one line with the gap under it.
 ///
+/// A request's time as a clock reading, `hh:mm:ss.s`.
+///
+/// Seconds alone stop being readable past a minute or two, and a long turn is exactly when a person looks
+/// at it: "754.3 s" says nothing that "00:12:34.3" does not say better.
+fn clock_time(took: Duration) -> String {
+    let total = took.as_secs_f64();
+    let hours = (total / 3600.0).floor();
+    let minutes = ((total - hours * 3600.0) / 60.0).floor();
+    let seconds = total - hours * 3600.0 - minutes * 60.0;
+    format!("{hours:02.0}:{minutes:02.0}:{seconds:04.1}")
+}
+
 /// The answers' window is worked out from what the heading actually took, not from an
 /// estimate of it: the heading is a sentence of the agent's and it wraps to two lines as
 /// easily as one, and an estimate that comes up short is a card taller than the panel.
@@ -849,7 +861,7 @@ fn status(ui: &mut Ui, state: &mut AppState) {
     let row = ui.horizontal(|ui| {
         'facts: {
             let elapsed = match state.agent.elapsed() {
-                Some(took) => format!("⏱ {:.1} s", took.as_secs_f64()),
+                Some(took) => format!("⏱ {}", clock_time(took)),
                 None => "⏱ —".to_owned(),
             };
             if !room_for(ui, &elapsed) {
@@ -1612,4 +1624,25 @@ fn pick(ui: &mut Ui, option: &Model, current: Option<&str>, asked: &mut Option<S
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    /// Seconds alone say nothing a clock reading does not say better: a long turn is where a person looks
+    /// at this number, and "00:12:34.0" is read at a glance where "754.3 s" is not.
+    #[test]
+    fn a_time_is_read_as_a_clock() {
+        let cases = [
+            (Duration::from_millis(0), "00:00:00.0"),
+            (Duration::from_millis(1500), "00:00:01.5"),
+            (Duration::from_secs(75), "00:01:15.0"),
+            (Duration::from_secs(754), "00:12:34.0"),
+            (Duration::from_secs(3661), "01:01:01.0"),
+        ];
+        for (took, wanted) in cases {
+            assert_eq!(clock_time(took), wanted, "для {took:?}");
+        }
+    }
 }

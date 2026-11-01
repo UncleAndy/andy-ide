@@ -1095,9 +1095,19 @@ impl AgentState {
         let Some((id, request)) = self.choice.take() else {
             return;
         };
+        let title = request.title().to_owned();
         self.picked.clear();
         self.card_text.clear();
         self.card_wants_focus = false;
+        // The card leaves no trace of itself once it is answered, and a decision is exactly what a reader
+        // comes back to a conversation for: keep the question and the answer in it. Written in the panel's
+        // own tone for its own rows (`model: …`, `mode: …`), so it never reads as the agent's words.
+        let chosen = match &values {
+            Some(values) if !values.is_empty() => values.join(", "),
+            _ => "nothing".to_owned(),
+        };
+        self.transcript
+            .push(Line::Note(format!("asked «{title}»; chose {chosen}")));
         let Some(worker) = &self.worker else {
             return;
         };

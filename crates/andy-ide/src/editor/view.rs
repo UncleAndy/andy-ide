@@ -244,6 +244,17 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         // Input comes before painting: the caret this frame is the one the
         // key press asked for, so it is drawn where it belongs and the view
         // can follow it in the same frame.
+        // A press puts the caret where it landed, before anything is dragged. The drag anchor *is* the
+        // caret, so without this the first movement of a drag extended a selection from wherever the caret
+        // had been standing — the block between the old caret and the pointer.
+        if response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let (line, col) = position_to_line_col(buffer, &layouts, text_origin, pos, row_h);
+            buffer.set_caret(buffer.char_index(line, col));
+        }
+
         let mut drag_scrolled = false;
         if (response.clicked() || response.dragged())
             && let Some(pos) = response.interact_pointer_pos()
