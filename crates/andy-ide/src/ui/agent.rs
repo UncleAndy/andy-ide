@@ -825,7 +825,14 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // a selection the panel keeps itself is otherwise invisible — the highlight looks much like
             // any other, and a person reading the panel cannot tell the two apart.
             if let Some(picked) = state.agent.picked_lines {
-                let picked_note = format!("{} lines picked", picked.lines());
+                // Which lines, not just how many: a person checking the panel's own selection has to be
+                // able to see where it thinks it is, and a wrong line is invisible in a bare count.
+                let (from, to) = picked.ordered();
+                let picked_note = if from.line == to.line {
+                    format!("line {} picked", from.line + 1)
+                } else {
+                    format!("lines {}–{} picked", from.line + 1, to.line + 1)
+                };
                 if !room_for(ui, &picked_note) {
                     dropped = true;
                     break 'facts;
@@ -1215,10 +1222,10 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     if asked {
         state.agent.wants_copy = true;
     }
-    // The panel's own selection, read from the pointer before the conversation is drawn: the line
-    // rectangles it works from are the ones the frame before left behind. A right-click is not a
-    // reason to lose it — nothing but a new drag, or a click that picks nothing out, writes it.
-    pick_over_the_conversation(ui, state, conversation);
+    // A right-click is not a reason to lose the selection — nothing but a new drag, or a click that
+    // picks nothing out, writes it. The reading itself happens *after* the conversation has been drawn
+    // (below): it works from the line rectangles, and the frame before's are stale the moment a line
+    // grows — an answer arriving mid-drag moved them under the pointer.
     // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
     // no room for the conversation must not hand that card a sliver of what the answer needs.
     if height > 0.0 {
@@ -1341,6 +1348,10 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                 }
             });
     }
+
+    // Read now, against the rectangles just drawn: a position belongs to the line it is over *this*
+    // frame. The highlight appears one frame later, which is a frame nobody can see.
+    pick_over_the_conversation(ui, state, conversation);
 
     let mut copy = false;
     // The item says how much it will take. The words come from the panel's own selection, so a person

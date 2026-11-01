@@ -7047,9 +7047,7 @@ mod the_agent_panel {
         // The row of facts says it too, so that a person can see the panel's own selection without
         // opening a menu.
         assert!(
-            gui.harness
-                .query_by_label_contains("lines picked")
-                .is_some(),
+            gui.harness.query_by_label_contains("picked").is_some(),
             "the row of facts does not say what is picked out"
         );
 
