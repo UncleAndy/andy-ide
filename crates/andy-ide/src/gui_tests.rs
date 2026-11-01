@@ -3569,7 +3569,7 @@ mod the_terminal_selection {
             gui.settle();
         }
         assert!(
-            gui.harness.query_by_label("Copy text").is_some(),
+            gui.harness.query_by_label_contains("Copy text").is_some(),
             "the terminal's right-click offered no menu"
         );
         // The command lives in the output of the frame that made it, so it is read before any
@@ -7085,8 +7085,14 @@ mod the_agent_panel {
         }
         gui.harness.step();
         assert!(
-            gui.harness.query_by_label("Copy text").is_some(),
+            gui.harness.query_by_label_contains("Copy text").is_some(),
             "the right-click offered no menu"
+        );
+        // The item counts what it will take, which is also how a person can tell at a glance that the
+        // panel read the drag at all.
+        assert!(
+            gui.harness.query_by_label_contains("lines)").is_some(),
+            "the menu does not say how many lines it would copy: the panel read no drag"
         );
 
         let after = copy_with_ctrl_insert(&mut gui);
@@ -9449,7 +9455,7 @@ mod the_agent_panel {
         gui.settle();
 
         assert!(
-            gui.harness.query_by_label("Copy text").is_some(),
+            gui.harness.query_by_label_contains("Copy text").is_some(),
             "a right-click on the conversation did not offer to copy the text"
         );
     }

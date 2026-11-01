@@ -1317,8 +1317,18 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     }
 
     let mut copy = false;
+    // The item says how much it will take. The words come from the panel's own selection, so a person
+    // who has just dragged over three lines should not have to guess what "the text" means — and an
+    // item that never counts anything is the sign that the panel read no drag at all.
+    let label = match state.agent.picked_lines {
+        Some(picked) => {
+            let (from, to) = picked.ordered();
+            format!("Copy text ({} lines)", to - from + 1)
+        }
+        None => "Copy text".to_owned(),
+    };
     menu.show(|ui| {
-        if ui.button("Copy text").clicked() {
+        if ui.button(label).clicked() {
             copy = true;
             ui.close();
         }
