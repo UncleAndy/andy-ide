@@ -2961,6 +2961,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "async-process",
  "futures",
  "serde",
  "serde_json",

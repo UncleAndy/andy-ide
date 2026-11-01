@@ -12,6 +12,9 @@ description = "Agent registry and ACP/MCP client"
 # (version negotiation, the request/response and notification shapes) belongs to the standard, not to us.
 # `process` is the transport that starts an agent as a child of the panel.
 agent-client-protocol = { version = "3.6", features = ["process"] }
+# The child's own pipes, which the SDK's `process` transport hands out: the record of the wire is
+# written by wrapping them, so the type names are needed here and not only inside the SDK.
+async-process = "2"
 anyhow.workspace = true
 # The runtime the SDK is driven with: it has no executor of its own, the embedder brings one.
 futures = "0.3"

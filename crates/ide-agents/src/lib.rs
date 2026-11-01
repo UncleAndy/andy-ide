@@ -15,6 +15,7 @@
 
 use std::path::Path;
 
+pub mod acp;
 pub mod command;
 pub mod protocol;
 pub mod registry;
