@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ide_agents::ChoiceRequest;
 use ide_agents::acp;
 use ide_agents::session::{AgentSpec, Event, PermissionPolicy};
 use ide_agents::wire::{Kept, Wire};
@@ -585,5 +586,109 @@ fn a_write_the_panel_has_allowed_goes_through() {
         "from the agent\n",
         "the file the agent wrote does not hold what it wrote"
     );
+    session.stop();
+}
+
+/// Waits for the first question of the kind asked, and the turn's own ending afterwards.
+fn asked(session: &mut acp::Session, wanted: &str) -> (u64, ChoiceRequest) {
+    session.start_turn(wanted).expect("the turn goes out");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(Event::Choice { id, request }) = session.next_event(Duration::from_millis(200))
+        {
+            return (id, request);
+        }
+    }
+    panic!("the agent never asked the person anything");
+}
+
+#[test]
+fn a_question_to_be_written_out_is_answered_with_the_words_themselves() {
+    // Hermes asks for free text with a bare string and nothing to choose between: there is nothing to click,
+    // so the card has to offer somewhere to write — and the words go back as the words.
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    let (id, request) = asked(&mut session, "ask-text");
+    assert!(
+        request.free_text,
+        "a question to be written out was read as one to pick: {request:?}"
+    );
+    assert!(request.options.is_empty(), "there is nothing to pick");
+    assert!(!request.multiple, "one answer was asked for, not several");
+    assert_eq!(request.field, "answer");
+
+    session
+        .answer_choice(
+            id,
+            &request.field,
+            request.multiple,
+            Some(&["a name of my own".to_owned()]),
+        )
+        .expect("the answer goes out");
+
+    let (said, finished) = one_turn(&mut session, "hello");
+    assert_eq!(
+        said, "wrote: a name of my own",
+        "the agent did not get the words that were written"
+    );
+    assert_eq!(finished.as_deref(), Some("end_turn"));
+    session.stop();
+}
+
+#[test]
+fn a_question_with_several_answers_goes_back_as_a_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    let (id, request) = asked(&mut session, "choose-many");
+    assert!(
+        request.multiple,
+        "a question that allows several answers was read as one: {request:?}"
+    );
+    assert!(request.options.len() >= 2, "the variants did not arrive");
+
+    session
+        .answer_choice(
+            id,
+            &request.field,
+            request.multiple,
+            Some(&["tests".to_owned(), "docs".to_owned()]),
+        )
+        .expect("the answer goes out");
+
+    let (said, _) = one_turn(&mut session, "hello");
+    assert_eq!(
+        said, "chose: tests, docs",
+        "the agent did not get both of the answers"
+    );
+    session.stop();
+}
+
+#[test]
+fn a_permission_refused_by_the_person_is_refused_in_the_agents_own_option() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+    session.start_turn("ask").expect("the turn goes out");
+
+    let mut asked_for = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && asked_for.is_none() {
+        if let Some(Event::Permission { id, .. }) = session.next_event(Duration::from_millis(200)) {
+            asked_for = Some(id);
+        }
+    }
+    let id = asked_for.expect("the agent never asked for permission");
+
+    // Nothing chosen: the person said no, and the agent hears a refusal rather than an option.
+    session
+        .answer_permission(id, None)
+        .expect("the refusal goes out");
+
+    let (said, _) = one_turn(&mut session, "hello");
+    assert_eq!(said, "refused", "the agent did not hear the refusal");
     session.stop();
 }
