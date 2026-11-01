@@ -692,3 +692,35 @@ fn a_permission_refused_by_the_person_is_refused_in_the_agents_own_option() {
     assert_eq!(said, "refused", "the agent did not hear the refusal");
     session.stop();
 }
+
+#[test]
+fn a_mode_the_agent_reports_as_its_edits_setting_reaches_the_panel() {
+    // Measured on the wire against our Hermes build (2026-11-01): `session/set_mode` answers `{}`,
+    // and the mode arrives as a `config_option_update` about the `edits` setting — this agent never
+    // sends `current_mode_update` (`acp_adapter/modes.py` keeps one table, and its values are not the
+    // mode ids). A panel that listened only for the mode notification kept showing the mode a person
+    // had just asked to leave: pick "Accept Edits", and the next setup said "Default".
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    session
+        .set_mode("accept_edits")
+        .expect("the mode goes out to the agent");
+
+    let mut seen: Vec<Option<String>> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(Event::Setup(state)) = session.next_event(Duration::from_millis(200)) {
+            seen.push(state.current_mode.clone());
+            if seen.len() >= 2 || state.current_mode.as_deref() == Some("accept_edits") {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        seen.last().cloned().flatten().as_deref(),
+        Some("accept_edits"),
+        "the mode the agent reported as a setting did not reach the panel: {seen:?}"
+    );
+}

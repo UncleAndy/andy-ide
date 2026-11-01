@@ -632,6 +632,26 @@ fn main() {
                 {
                     policy = mode_policy(chosen).to_owned();
                 }
+                // Hermes answers a mode change with its `edits` setting and never with the mode
+                // notification of its own (`acp_adapter/modes.py`): a client that listened only for
+                // `current_mode_update` would keep showing the mode it had asked to leave.
+                let session = message
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session,
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": settings(&effort, &policy, &model)
+                        }
+                    }
+                }));
                 answer(id, json!({}));
             }
             "session/prompt" => {

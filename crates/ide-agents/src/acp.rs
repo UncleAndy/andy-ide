@@ -1345,6 +1345,31 @@ fn model_setting(options: &[ConfigOption]) -> Option<&ConfigOption> {
 /// The standard has no `models` of its own — the model is a setting — while Hermes names them in a field of
 /// its own. A panel whose model list is empty because the agent answered by the book is a panel that lost a
 /// feature to a difference in spelling.
+/// The mode an agent is in, read from the setting it carries modes in.
+///
+/// ACP has `current_mode_update` for this; Hermes never sends it, and reports the mode as its `edits`
+/// setting instead — whose values (`ask`, `workspace_session`, `session`) are not the mode ids
+/// (`default`, `accept_edits`, `dont_ask`). Both lists come from one table of names in the agent
+/// (`acp_adapter/modes.py`), so the names are what can be matched: the setting says "Accept Edits",
+/// and the mode of that name has id `accept_edits`.
+fn mode_reported_as_a_setting(state: &SessionState) -> Option<String> {
+    let option = state
+        .options
+        .iter()
+        .find(|option| option.category.as_deref() == Some(crate::protocol::MODE))?;
+    let chosen = option.current.as_deref()?;
+    let named = option
+        .choices
+        .iter()
+        .find(|choice| choice.value == chosen)
+        .map(|choice| choice.name.as_str())?;
+    state
+        .modes
+        .iter()
+        .find(|mode| mode.name == named)
+        .map(|mode| mode.id.clone())
+}
+
 fn fill_models(state: &mut SessionState) {
     if !state.models.is_empty() {
         return;
@@ -1509,6 +1534,12 @@ fn event_of(update: &SessionUpdate, settings: &Arc<Mutex<SessionState>>) -> Opti
             let mut known = settings.lock().ok()?;
             known.options = options_of(&json_of(update));
             fill_models(&mut known);
+            // Hermes reports a changed mode as a change of its `edits` setting and never sends
+            // `current_mode_update`, so a panel that listened only for the mode notification kept
+            // showing the mode a person had just asked to leave.
+            if let Some(mode) = mode_reported_as_a_setting(&known) {
+                known.current_mode = Some(mode);
+            }
             Some(Event::Setup(known.clone()))
         }
         SessionUpdate::CurrentModeUpdate(update) => {

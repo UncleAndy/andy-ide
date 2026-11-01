@@ -123,6 +123,9 @@ pub struct Mode {
     /// What to show a person.
     pub name: String,
 }
+/// The category ACP gives the setting a mode is carried in: Hermes reports an edit-policy
+/// change as this setting and never as `current_mode_update`.
+pub const MODE: &str = "mode";
 /// The category ACP gives the setting for how hard a model thinks.
 pub const THOUGHT_LEVEL: &str = "thought_level";
 /// What Hermes calls that setting when it names one itself. A client goes by the category
