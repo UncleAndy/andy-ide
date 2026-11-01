@@ -299,7 +299,7 @@ fn the_conversations_the_agent_knows_of_arrive_with_their_names() {
 }
 
 #[test]
-fn a_conversation_is_picked_up_again_and_one_the_agent_forgot_is_not() {
+fn a_conversation_is_picked_up_again_and_one_the_agent_forgot_is_opened_anew() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
         .expect("the agent starts and answers the handshake");
@@ -320,9 +320,19 @@ fn a_conversation_is_picked_up_again_and_one_the_agent_forgot_is_not() {
     );
     assert_eq!(session.id(), "stand-in-session");
 
+    // An id the agent no longer knows is not a failure to report: the person wanted a conversation here, and
+    // the panel is not the place for a rumour about an old one (`conversation.rs` asks for the same thing).
+    session
+        .load_into("forgotten-one")
+        .expect("a conversation the agent forgot is opened anew");
     assert!(
-        session.load_into("forgotten-one").is_err(),
-        "a conversation the agent does not have was reported as opened"
+        !session.resumed(),
+        "a conversation opened anew was reported as picked up"
+    );
+    assert_ne!(
+        session.id(),
+        "forgotten-one",
+        "the panel was left holding an id the agent does not have"
     );
     session.stop();
 }

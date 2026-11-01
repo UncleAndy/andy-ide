@@ -34,8 +34,8 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client, Responder};
 use anyhow::Context as _;
 use async_process::{Child, ChildStderr, ChildStdin, ChildStdout};
-use futures::StreamExt;
 use futures::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use futures::{FutureExt, StreamExt};
 
 use crate::protocol::{
     AgentCommand, ChoiceRequest, ConfigOption, Model, PermissionRequest, SessionInfo, SessionState,
@@ -356,6 +356,12 @@ pub struct Session {
     complaints: Arc<Mutex<String>>,
     /// Whether the panel has agreed that the agent may write files through this window.
     writes: Arc<AtomicBool>,
+    /// Events a waiting caller set aside before the one it was waiting for.
+    ///
+    /// [`Session::prompt`] waits for the end of a turn and nothing else, and the pieces of the answer arrive
+    /// before it: throwing them away would lose the answer, so they are handed back to the queue they came
+    /// from, in the order they were taken.
+    pending: std::collections::VecDeque<Event>,
     /// Whether the process is gone.
     closed: bool,
 }
@@ -380,7 +386,10 @@ impl Session {
     ) -> anyhow::Result<Self> {
         step_said(progress.as_ref(), "Launching\u{2026}");
         let wire: Arc<dyn Wire> = wire.unwrap_or_else(|| Arc::new(crate::wire::Silent));
-        let started = start(&spec.command, &spec.args, &spec.env, Arc::clone(&wire))?;
+        // Named in the refusal: a person reading "no such file or directory" has to be told which agent it
+        // was, or the panel's own words are the only thing that knows.
+        let started = start(&spec.command, &spec.args, &spec.env, Arc::clone(&wire))
+            .with_context(|| format!("running {} for agent {}", spec.command, spec.name))?;
 
         let (orders_tx, orders) = futures::channel::mpsc::unbounded();
         let (events_tx, events) = std::sync::mpsc::channel();
@@ -392,6 +401,8 @@ impl Session {
         let settings: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
         let writes = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(started.child));
+        // The thread that speaks to the agent gets a share of the process: it is the one watching for it.
+        let driven = Arc::clone(&child);
 
         let cwd = root.to_path_buf();
         let driver = {
@@ -400,6 +411,7 @@ impl Session {
             let waiting = Arc::clone(&waiting);
             let questions = Arc::clone(&questions);
             let settings = Arc::clone(&settings);
+            let steps = progress.clone();
             let writes = Arc::clone(&writes);
             let wire = Arc::clone(&wire);
             let record = Arc::clone(&wire);
@@ -419,6 +431,8 @@ impl Session {
                         questions,
                         settings,
                         writes,
+                        steps,
+                        driven,
                         policy,
                         resume,
                         cwd,
@@ -443,7 +457,6 @@ impl Session {
                 );
             }
         };
-        step_said(progress.as_ref(), "ready");
         let mut state = ready.state;
         fill_models(&mut state);
         Ok(Self {
@@ -456,6 +469,7 @@ impl Session {
             usage: None,
             complaints,
             writes,
+            pending: std::collections::VecDeque::new(),
             closed: false,
         })
     }
@@ -499,22 +513,40 @@ impl Session {
     pub fn prompt(&mut self, text: &str, timeout: Duration) -> anyhow::Result<String> {
         self.start_turn(text)?;
         let deadline = std::time::Instant::now() + timeout;
-        while let Some(left) = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .filter(|left| !left.is_zero())
-        {
+        let mut set_aside: Vec<Event> = Vec::new();
+        let outcome = loop {
+            let Some(left) = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                break Err(anyhow::anyhow!("the agent did not answer in {timeout:?}"));
+            };
             match self.next_event(left) {
-                Some(Event::Finished(word)) => return Ok(word),
-                Some(Event::Failed(words)) => anyhow::bail!("{words}"),
-                Some(_) => {}
-                None => break,
+                Some(Event::Finished(word)) => break Ok(word),
+                Some(Event::Failed(words)) => break Err(anyhow::anyhow!("{words}")),
+                // The process is gone: said in as many words, because "no answer" and "nothing to answer
+                // from" are different things to a person reading the panel.
+                Some(Event::Closed) => break Err(anyhow::anyhow!("the agent closed its output")),
+                Some(event) => set_aside.push(event),
+                None => {}
             }
+        };
+        // Handed back rather than thrown away: the answer arrives in pieces *before* the end of the turn, and
+        // a caller that asked only for the ending still gets to read them afterwards.
+        for event in set_aside.into_iter().rev() {
+            self.pending.push_front(event);
         }
-        anyhow::bail!("the agent did not finish the turn within {timeout:?}")
+        outcome
     }
 
     /// The next thing the agent said, waiting up to `timeout`.
     pub fn next_event(&mut self, timeout: Duration) -> Option<Event> {
+        // What a waiting caller set aside first: it came first, and the panel draws the answer from this same
+        // queue.
+        if let Some(event) = self.pending.pop_front() {
+            self.keep_in_step(&event);
+            return Some(event);
+        }
         if self.closed {
             return Some(Event::Closed);
         }
@@ -747,10 +779,13 @@ async fn converse(
     questions: Arc<AtomicU64>,
     settings: Arc<Mutex<SessionState>>,
     writes: Arc<AtomicBool>,
+    steps: Option<Arc<Mutex<String>>>,
+    child: Arc<Mutex<Child>>,
     policy: PermissionPolicy,
     resume: Option<String>,
     cwd: PathBuf,
 ) -> anyhow::Result<()> {
+    let watched = Arc::clone(&child);
     let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
     let told = events.clone();
     let notes = Arc::clone(&settings);
@@ -924,8 +959,21 @@ async fn converse(
                 words.await;
                 Ok(())
             })?;
+            // The steps a start is at, in the panel's own words: a real agent can take its time at any of
+            // them, and naming the step is what keeps a slow start from looking like a hang.
+            step_said(steps.as_ref(), "Getting agent parameters\u{2026}");
             let init = cx
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                    // Said in the handshake as well as beside the directory: this window reads and writes no
+                    // files for the agent, and gives it no terminal. Its own terminal is where its project
+                    // is — the machine it runs on is not necessarily this one.
+                    agent_client_protocol::schema::v1::ClientCapabilities::new().fs(
+                        agent_client_protocol::schema::v1::FileSystemCapabilities::new()
+                            .read_text_file(false)
+                            .write_text_file(false),
+                    )
+                    .terminal(false),
+                ))
                 .block_task()
                 .await?;
             wire.note(&format!(
@@ -936,20 +984,29 @@ async fn converse(
 
             // What the agent says the conversation is comes from its own answer, read the way this project
             // already reads it: the standard's shapes and the panel's are the same JSON.
+            step_said(steps.as_ref(), "Getting model parameters\u{2026}");
             let (mut opened, resumed, state) = match resume {
                 Some(session) => {
-                    let answer = cx
-                        .send_request(LoadSessionRaw {
-                            session_id: session.clone(),
-                            cwd: cwd.clone(),
-                        })
+                    match cx
+                        .send_request(kept_conversation(&cwd, &session))
                         .block_task()
-                        .await?;
-                    (session, true, session_state(&answer))
+                        .await
+                    {
+                        Ok(answer) => (session, true, session_state(&answer)),
+                        // An id the agent no longer knows is not a failure to report: the person wanted a
+                        // conversation here, and the panel is not the place for a rumour about an old one.
+                        Err(_) => {
+                            let answer = cx
+                                .send_request(fresh_conversation(&cwd))
+                                .block_task()
+                                .await?;
+                            (session_of(&answer)?, false, session_state(&answer))
+                        }
+                    }
                 }
                 None => {
                     let answer = cx
-                        .send_request(NewSessionRaw { cwd: cwd.clone() })
+                        .send_request(fresh_conversation(&cwd))
                         .block_task()
                         .await?;
                     let opened = session_of(&answer)?;
@@ -970,7 +1027,35 @@ async fn converse(
             // prompt would be waiting for an answer it is itself holding up. One turn at a time, held by a
             // lock the tasks share, so turns keep the order they were asked in.
             let one_at_a_time = Arc::new(futures::lock::Mutex::new(()));
-            while let Some(order) = orders.next().await {
+            // A watch of its own on the process. A transport that has seen EOF does not by itself end the
+            // session task, and a session task waiting for an order forever is a panel that never notices
+            // the agent is gone — it would sit on a dead agent as if it were thinking.
+            let (gone_tx, gone_rx) = futures::channel::oneshot::channel::<()>();
+            let mut gone = gone_rx.fuse();
+            std::thread::Builder::new()
+                .name("acp-watch".to_owned())
+                .spawn(move || loop {
+                    let ended = watched
+                        .lock()
+                        .map(|mut child| matches!(child.try_status(), Ok(Some(_))))
+                        .unwrap_or(false);
+                    if ended {
+                        let _ = gone_tx.send(());
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                })
+                .ok();
+            loop {
+                let order = futures::select! {
+                    order = orders.next() => order,
+                    _ = gone => None,
+                };
+                let Some(order) = order else {
+                    // The process is gone, or the session was stopped: either way this task is over, and
+                    // the connection with it.
+                    break;
+                };
                 match order {
                     Order::Turn(text) => {
                         let turns = Arc::clone(&one_at_a_time);
@@ -992,7 +1077,7 @@ async fn converse(
                                         events.send(Event::Finished(word_of(&answer.stop_reason)));
                                 }
                                 Err(error) => {
-                                    let _ = events.send(Event::Failed(format!("{error}")));
+                                    let _ = events.send(Event::Failed(words_of(&error)));
                                 }
                             }
                             Ok(())
@@ -1070,17 +1155,27 @@ async fn converse(
                     }
                     Order::Open { session, done } => {
                         let outcome = match session {
-                            Some(session) => cx
-                                .send_request(LoadSessionRaw {
-                                    session_id: session.clone(),
-                                    cwd: cwd.clone(),
-                                })
-                                .block_task()
-                                .await
-                                .map(|answer| (session, true, session_state(&answer)))
-                                .map_err(|error| anyhow::anyhow!("{error}")),
+                            Some(session) => {
+                                match cx
+                                    .send_request(kept_conversation(&cwd, &session))
+                                    .block_task()
+                                    .await
+                                {
+                                    Ok(answer) => Ok((session, true, session_state(&answer))),
+                                    // Forgotten by the agent: a new conversation, not a rumour about an old
+                                    // one — and the panel is told which of the two it got.
+                                    Err(_) => cx
+                                        .send_request(fresh_conversation(&cwd))
+                                        .block_task()
+                                        .await
+                                        .and_then(|answer| {
+                                            Ok((session_of(&answer)?, false, session_state(&answer)))
+                                        })
+                                        .map_err(|error| anyhow::anyhow!("{error}")),
+                                }
+                            }
                             None => cx
-                                .send_request(NewSessionRaw { cwd: cwd.clone() })
+                                .send_request(fresh_conversation(&cwd))
                                 .block_task()
                                 .await
                                 .and_then(|answer| {
@@ -1152,6 +1247,21 @@ async fn converse(
 /// translated into a second set of types that could drift.
 fn json_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// What a failed request is called in this project's own words.
+///
+/// The standard names its own reasons, and one of them is the one a person reading the panel needs most: the
+/// agent's output closed, which means the process is gone. Its stable discriminator says so
+/// ([`agent_client_protocol::is_incoming_transport_closed`]), so nothing is guessed from the text of a
+/// message here — the words a person sees are this project's, and the test that asks for them
+/// (`conversation.rs`: an agent that dies mid turn) is asked for a reason.
+fn words_of(error: &agent_client_protocol::Error) -> String {
+    if agent_client_protocol::is_incoming_transport_closed(error) {
+        "the agent closed its output".to_owned()
+    } else {
+        format!("{error}")
+    }
 }
 
 /// A refusal in the protocol's own words.
@@ -1269,6 +1379,11 @@ fn fill_models(state: &mut SessionState) {
 struct NewSessionRaw {
     /// The directory the conversation is opened in.
     cwd: PathBuf,
+    /// Servers this client brings: none — the agent's own tools are the ones it has.
+    mcp_servers: Vec<serde_json::Value>,
+    /// What this window says about itself when it opens a conversation.
+    #[serde(rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 /// The standard's own `session/load`, raw for the same reason as [`NewSessionRaw`].
@@ -1282,6 +1397,35 @@ struct LoadSessionRaw {
     session_id: String,
     /// The directory it is picked up in.
     cwd: PathBuf,
+    /// Servers this client brings: none, as when a conversation is opened.
+    mcp_servers: Vec<serde_json::Value>,
+}
+
+/// A fresh conversation, opened with the words this window has always used.
+///
+/// The note is not decoration: this window serves neither `fs/*` nor `terminal/*`, and an agent that is not
+/// told works on the wrong machine — its own terminal is where its project is. Both halves of that promise
+/// are asked after (`conversation.rs`): the capabilities in the handshake, and this note beside the directory.
+fn fresh_conversation(cwd: &Path) -> NewSessionRaw {
+    NewSessionRaw {
+        cwd: cwd.to_path_buf(),
+        mcp_servers: Vec::new(),
+        meta: serde_json::json!({
+            "client": "andy-ide",
+            "fileAccess": "terminal",
+            "note": "Files are not read or written for you by this client: use your own \
+                     terminal for every file operation, in the cwd above."
+        }),
+    }
+}
+
+/// The conversation named, picked up with the same words.
+fn kept_conversation(cwd: &Path, session: &str) -> LoadSessionRaw {
+    LoadSessionRaw {
+        session_id: session.to_owned(),
+        cwd: cwd.to_path_buf(),
+        mcp_servers: Vec::new(),
+    }
 }
 
 /// Hermes' own `session/set_model`: the way back to a model the standard cannot reach.

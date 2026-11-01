@@ -1693,9 +1693,12 @@ fn work(
             Ok(Command::SwitchTo(wanted)) => match session.load_into(&wanted) {
                 Ok(()) => {
                     let opened = session.id().to_owned();
+                    // Asked of the session, not assumed: an agent that no longer has the conversation
+                    // opens a new one instead, and a panel that says "resumed" afterwards is a panel that
+                    // lies about what is on screen.
                     let _ = replies.send(Reply::Ready {
                         session: opened,
-                        resumed: true,
+                        resumed: session.resumed(),
                     });
                     let _ = replies.send(Reply::Event(AgentEvent::Setup(session.state().clone())));
                 }
