@@ -2457,6 +2457,21 @@ mod clipboard_keys_tests {
     }
 
     #[test]
+    fn ctrl_v_asks_the_backend_for_the_clipboard() {
+        // The other half of the paste habit: `Ctrl+V` beside `Shift+Insert`. The window owns the
+        // clipboard, so both ask it and both are answered with a paste event.
+        let mut harness = Harness::with_text("a.rs", "ab\n");
+        harness.focus_editor();
+
+        let output = harness.key_with(egui::Key::V, egui::Modifiers::CTRL);
+        assert!(
+            harness.asked_for_a_paste(&output),
+            "Ctrl+V must ask the window for the clipboard text, the way Shift+Insert does"
+        );
+        assert_eq!(harness.text(), "ab\n", "asking changes nothing by itself");
+    }
+
+    #[test]
     fn shift_insert_asks_the_backend_for_the_clipboard() {
         let mut harness = Harness::with_text("a.rs", "ab\n");
         harness.focus_editor();

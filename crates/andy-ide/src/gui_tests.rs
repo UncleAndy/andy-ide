@@ -9069,6 +9069,49 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn a_right_click_on_the_conversation_offers_to_copy_text() {
+        // Andy's rule: a right-click on text offers a menu, and "Copy text" is in it. The chat has no
+        // response of its own to hang a menu on — every line is a label drawn by the panel or by the
+        // markdown viewer — so the sensor over the conversation is a hover one and the menu is opened
+        // by hand: a click sense there would take the clicks a link in an answer needs.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        let panel = gui
+            .app()
+            .state
+            .agent
+            .shown_rect
+            .expect("the panel is drawn");
+        // Somewhere inside the conversation: the middle of the panel is between the header and the
+        // foot in any panel tall enough to show a conversation at all.
+        let at = panel.center();
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label("Copy text").is_some(),
+            "a right-click on the conversation did not offer to copy the text"
+        );
+    }
+
+    #[test]
     fn the_question_stands_directly_above_the_field() {
         // A question drawn at the top of the panel is one a person reading the conversation walks
         // past: the answer belongs under the words that explain it, right above the field the

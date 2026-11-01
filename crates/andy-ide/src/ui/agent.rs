@@ -1132,6 +1132,41 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
     let waiting = state.agent.asking.is_some() || state.agent.choice.is_some();
     let floor = if waiting { 0.0 } else { 60.0 };
     let height = (ui.available_height() - below).max(floor);
+    // Where the conversation is on screen, for the right-click that asks to copy from it. The sensor
+    // is a hover one on purpose: a click sense here would take the clicks a link in an answer needs
+    // and the drags a selection needs, so the menu is opened by hand from the pointer's own click.
+    let room = room_of(state, ui);
+    let conversation = egui::Rect::from_min_max(
+        egui::pos2(room.left(), ui.cursor().top()),
+        egui::pos2(room.right(), ui.cursor().top() + height),
+    );
+    let sensor = ui.interact(
+        conversation,
+        egui::Id::new("agent-conversation-menu"),
+        egui::Sense::hover(),
+    );
+    let asked = ui.input(|input| {
+        input.pointer.secondary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| conversation.contains(pos))
+    });
+    let mut copy = false;
+    egui::Popup::menu(&sensor)
+        .open_memory(asked.then_some(egui::SetOpenCommand::Bool(true)))
+        .at_pointer_fixed()
+        .show(|ui| {
+            if ui.button("Copy text").clicked() {
+                copy = true;
+                ui.close();
+            }
+        });
+    if copy {
+        // The panel's own copy: an `Event::Copy` is pushed at the top of the next frame, which is
+        // what egui reads to put a selected label's text on the clipboard.
+        state.agent.wants_copy = true;
+    }
     // A scroll area with nothing to scroll still takes room of its own — a panel left with a card and
     // no room for the conversation must not hand that card a sliver of what the answer needs.
     if height > 0.0 {

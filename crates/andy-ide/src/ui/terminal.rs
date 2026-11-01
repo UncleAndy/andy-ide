@@ -243,7 +243,12 @@ impl Terminal {
                         // keyboard. The backend owns the clipboard, so it is asked to
                         // read the text and send it back as a paste event, exactly as
                         // the editor does.
-                        if *key == egui::Key::Insert && modifiers.shift {
+                        if (*key == egui::Key::Insert && modifiers.shift)
+                            || (*key == egui::Key::V && modifiers.ctrl)
+                        {
+                            // `Ctrl+V` as well as `Shift+Insert`: pasting is what a person asks for
+                            // with either, and a terminal that sent the control byte instead would
+                            // answer with a quoted-insert prompt nobody wants.
                             ui.ctx()
                                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                             continue;
@@ -370,6 +375,20 @@ impl Terminal {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
         self.shown_rect = Some(rect);
+        // A right-click on the terminal asks what to do with what is on it: take the selection, or
+        // paste into the shell. The selection is this pane's own, the clipboard belongs to the
+        // window — the same division the copy keys already follow.
+        response.context_menu(|ui| {
+            if ui.button("Copy text").clicked() {
+                self.copy_selection(ui);
+                ui.close();
+            }
+            if ui.button("Paste").clicked() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                ui.close();
+            }
+        });
         let pressed_at = ui.input(|input| {
             if input.pointer.any_pressed() {
                 input.pointer.interact_pos()

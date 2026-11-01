@@ -177,6 +177,29 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             response.request_focus();
         }
 
+        // A right-click in the editor asks what to do with the text: take what is selected, or put
+        // the clipboard at the caret. The window owns the clipboard, so a paste is asked for and
+        // arrives as a paste event, exactly as the keys do it.
+        let mut copy = false;
+        let mut paste = false;
+        response.context_menu(|ui| {
+            if ui.button("Copy text").clicked() {
+                copy = true;
+                ui.close();
+            }
+            if ui.button("Paste").clicked() {
+                paste = true;
+                ui.close();
+            }
+        });
+        if copy {
+            copy_to_clipboard(ui, buffer);
+        }
+        if paste {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+
         // egui turns arrow keys and Tab into focus navigation unless the
         // focused widget claims them, so the editor claims every key it
         // handles. Without this, Up/Down jump between panels.
@@ -1088,6 +1111,12 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                     Key::Insert if modifiers.shift => {
                         // The backend owns the clipboard: ask it to read the
                         // text and send it back as a paste event.
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    }
+                    Key::V if modifiers.ctrl || modifiers.command => {
+                        // `Ctrl+V` pastes as well as `Shift+Insert`: both habits reach the same
+                        // request, and the text arrives as a paste event from the window.
                         ui.ctx()
                             .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                     }
