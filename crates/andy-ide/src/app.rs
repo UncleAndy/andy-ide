@@ -2457,6 +2457,26 @@ mod clipboard_keys_tests {
     }
 
     #[test]
+    fn shift_insert_in_the_field_asks_the_backend_for_the_clipboard() {
+        // The field the agent is asked in is egui's own text edit: it reads `Ctrl+V`, and the Insert
+        // habit — the one Andy's fingers use — means nothing to it. The panel turns it into the same
+        // request the window answers with a paste event.
+        let mut harness = Harness::with_text("a.rs", "x\n");
+        // Bring the agent panel to the front, and let its field take the keyboard.
+        harness.key_with(egui::Key::Num0, egui::Modifiers::ALT);
+        harness.app.state.agent.wants_focus = true;
+        for _ in 0..3 {
+            harness.frame(Vec::new());
+        }
+
+        let output = harness.key_with(egui::Key::Insert, egui::Modifiers::SHIFT);
+        assert!(
+            harness.asked_for_a_paste(&output),
+            "Shift+Insert in the agent's field must ask the window for the clipboard text"
+        );
+    }
+
+    #[test]
     fn ctrl_v_asks_the_backend_for_the_clipboard() {
         // The other half of the paste habit: `Ctrl+V` beside `Shift+Insert`. The window owns the
         // clipboard, so both ask it and both are answered with a paste event.

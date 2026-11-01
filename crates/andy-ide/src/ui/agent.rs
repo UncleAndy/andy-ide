@@ -23,6 +23,27 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         ui.ctx()
             .input_mut(|input| input.events.push(egui::Event::Copy));
     }
+    // `Shift+Insert` pastes and `Ctrl+Insert` copies in every panel, and each panel maps them for
+    // itself: the editor and the terminal read the key, and the field the agent is asked in is egui's
+    // own text edit, which knows `Ctrl+V` and `Ctrl+C` and neither Insert habit. So the panel turns
+    // both into what that field does read, while the field holds the keyboard. The field's id is the
+    // one `input` gives it.
+    if ui.memory(|memory| memory.has_focus(egui::Id::new("agent-message"))) {
+        let paste = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert));
+        let copy = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Insert));
+        if paste {
+            // The window owns the clipboard: it answers with a paste event, which the field inserts.
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        if copy {
+            state.agent.wants_copy = true;
+        }
+    }
     // A restart that is due has to be looked at again: the panel is otherwise idle
     // between frames, and a timer nobody repaints for never fires.
     if state.agent.waiting_to_reconnect() {
