@@ -250,8 +250,15 @@ impl App {
             let mut viewer = Viewer {
                 state: &mut self.state,
             };
+            // The body of a tab keeps four points of margin on every side of its own
+            // (`egui_dock::TabBodyStyle`, `Margin::same(4)`), and at the bottom that margin is blank
+            // space under the last row of a panel — between the row of facts and the edge a person
+            // sees as the panel's end. The sides and the top keep theirs: there the margin is what
+            // holds the text off the border.
+            let mut style = Style::from_egui(ui.style().as_ref());
+            style.tab.tab_body.inner_margin.bottom = 0;
             DockArea::new(&mut self.dock)
-                .style(Style::from_egui(ui.style().as_ref()))
+                .style(style)
                 .show_inside(ui, &mut viewer);
         });
 
