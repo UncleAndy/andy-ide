@@ -9069,6 +9069,48 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_question_stands_directly_above_the_field() {
+        // A question drawn at the top of the panel is one a person reading the conversation walks
+        // past: the answer belongs under the words that explain it, right above the field the
+        // message goes in, and the conversation gives up the room for it rather than the card
+        // being clipped at the panel's edge.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_VARIANTS", "4")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        ask_for_a_choice(&mut gui);
+        gui.harness.set_size(egui::vec2(1200.0, 2000.0));
+        for _ in 0..10 {
+            gui.harness.step();
+        }
+        let agent = &gui.app().state.agent;
+        let panel = agent.shown_rect.expect("the panel is drawn");
+        let card = agent.card_rect.expect("the card is drawn");
+        let field = agent.field_rect.expect("the field is drawn");
+        assert!(
+            card.bottom() <= field.top() + 1.0,
+            "the card is not above the field: the card ends at {} and the field starts at {}",
+            card.bottom(),
+            field.top()
+        );
+        assert!(
+            field.top() - card.bottom() <= 24.0,
+            "the card stands {} points above the field",
+            field.top() - card.bottom()
+        );
+        assert!(
+            card.top() > panel.top() + 60.0,
+            "the card is at the panel's top: {} against {}",
+            card.top(),
+            panel.top()
+        );
+        assert!(
+            panel.contains_rect(card),
+            "the card is not inside the panel: {card:?} in {panel:?}"
+        );
+    }
+
+    #[test]
     fn a_question_with_several_answers_shows_them_and_sends_the_ones_picked() {
         // Hermes asks for several answers by making the property an array of the same
         // strings. A client that only knew the flat shape drew the question and none of its
