@@ -7028,6 +7028,12 @@ mod the_agent_panel {
             copied.iter().any(|words| words == "Hello w"),
             "letting the button go copied {copied:?} instead of the words picked out"
         );
+        // And the panel says so: a copy nobody is told about is a copy nobody trusts.
+        gui.settle();
+        assert!(
+            gui.harness.query_by_label_contains("Скопировано").is_some(),
+            "the panel copied the words and said nothing about it"
+        );
 
         gui.harness.event(egui::Event::PointerButton {
             pos: to,

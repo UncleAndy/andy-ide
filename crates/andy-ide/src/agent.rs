@@ -309,13 +309,12 @@ pub struct AgentState {
     /// Set when the person asked to copy from the panel: the window turns the shortcut
     /// into the copy event egui's own text selection listens for.
     pub wants_copy: bool,
-    /// Set when the clipboard has been asked for the words egui has selected, and the answer has not
-    /// come back yet.
+    /// When the clipboard was asked for the words egui has selected, while the answer is still on its way.
     ///
-    /// egui drops a label's selection on the press that opens the menu item, so by the time the item is
-    /// clicked the words are gone from egui's own state. They are taken while they are still there — at
-    /// the right-click — and kept here for the item to hand over.
-    pub wanting_copy_text: bool,
+    /// The answer is a *later* frame's event: a copy asked for when the button comes up is copied on the
+    /// next frame, and the window answers the clipboard request only after that. Waiting exactly one frame
+    /// was what kept the notice — and the letting go of the highlight — from ever happening.
+    pub wanting_copy_text: Option<std::time::Instant>,
     /// What was copied for the person, and when: the words are put in the clipboard the moment the left
     /// button comes up, and the panel says so for a few seconds — a copy nobody is told about is a copy
     /// nobody trusts.
@@ -487,7 +486,7 @@ impl Default for AgentState {
             queued: None,
             wants_focus: false,
             wants_copy: false,
-            wanting_copy_text: false,
+            wanting_copy_text: None,
             copied: None,
             card_rect: None,
             picked: Vec::new(),

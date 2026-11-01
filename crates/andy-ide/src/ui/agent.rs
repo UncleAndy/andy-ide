@@ -31,16 +31,34 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // Andy's way: the words go into the clipboard the moment the left button comes up, and the panel says
     // so. The words themselves come back from the clipboard — the same ones egui copied out of the text it
     // drew — so the count in the notice is the true one.
-    if state.agent.wanting_copy_text {
-        state.agent.wanting_copy_text = false;
+    if let Some(asked_at) = state.agent.wanting_copy_text {
         let words = ui.input(|input| {
             input.events.iter().find_map(|event| match event {
                 egui::Event::Paste(words) => Some(words.clone()),
                 _ => None,
             })
         });
-        if let Some(words) = words.filter(|words| !words.trim().is_empty()) {
-            state.agent.copied = Some((words.chars().count(), std::time::Instant::now()));
+        match words {
+            Some(words) if !words.trim().is_empty() => {
+                state.agent.copied = Some((words.chars().count(), std::time::Instant::now()));
+                state.agent.wanting_copy_text = None;
+            }
+            Some(_) => {
+                // The clipboard holds nothing: the release picked nothing out.
+                state.agent.wanting_copy_text = None;
+            }
+            None if asked_at.elapsed() > Duration::from_millis(700) => {
+                // No answer came: say nothing rather than guess, and let the highlight go all the same —
+                // whatever was picked out is in the clipboard by now.
+                state.agent.wanting_copy_text = None;
+            }
+            None => {
+                // Still waiting for the window to answer, and the panel has to keep drawing or the answer
+                // arrives to a window that never comes back for it.
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+            }
+        }
+        if state.agent.wanting_copy_text.is_none() {
             // The highlight has done its job: the words are in the clipboard, and a wash left behind would
             // say "picked out" when nothing is.
             ui.ctx()
@@ -843,7 +861,11 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // the left button came up, and the panel says so for a few seconds after.
             if let Some((count, when)) = state.agent.copied {
                 if when.elapsed() < Duration::from_secs(3) {
-                    let said = format!("Скопировано: {count} знаков");
+                    let said = if count == 0 {
+                        "Скопировано в буфер".to_owned()
+                    } else {
+                        format!("Скопировано: {count} знаков")
+                    };
                     if room_for(ui, &said) {
                         ui.label(said);
                         ui.ctx().request_repaint_after(Duration::from_millis(200));
@@ -1212,9 +1234,19 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                 .interact_pos()
                 .is_some_and(|pos| conversation.contains(pos))
     });
-    if let_go_of_the_words {
+    if let_go_of_the_words
+        && ui
+            .ctx()
+            .plugin::<egui::text_selection::LabelSelectionState>()
+            .lock()
+            .has_selection()
+    {
+        // Something is picked out, so letting go of the button is a copy. egui does it on the next frame,
+        // from its own selection — and the panel says so at once rather than waiting to be told: the count
+        // is filled in if the window answers the clipboard request, and the words are in there either way.
         state.agent.wants_copy = true;
-        state.agent.wanting_copy_text = true;
+        state.agent.wanting_copy_text = Some(std::time::Instant::now());
+        state.agent.copied = Some((0, std::time::Instant::now()));
     }
     // A right-click is not a reason to lose the selection — nothing but a new drag, or a click that
     // picks nothing out, writes it. The reading itself happens *after* the conversation has been drawn
