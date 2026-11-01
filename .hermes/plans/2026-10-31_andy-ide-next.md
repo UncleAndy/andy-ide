@@ -209,3 +209,21 @@ JSON, и второй набор типов только разошёлся бы
 **Осталось:** `list_sessions`, `cancel`, `set_model`/`set_mode`/`set_option`, `begin`/`load_into` как
 отдельные приказы, ответы на `fs`/`terminal` (сегодня их нет вовсе), `Setup` из `ConfigOptionUpdate` /
 `CurrentModeUpdate` / `initialized`-состояния (сегодня такие обновления уходят как `Event::Other`).
+### Шаг 2 закрыт — 2026-11-01
+
+Поверхность `Session` переведена на SDK целиком: рукопожатие, события, ход, дозволение и форма выбора,
+`begin`/`load_into`, `list_sessions`, `cancel`, `set_mode`/`set_option`/`set_model`, установка из
+`config_option_update`/`current_mode_update`. Проверки — `crates/ide-agents/tests/sdk_session.rs` (10),
+у каждой свой контроль. Замер и таблица — `docs/acp-sdk-mapping.md`.
+
+Две вещи, которые нашлись только на настоящем агенте:
+
+1. **Hermes шлёт `models`, а схема 1.13.0 их не знает.** Типизированный `session/new` это поле отбрасывает —
+   меню моделей панели пустеет. Ответы на `session/new`/`session/load` читаются сырыми (`NewSessionRaw`),
+   разбираются прежним `session_state`. Контроль падает ровно на этом.
+2. **Смена модели с Hermes 0.22.5 стандартного пути не имеет**: в схеме нет `session/set_model`, а настройки
+   `model` Hermes не предлагает (у него вообще нет `configOptions`). Панель сообщает об этом честно. Решение —
+   на стороне агента; Hermes не правим без разрешения Andy.
+
+Осталось по плану: шаг 3 — подменить реализацию за `Session`, чтобы `crates/andy-ide` не трогать (приёмка —
+`tests/conversation.rs` и панельные проверки), и проверить панель на настоящем агенте.

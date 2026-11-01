@@ -124,6 +124,9 @@ fn main() -> anyhow::Result<()> {
             .block_task()
             .await?;
         println!("SESSION {}", session.session_id);
+        // The whole answer, as the standard's own types kept it: what is missing here is what a typed
+        // request drops, and that difference is what the mapping table is written about.
+        println!("NEW {}", serde_json::to_string(&session)?);
 
         let answer = cx
             .send_request(PromptRequest::new(

@@ -20,12 +20,13 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, AvailableCommandInput, ContentBlock, CreateElicitationRequest,
-    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationContentValue,
-    ElicitationMode, Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TextContent,
-    ToolCallStatus,
+    AvailableCommand, AvailableCommandInput, CancelNotification, ContentBlock,
+    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationContentValue, ElicitationMode, Implementation, InitializeRequest,
+    ListSessionsRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionValue,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    StopReason, TextContent, ToolCallStatus,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client, Responder};
 use anyhow::Context as _;
@@ -33,8 +34,11 @@ use async_process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use futures::StreamExt;
 use futures::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 
-use crate::protocol::{AgentCommand, ChoiceRequest, PermissionRequest, SessionState, Usage};
-use crate::session::{AgentSpec, Event, PermissionPolicy};
+use crate::protocol::{
+    AgentCommand, ChoiceRequest, ConfigOption, Model, PermissionRequest, SessionInfo, SessionState,
+    Usage, options_of, session_state, sessions_of,
+};
+use crate::session::{ANSWER, AgentSpec, Event, HELLO, PermissionPolicy};
 use crate::wire::Wire;
 
 /// An agent started for one session, with the transport the SDK drives.
@@ -230,6 +234,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReportingReader<R> {
 /// not answered `initialize` within this is not one this window can use.
 const HANDSHAKE: Duration = Duration::from_secs(60);
 
+/// How long a page of conversations may take.
+const SESSIONS: Duration = Duration::from_secs(10);
+
+/// How many conversations the panel keeps from a list that goes on forever.
+const SESSIONS_KEPT: usize = 200;
+
+/// The name the standard gives the setting that picks the model.
+///
+/// The standard has no request of its own for the model: it is a setting of the agent's, so this is what
+/// the setting is looked for by when the agent names no models of its own.
+const MODEL: &str = "model";
+
 /// A question the agent asked and the person has not answered yet.
 ///
 /// The responder is the protocol's own handle for the request: it carries the id the agent is waiting on, so
@@ -266,12 +282,45 @@ enum Order {
         /// What they picked or wrote, or nothing for a refusal.
         chosen: Option<Vec<String>>,
     },
+    /// The panel changes a setting; the agent's own settings come back on the channel.
+    Change {
+        /// What is being changed.
+        what: Change,
+        /// Where the settings the agent read back go.
+        done: std::sync::mpsc::Sender<anyhow::Result<Vec<ConfigOption>>>,
+    },
+    /// The panel opens a conversation: a fresh one, or the one it names.
+    Open {
+        /// The conversation to pick up, or nothing for a fresh one.
+        session: Option<String>,
+        /// Where the id, whether it was resumed, and the settings go.
+        done: std::sync::mpsc::Sender<anyhow::Result<(String, bool, SessionState)>>,
+    },
+    /// The panel asks which conversations the agent knows of.
+    Sessions(std::sync::mpsc::Sender<anyhow::Result<Vec<SessionInfo>>>),
+    /// The agent is asked to stop the turn in flight, keeping the conversation.
+    Cancel,
+}
+
+/// A change of setting the panel asked for.
+enum Change {
+    /// The mode the agent answers in.
+    Mode(String),
+    /// One of the other settings, by the id the agent gave it.
+    Setting {
+        /// Which setting.
+        config: String,
+        /// The choice to put in force.
+        value: String,
+    },
 }
 
 /// What the handshake answered, handed back to whoever started the session.
 struct Ready {
     /// Whether the conversation was picked up from an earlier run.
     resumed: bool,
+    /// The models, modes and settings the agent opened the conversation with.
+    state: SessionState,
 }
 
 /// A running agent, spoken to through the standard's own client.
@@ -329,6 +378,7 @@ impl Session {
         let complaints = Arc::new(Mutex::new(String::new()));
         let waiting: Arc<Mutex<HashMap<u64, Waiting>>> = Arc::new(Mutex::new(HashMap::new()));
         let questions = Arc::new(AtomicU64::new(1));
+        let settings: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
         let child = Arc::new(Mutex::new(started.child));
 
         let cwd = root.to_path_buf();
@@ -337,6 +387,7 @@ impl Session {
             let complaints = Arc::clone(&complaints);
             let waiting = Arc::clone(&waiting);
             let questions = Arc::clone(&questions);
+            let settings = Arc::clone(&settings);
             let wire = Arc::clone(&wire);
             let record = Arc::clone(&wire);
             std::thread::Builder::new()
@@ -353,6 +404,7 @@ impl Session {
                         wire,
                         waiting,
                         questions,
+                        settings,
                         policy,
                         resume,
                         cwd,
@@ -378,13 +430,15 @@ impl Session {
             }
         };
         step_said(progress.as_ref(), "ready");
+        let mut state = ready.state;
+        fill_models(&mut state);
         Ok(Self {
             orders: orders_tx,
             events,
             child,
             id,
             resumed: ready.resumed,
-            state: SessionState::default(),
+            state,
             usage: None,
             complaints,
             closed: false,
@@ -499,6 +553,119 @@ impl Session {
             .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
     }
 
+    /// Opens a fresh conversation with the agent.
+    pub fn begin(&mut self) -> anyhow::Result<()> {
+        self.state = self.open(None)?;
+        Ok(())
+    }
+
+    /// Picks up an earlier conversation, if the agent still has it.
+    pub fn load_into(&mut self, session: &str) -> anyhow::Result<()> {
+        self.state = self.open(Some(session.to_owned()))?;
+        Ok(())
+    }
+
+    /// The conversations the agent knows of, in pages, up to what the panel keeps.
+    pub fn list_sessions(&mut self) -> anyhow::Result<Vec<SessionInfo>> {
+        let (done, answer) = std::sync::mpsc::channel();
+        self.orders
+            .unbounded_send(Order::Sessions(done))
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))?;
+        answer
+            .recv_timeout(SESSIONS)
+            .map_err(|_| anyhow::anyhow!("the agent listed no conversations in time"))?
+    }
+
+    /// Asks the agent to stop the turn in flight, keeping the conversation.
+    ///
+    /// A notification, not a request: the standard has no answer to it — a stopped turn ends in
+    /// `cancelled`, and that arrives through [`Session::next_event`] like any other ending.
+    pub fn cancel(&mut self) -> anyhow::Result<()> {
+        self.orders
+            .unbounded_send(Order::Cancel)
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
+    }
+
+    /// Changes the mode the agent answers in.
+    pub fn set_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+        self.change(Change::Mode(mode.to_owned()))?;
+        // Only after the agent agreed: a panel that shows a mode the agent never took is a panel that
+        // lies about how hard the agent is thinking.
+        self.state.current_mode = Some(mode.to_owned());
+        Ok(())
+    }
+
+    /// Changes one of the settings the agent offers: how hard it thinks, in this panel.
+    pub fn set_option(&mut self, config: &str, value: &str) -> anyhow::Result<()> {
+        let options = self.change(Change::Setting {
+            config: config.to_owned(),
+            value: value.to_owned(),
+        })?;
+        self.settings_taken(config, value, options);
+        Ok(())
+    }
+
+    /// Changes the model, through the setting the standard gives for it.
+    pub fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
+        let config = model_setting(&self.state.options)
+            .map(|setting| setting.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("this agent offers no setting for the model"))?;
+        let options = self.change(Change::Setting {
+            config: config.clone(),
+            value: model.to_owned(),
+        })?;
+        self.settings_taken(&config, model, options);
+        // Only after the agent agreed.
+        self.state.current_model = Some(model.to_owned());
+        Ok(())
+    }
+
+    /// Asks the connection to change a setting and waits for the agent's own settings back.
+    fn change(&mut self, what: Change) -> anyhow::Result<Vec<ConfigOption>> {
+        let (done, answer) = std::sync::mpsc::channel();
+        self.orders
+            .unbounded_send(Order::Change { what, done })
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))?;
+        answer
+            .recv_timeout(ANSWER)
+            .map_err(|_| anyhow::anyhow!("the agent did not answer in time"))?
+    }
+
+    /// Opens a conversation and takes what the agent says it is.
+    fn open(&mut self, session: Option<String>) -> anyhow::Result<SessionState> {
+        let (done, answer) = std::sync::mpsc::channel();
+        self.orders
+            .unbounded_send(Order::Open { session, done })
+            .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))?;
+        let (_, resumed, mut state) = answer
+            .recv_timeout(HELLO)
+            .map_err(|_| anyhow::anyhow!("the agent did not open the conversation in time"))??;
+        self.resumed = resumed;
+        fill_models(&mut state);
+        Ok(state)
+    }
+
+    /// Keeps the settings the agent read back, and the one that was asked for when it read none.
+    ///
+    /// The reply carries the settings read back from the agent, so the panel shows what the agent accepted
+    /// rather than what was asked of it. An agent that answers without the list took the choice, and the one
+    /// that was asked for stands.
+    fn settings_taken(&mut self, config: &str, value: &str, options: Vec<ConfigOption>) {
+        if options.is_empty() {
+            if let Some(setting) = self
+                .state
+                .options
+                .iter_mut()
+                .find(|setting| setting.id == config)
+            {
+                setting.current = Some(value.to_owned());
+            }
+        } else {
+            self.state.options = options;
+        }
+        fill_models(&mut self.state);
+    }
+
     /// Ends the conversation: the agent is asked to stop, then killed.
     pub fn stop(&mut self) {
         let _ = self.orders.unbounded_send(Order::Stop);
@@ -544,12 +711,14 @@ async fn converse(
     wire: Arc<dyn Wire>,
     waiting: Arc<Mutex<HashMap<u64, Waiting>>>,
     questions: Arc<AtomicU64>,
+    settings: Arc<Mutex<SessionState>>,
     policy: PermissionPolicy,
     resume: Option<String>,
     cwd: PathBuf,
 ) -> anyhow::Result<()> {
     let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
     let told = events.clone();
+    let notes = Arc::clone(&settings);
     // Each handler is a `move` closure of its own, so each gets its own share of the same state.
     let asking_permission = events.clone();
     let waiting_permission = Arc::clone(&waiting);
@@ -627,7 +796,7 @@ async fn converse(
         )
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                if let Some(event) = event_of(&notification.update) {
+                if let Some(event) = event_of(&notification.update, &notes) {
                     let _ = told.send(event);
                 }
                 Ok(())
@@ -650,25 +819,36 @@ async fn converse(
                 init.protocol_version
             ));
 
-            let (opened, resumed) = match resume {
+            // What the agent says the conversation is comes from its own answer, read the way this project
+            // already reads it: the standard's shapes and the panel's are the same JSON.
+            let (mut opened, resumed, state) = match resume {
                 Some(session) => {
-                    cx.send_request(LoadSessionRequest::new(session.clone(), cwd.clone()))
+                    let answer = cx
+                        .send_request(LoadSessionRaw {
+                            session_id: session.clone(),
+                            cwd: cwd.clone(),
+                        })
                         .block_task()
                         .await?;
-                    (session, true)
+                    (session, true, session_state(&answer))
                 }
                 None => {
                     let answer = cx
-                        .send_request(NewSessionRequest::new(cwd.clone()))
+                        .send_request(NewSessionRaw { cwd: cwd.clone() })
                         .block_task()
                         .await?;
-                    (answer.session_id.to_string(), false)
+                    let opened = session_of(&answer)?;
+                    (opened, false, session_state(&answer))
                 }
             };
             if let Ok(mut named) = id.lock() {
                 *named = opened.clone();
             }
-            let _ = ready.send(Ready { resumed });
+            if let Ok(mut known) = settings.lock() {
+                *known = state.clone();
+                fill_models(&mut known);
+            }
+            let _ = ready.send(Ready { resumed, state });
 
             // A turn is a task of its own and not something the loop waits on: the person's answer arrives
             // *while* a turn runs — that is what a permission request is — so a loop that waited for the
@@ -735,6 +915,96 @@ async fn converse(
                             let _ = responder.respond(CreateElicitationResponse::new(action));
                         }
                     }
+                    Order::Change { what, done } => {
+                        let outcome = match what {
+                            Change::Mode(mode) => cx
+                                .send_request(SetSessionModeRequest::new(opened.clone(), mode))
+                                .block_task()
+                                .await
+                                .map(|_| Vec::new())
+                                .map_err(|error| anyhow::anyhow!("{error}")),
+                            Change::Setting { config, value } => cx
+                                .send_request(SetSessionConfigOptionRequest::new(
+                                    opened.clone(),
+                                    config,
+                                    SessionConfigOptionValue::value_id(value),
+                                ))
+                                .block_task()
+                                .await
+                                .map(|answer| options_of(&json_of(&answer)))
+                                .map_err(|error| anyhow::anyhow!("{error}")),
+                        };
+                        let _ = done.send(outcome);
+                    }
+                    Order::Open { session, done } => {
+                        let outcome = match session {
+                            Some(session) => cx
+                                .send_request(LoadSessionRaw {
+                                    session_id: session.clone(),
+                                    cwd: cwd.clone(),
+                                })
+                                .block_task()
+                                .await
+                                .map(|answer| (session, true, session_state(&answer)))
+                                .map_err(|error| anyhow::anyhow!("{error}")),
+                            None => cx
+                                .send_request(NewSessionRaw { cwd: cwd.clone() })
+                                .block_task()
+                                .await
+                                .and_then(|answer| {
+                                    Ok((session_of(&answer)?, false, session_state(&answer)))
+                                })
+                                .map_err(|error| anyhow::anyhow!("{error}")),
+                        };
+                        // The conversation in hand is the one that was asked for, from here on.
+                        if let Ok((fresh, _, state)) = &outcome {
+                            opened = fresh.clone();
+                            if let Ok(mut named) = id.lock() {
+                                *named = fresh.clone();
+                            }
+                            if let Ok(mut known) = settings.lock() {
+                                *known = state.clone();
+                                fill_models(&mut known);
+                            }
+                        }
+                        let _ = done.send(outcome);
+                    }
+                    Order::Sessions(done) => {
+                        let mut all: Vec<SessionInfo> = Vec::new();
+                        let mut cursor: Option<String> = None;
+                        let mut trouble = None;
+                        while all.len() < SESSIONS_KEPT {
+                            // No directory filter: this window asks for every conversation the agent
+                            // knows of, the same request the session made before the migration.
+                            let request = ListSessionsRequest::new().cursor(cursor.clone());
+                            match cx.send_request(request).block_task().await {
+                                Ok(answer) => {
+                                    let (mut page, next) = sessions_of(&json_of(&answer));
+                                    if page.is_empty() {
+                                        break;
+                                    }
+                                    all.append(&mut page);
+                                    match next {
+                                        Some(next) => cursor = Some(next),
+                                        None => break,
+                                    }
+                                }
+                                Err(error) => {
+                                    trouble = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        let listed = match trouble {
+                            Some(error) => Err(anyhow::anyhow!("{error}")),
+                            None => Ok(all),
+                        };
+                        let _ = done.send(listed);
+                    }
+                    Order::Cancel => {
+                        // Nothing is waited for: the answer to a stopped turn is the turn's own ending.
+                        let _ = cx.send_notification(CancelNotification::new(opened.clone()));
+                    }
                 }
             }
             Ok(())
@@ -750,6 +1020,15 @@ async fn converse(
 /// translated into a second set of types that could drift.
 fn json_of<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// The conversation the agent opened, out of its own answer.
+fn session_of(answer: &serde_json::Value) -> anyhow::Result<String> {
+    answer
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("the agent opened no conversation"))
 }
 
 /// Takes the question with that number, if it is still waiting.
@@ -768,6 +1047,68 @@ fn outcome_of(option: Option<&str>) -> RequestPermissionOutcome {
         }
         None => RequestPermissionOutcome::Cancelled,
     }
+}
+
+/// The setting the agent offers for the model, if it offers one.
+fn model_setting(options: &[ConfigOption]) -> Option<&ConfigOption> {
+    options
+        .iter()
+        .find(|setting| setting.category.as_deref() == Some(MODEL) || setting.id == MODEL)
+}
+
+/// The models the agent offers: the ones it named, or, when it names none, the choices of the setting it
+/// offers for the model.
+///
+/// The standard has no `models` of its own — the model is a setting — while Hermes names them in a field of
+/// its own. A panel whose model list is empty because the agent answered by the book is a panel that lost a
+/// feature to a difference in spelling.
+fn fill_models(state: &mut SessionState) {
+    if !state.models.is_empty() {
+        return;
+    }
+    let Some(setting) = model_setting(&state.options) else {
+        return;
+    };
+    state.models = setting
+        .choices
+        .iter()
+        .map(|choice| Model {
+            id: choice.value.clone(),
+            name: choice.name.clone(),
+        })
+        .collect();
+    if state.current_model.is_none() {
+        state.current_model = setting.current.clone();
+    }
+}
+
+/// The standard's own `session/new`, asked for with the answer kept as the wire's own words.
+///
+/// The typed request drops whatever the schema has no room for, and one of those things is what Hermes sends
+/// for its models: `models` is not in the standard, where the model is one of the agent's settings. A panel
+/// whose model menu is empty because the agent answered with a field the schema does not know is a panel
+/// that lost a feature to a spelling difference — so this one answer is read raw and handed to the parsers
+/// this project already has.
+#[derive(
+    Debug, Clone, serde::Deserialize, serde::Serialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "session/new", response = serde_json::Value)]
+struct NewSessionRaw {
+    /// The directory the conversation is opened in.
+    cwd: PathBuf,
+}
+
+/// The standard's own `session/load`, raw for the same reason as [`NewSessionRaw`].
+#[derive(
+    Debug, Clone, serde::Deserialize, serde::Serialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "session/load", response = serde_json::Value)]
+#[serde(rename_all = "camelCase")]
+struct LoadSessionRaw {
+    /// The conversation to pick up.
+    session_id: String,
+    /// The directory it is picked up in.
+    cwd: PathBuf,
 }
 
 /// How the agent named itself, for the record.
@@ -791,7 +1132,11 @@ fn word_of(reason: &StopReason) -> String {
 }
 
 /// One update, as the events the panel knows. `None` when it is nothing to show.
-fn event_of(update: &SessionUpdate) -> Option<Event> {
+///
+/// The settings are kept here as well as read: a change the panel was not expecting is still a change it
+/// can show, and it hears about settings the way it heard about them when the session opened — one message
+/// carrying all of them.
+fn event_of(update: &SessionUpdate, settings: &Arc<Mutex<SessionState>>) -> Option<Event> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => text_of(&chunk.content).map(Event::Text),
         SessionUpdate::AgentThoughtChunk(chunk) => text_of(&chunk.content).map(Event::Thinking),
@@ -824,6 +1169,17 @@ fn event_of(update: &SessionUpdate) -> Option<Event> {
             used: update.used,
             window: Some(update.size),
         })),
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            let mut known = settings.lock().ok()?;
+            known.options = options_of(&json_of(update));
+            fill_models(&mut known);
+            Some(Event::Setup(known.clone()))
+        }
+        SessionUpdate::CurrentModeUpdate(update) => {
+            let mut known = settings.lock().ok()?;
+            known.current_mode = Some(update.current_mode_id.to_string());
+            Some(Event::Setup(known.clone()))
+        }
         other => Some(Event::Other {
             kind: kind_of(other),
         }),

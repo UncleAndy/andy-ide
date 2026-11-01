@@ -204,3 +204,196 @@ fn a_question_with_variants_is_answered_with_what_was_picked() {
     );
     session.stop();
 }
+
+#[test]
+fn the_mode_and_the_settings_are_changed_and_the_agent_says_what_it_took() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    assert_eq!(
+        session.state().current_mode.as_deref(),
+        Some("default"),
+        "the modes the agent offers did not arrive with the conversation"
+    );
+    session.set_mode("dont_ask").expect("the mode goes out");
+    assert_eq!(
+        session.state().current_mode.as_deref(),
+        Some("dont_ask"),
+        "the panel shows a mode the agent was never asked for"
+    );
+
+    fn effort(session: &acp::Session) -> Option<String> {
+        session
+            .state()
+            .options
+            .iter()
+            .find(|setting| setting.id == "reasoning_effort")
+            .map(|setting| setting.current.clone().unwrap_or_default())
+    }
+    assert_eq!(
+        effort(&session).as_deref(),
+        Some("default"),
+        "the settings the agent offers did not arrive with the conversation"
+    );
+    session
+        .set_option("reasoning_effort", "low")
+        .expect("the setting goes out");
+    assert_eq!(
+        effort(&session).as_deref(),
+        Some("low"),
+        "the panel shows a setting the agent did not take"
+    );
+    session.stop();
+}
+
+#[test]
+fn the_turn_in_flight_is_stopped_and_ends_in_the_agents_own_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+    session.start_turn("slow").expect("the turn goes out");
+    // Let it be well in flight before it is stopped.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(300) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    session.cancel().expect("the stop goes out");
+
+    let mut finished = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && finished.is_none() {
+        if let Some(Event::Finished(word)) = session.next_event(Duration::from_millis(200)) {
+            finished = Some(word);
+        }
+    }
+    assert_eq!(
+        finished.as_deref(),
+        Some("cancelled"),
+        "the stopped turn did not end in the agent's own word"
+    );
+    session.stop();
+}
+
+#[test]
+fn the_conversations_the_agent_knows_of_arrive_with_their_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    let conversations = session
+        .list_sessions()
+        .expect("the agent lists its conversations");
+    assert!(!conversations.is_empty(), "the agent listed nothing at all");
+    assert!(
+        conversations.iter().all(|row| !row.id.is_empty()),
+        "a conversation arrived without an id: {conversations:?}"
+    );
+    assert!(
+        conversations.iter().any(|row| row.title.is_some()),
+        "no conversation arrived with a name: {conversations:?}"
+    );
+    session.stop();
+}
+
+#[test]
+fn a_conversation_is_picked_up_again_and_one_the_agent_forgot_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    session.begin().expect("a fresh conversation opens");
+    assert!(
+        !session.resumed(),
+        "a fresh conversation was reported as resumed"
+    );
+    assert_eq!(session.id(), "stand-in-session");
+
+    session
+        .load_into("stand-in-session")
+        .expect("an earlier conversation is picked up");
+    assert!(
+        session.resumed(),
+        "a picked-up conversation was reported as fresh"
+    );
+    assert_eq!(session.id(), "stand-in-session");
+
+    assert!(
+        session.load_into("forgotten-one").is_err(),
+        "a conversation the agent does not have was reported as opened"
+    );
+    session.stop();
+}
+
+/// The stand-in, started with the flags a test needs.
+fn stand_in_with(flags: &[&str]) -> AgentSpec {
+    let mut spec = stand_in();
+    spec.args = flags.iter().map(|flag| (*flag).to_owned()).collect();
+    spec
+}
+
+#[test]
+fn the_model_menu_comes_from_the_setting_the_standard_gives_it() {
+    // An agent that answers by the book: no `models` field (the standard has none — the model is one of the
+    // agent's settings), the model offered as a `select` setting with the `model` category.
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(
+        &stand_in_with(&["--no-models", "--model-as-setting"]),
+        dir.path(),
+        PermissionPolicy::Ask,
+    )
+    .expect("the agent starts and answers the handshake");
+
+    let models = session.state().models.clone();
+    assert!(
+        models.iter().any(|model| model.id == "large"),
+        "the model menu did not arrive at all: {models:?}"
+    );
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("small"),
+        "the model in force did not arrive with the conversation"
+    );
+
+    session.set_model("large").expect("the model goes out");
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("large"),
+        "the panel shows a model the agent never took"
+    );
+    session.stop();
+}
+
+#[test]
+fn the_model_menu_of_an_agent_that_names_its_models_hermes_way_still_arrives() {
+    // What Hermes 0.22.5 really sends: a `models` field of its own, which the standard's types have no room
+    // for. Measured against the agent itself (`examples/acp_probe.rs`), and the reason the two session
+    // answers are read raw.
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    let models = session.state().models.clone();
+    assert!(
+        models.iter().any(|model| model.id == "large"),
+        "the model menu was lost to a field the schema does not know: {models:?}"
+    );
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("small"),
+        "the model in force did not arrive with the conversation"
+    );
+
+    // And the honest limit of the standard with such an agent: there is no setting for the model to change,
+    // so the panel is told so rather than shown a change that never happened.
+    assert!(
+        session.set_model("large").is_err(),
+        "a model was changed through a setting this agent does not offer"
+    );
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some("small"),
+        "the panel shows a model the agent never took"
+    );
+    session.stop();
+}

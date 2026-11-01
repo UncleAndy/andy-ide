@@ -102,6 +102,27 @@ const EFFORTS: [&str; 9] = [
     "default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
+/// Whether the stand-in names its models in the field of its own that Hermes uses.
+///
+/// `--no-models` makes it answer by the book instead: no `models` field at all, the way the standard
+/// carries the model — as one of the agent's settings, which is what `--model-as-setting` offers.
+fn models_named() -> bool {
+    !std::env::args().any(|arg| arg == "--no-models")
+}
+
+/// Whether the stand-in offers the model as a *setting*, the way the standard carries it.
+fn model_as_setting() -> bool {
+    std::env::args().any(|arg| arg == "--model-as-setting")
+}
+
+/// The models as Hermes names them, or nothing when the stand-in answers by the book.
+fn models_field(model: &str) -> Value {
+    if !models_named() {
+        return Value::Null;
+    }
+    json!({"currentModelId": model, "availableModels": models_offered()})
+}
+
 /// Whether the stand-in offers the level at all.
 ///
 /// `--no-levels` makes it behave like Hermes 0.22.5 over ACP, which offers the edit policy
@@ -130,7 +151,7 @@ fn mode_policy(mode: &str) -> &'static str {
 }
 
 /// The settings on offer, as ACP's `configOptions`.
-fn settings(effort: &str, policy: &str) -> Value {
+fn settings(effort: &str, policy: &str, model: &str) -> Value {
     let mut options = vec![json!({
         "id": "edit_approval_policy",
         "name": "Edits",
@@ -143,6 +164,30 @@ fn settings(effort: &str, policy: &str) -> Value {
             {"value": "session", "name": "Don't Ask"}
         ]
     })];
+    // The model as a *setting*, the way the standard carries it: `models` is Hermes' own spelling of it,
+    // and the typed SDK drops what it does not know — so this is where a panel's model menu comes from
+    // when the agent answers by the book.
+    if model_as_setting() {
+        options.push(json!({
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": model,
+        "options": models_offered()
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|offered| {
+                Some(json!({
+                    "value": offered.get("modelId")?.as_str()?,
+                    "name": offered.get("name")?.as_str()?,
+                }))
+            })
+            .collect::<Vec<_>>()
+        }));
+    }
     if levels_offered() {
         options.push(json!({
             "id": "reasoning_effort",
@@ -417,10 +462,7 @@ fn main() {
                     id,
                     json!({
                         "sessionId": session_name,
-                        "models": {
-                            "currentModelId": model,
-                            "availableModels": models_offered()
-                        },
+                        "models": models_field(&model),
                         "modes": {
                             "currentModeId": policy_mode(&policy),
                             "availableModes": [
@@ -429,7 +471,7 @@ fn main() {
                                 {"id": "dont_ask", "name": "Don't Ask"}
                             ]
                         },
-                        "configOptions": settings(&effort, &policy)
+                        "configOptions": settings(&effort, &policy, &model)
                     }),
                 );
                 if working {
@@ -496,10 +538,7 @@ fn main() {
                     id,
                     json!({
                         "sessionId": session_name,
-                        "models": {
-                            "currentModelId": model,
-                            "availableModels": models_offered()
-                        },
+                        "models": models_field(&model),
                         "modes": {
                             "currentModeId": policy_mode(&policy),
                             "availableModes": [
@@ -508,7 +547,7 @@ fn main() {
                                 {"id": "dont_ask", "name": "Don't Ask"}
                             ]
                         },
-                        "configOptions": settings(&effort, &policy)
+                        "configOptions": settings(&effort, &policy, &model)
                     }),
                 );
                 // The commands it offers, announced once the session is up, the way Hermes
@@ -557,11 +596,15 @@ fn main() {
                     .unwrap_or_default()
                     .to_owned();
                 match config {
+                    "model" => model = value,
                     "reasoning_effort" => effort = value,
                     "edit_approval_policy" => policy = value,
                     _ => {}
                 }
-                answer(id, json!({"configOptions": settings(&effort, &policy)}));
+                answer(
+                    id,
+                    json!({"configOptions": settings(&effort, &policy, &model)}),
+                );
             }
             "session/set_model" => {
                 if let Some(chosen) = message
