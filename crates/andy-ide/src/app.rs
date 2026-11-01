@@ -377,6 +377,33 @@ impl App {
         if !std::sync::Arc::ptr_eq(&self.notifier, &self.state.agent.notifier) {
             self.state.agent.notifier = std::sync::Arc::clone(&self.notifier);
         }
+        // And where the person is: the worker decides by this whether a notice is worth sending, and the
+        // worker cannot see the window. Only a frame knows, so a frame says.
+        let looking = crate::notify::Looking {
+            focused: ui.ctx().input(|input| input.focused),
+            panel_in_front: self.panel_in_front(),
+        };
+        *self
+            .state
+            .agent
+            .looking
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = looking;
+    }
+
+    /// Whether the agent panel is the thing on screen, and not merely present in the dock.
+    ///
+    /// A tab that stands behind another tab is not saying anything: the person looking at the terminal or
+    /// at the editor cannot see the question waiting for them. Only the tab that is actually shown, in an
+    /// uncollapsed leaf, is already saying it.
+    pub(crate) fn panel_in_front(&self) -> bool {
+        let Some(path) = self.dock.find_tab(&Tab::Agent) else {
+            return false;
+        };
+        match self.dock[path.node_path()].get_leaf() {
+            Some(leaf) => !leaf.collapsed && leaf.active == path.tab,
+            None => false,
+        }
     }
 
     /// A surface that writes the notifications down, for a check to ask what the window said.
@@ -798,6 +825,69 @@ mod tests {
                 .iter()
                 .any(|cause| cause.file.ends_with("agent.rs") && cause.line != 0),
             "the worker asked the window for a frame, and the window did not hear it"
+        );
+    }
+
+    /// One frame of the window drawn by hand, with or without the keyboard.
+    ///
+    /// Whether the window is in front of the person is not something a check can ask for through the
+    /// harness, and it is exactly what a notice depends on.
+    fn draw_frame_with_focus(app: &mut App, focused: bool) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            focused,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_frame_says_where_the_person_is() {
+        // The worker decides whether a notice is worth sending and cannot see the window: all it has is
+        // what a frame wrote down. Both halves matter — the keyboard, and whether the panel the notice is
+        // about is the thing on screen.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut app = app_with_project(project.path(), config.path());
+        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
+
+        draw_frame_with_focus(&mut app, true);
+        assert_eq!(
+            *app.state.agent.looking.lock().unwrap(),
+            crate::notify::Looking {
+                focused: true,
+                panel_in_front: true
+            },
+            "a window with the keyboard, the panel in front"
+        );
+
+        // The same window with the terminal in front: the agent's question is out of sight.
+        show_panel(&mut app.dock, &mut app.state, Tab::Terminal);
+        draw_frame_with_focus(&mut app, true);
+        assert_eq!(
+            *app.state.agent.looking.lock().unwrap(),
+            crate::notify::Looking {
+                focused: true,
+                panel_in_front: false
+            },
+            "the panel is behind the terminal"
+        );
+
+        // And the panel in front of an empty room.
+        show_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        draw_frame_with_focus(&mut app, false);
+        assert_eq!(
+            *app.state.agent.looking.lock().unwrap(),
+            crate::notify::Looking {
+                focused: false,
+                panel_in_front: true
+            },
+            "the person walked away from a window showing the panel"
         );
     }
 

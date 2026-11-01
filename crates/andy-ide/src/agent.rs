@@ -430,6 +430,9 @@ pub struct AgentState {
     /// The desk this window would speak to, handed to the worker when the agent is started: the
     /// worker is what tells the person now, wherever the window happens to be.
     pub(crate) notifier: Arc<dyn crate::notify::Surface>,
+    /// Where the person is, as far as the window can tell: filled in by every frame it draws, and read
+    /// by the worker, which is the thread that decides whether a notice is worth sending.
+    pub(crate) looking: Arc<Mutex<crate::notify::Looking>>,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -501,6 +504,7 @@ impl Default for AgentState {
             #[cfg(test)]
             connects: 0,
             notifier: Arc::new(crate::notify::System),
+            looking: Arc::new(Mutex::new(crate::notify::Looking::default())),
             waker: Waker::default(),
             worker: None,
             root: None,
@@ -661,7 +665,10 @@ impl AgentState {
         let (commands, jobs) = channel();
         let (answers, replies) = channel();
         let waker = self.waker.clone();
-        let desk = Arc::clone(&self.notifier);
+        let telling = Telling {
+            desk: Arc::clone(&self.notifier),
+            looking: Arc::clone(&self.looking),
+        };
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
             .spawn(move || {
@@ -675,7 +682,7 @@ impl AgentState {
                         outlet: answers,
                         waker,
                     },
-                    desk,
+                    telling,
                 )
             });
         match started {
@@ -1494,6 +1501,72 @@ impl AgentState {
 ///
 /// One place and not two: what the panel shows and what the desk is told are the same question, and
 /// an answer written out twice drifts.
+/// Who the worker tells, and where the person it tells is.
+///
+/// One thing and not two arguments: both are handed to the worker when the agent is started, both live
+/// in the panel's state, and together they are the whole question of whether a notice is worth sending.
+#[derive(Clone)]
+struct Telling {
+    /// The desk the window itself would speak to.
+    desk: Arc<dyn crate::notify::Surface>,
+    /// Where the person is, written by the window on every frame it draws.
+    looking: Arc<Mutex<crate::notify::Looking>>,
+}
+
+impl Telling {
+    /// Where the person is now, as far as the window last said.
+    fn where_is_the_person(&self) -> crate::notify::Looking {
+        self.looking.lock().map(|held| *held).unwrap_or_default()
+    }
+}
+
+/// Tells the desk about one event, unless the person is looking at the panel already.
+///
+/// One function, called by the worker where the agent speaks: the decision needs the person's
+/// whereabouts, which the window writes on every frame (`Looking`), and the reply goes back to the panel
+/// as `Reply::Told`. Returns what the desk said, or `None` when nothing was sent — the caller passes that
+/// on, so a held-back notice is visible in the log rather than being silence.
+fn tell_the_desk(
+    desk: &dyn crate::notify::Surface,
+    looking: crate::notify::Looking,
+    want: crate::notify::Want,
+    detail: &str,
+) -> Option<Result<u32, String>> {
+    if !crate::notify::should_tell(looking) {
+        // Said out loud, and said with the circumstances: without this line a notice nobody received
+        // cannot be told from an agent that never asked.
+        tracing::info!(
+            ?want,
+            %detail,
+            focused = looking.focused,
+            panel_in_front = looking.panel_in_front,
+            "the panel wants the person, and they are looking at it"
+        );
+        return None;
+    }
+    let (title, body) = want.message(detail);
+    let told = desk.show(&title, &body);
+    match &told {
+        Ok(id) => tracing::info!(
+            ?want,
+            %detail,
+            focused = looking.focused,
+            panel_in_front = looking.panel_in_front,
+            id,
+            "the desk took the notification, told by the agent's own thread"
+        ),
+        Err(reason) => tracing::warn!(
+            ?want,
+            %detail,
+            focused = looking.focused,
+            panel_in_front = looking.panel_in_front,
+            %reason,
+            "the desk refused the notification"
+        ),
+    }
+    Some(told)
+}
+
 fn asking_for(event: &AgentEvent) -> Option<(crate::notify::Want, String)> {
     match event {
         AgentEvent::Permission { request, .. } => {
@@ -1515,7 +1588,7 @@ fn work(
     progress: Arc<Mutex<String>>,
     commands: Receiver<Command>,
     replies: Replies,
-    desk: Arc<dyn crate::notify::Surface>,
+    telling: Telling,
 ) {
     // `Ask` and not `Allow`: an agent that can write files without a question can undo
     // an afternoon, and the panel is where that question is asked.
@@ -1680,24 +1753,12 @@ fn work(
             // the desk — is given no frames at all. A notice waiting for a frame waits for the person
             // to come back to the window, which is the one moment it is of no use.
             if let Some((want, detail)) = asking_for(&event) {
-                let (title, body) = want.message(&detail);
-                let told = desk.show(&title, &body);
-                match &told {
-                    Ok(id) => tracing::info!(
-                        ?want,
-                        %detail,
-                        id,
-                        "the desk took the notification, told by the agent's own thread"
-                    ),
-                    Err(reason) => tracing::warn!(
-                        ?want,
-                        %detail,
-                        %reason,
-                        "the desk refused the notification"
-                    ),
-                }
-                if replies.send(Reply::Told { title, told }).is_err() {
-                    return;
+                let looking = telling.where_is_the_person();
+                if let Some(told) = tell_the_desk(telling.desk.as_ref(), looking, want, &detail) {
+                    let (title, _) = want.message(&detail);
+                    if replies.send(Reply::Told { title, told }).is_err() {
+                        return;
+                    }
                 }
             }
             if replies.send(Reply::Event(event)).is_err() {
@@ -1793,6 +1854,52 @@ mod grouping_tests {
             the_panel_asked_for_it(&ctx),
             "the window was not asked for a frame, so an event of the agent waits for the person"
         );
+    }
+
+    #[test]
+    fn nothing_is_told_while_the_person_is_looking_at_the_panel() {
+        let desk = crate::notify::Written::default();
+        let want = crate::notify::Want::Asks;
+        let question = "Which variant should I write?";
+
+        // Looking at the panel: the question is already on the screen in front of them.
+        let here = crate::notify::Looking {
+            focused: true,
+            panel_in_front: true,
+        };
+        assert!(
+            tell_the_desk(&desk, here, want, question).is_none(),
+            "the desk was told about a question already on the screen"
+        );
+        assert!(
+            desk.shown().is_empty(),
+            "a notice was sent though the person is looking at the panel: {:?}",
+            desk.shown()
+        );
+
+        // Walked away from a window that shows the panel: what notices are for.
+        let away = crate::notify::Looking {
+            focused: false,
+            panel_in_front: true,
+        };
+        assert!(
+            tell_the_desk(&desk, away, want, question).is_some(),
+            "a person away from a window showing the panel was told nothing"
+        );
+
+        // The panel behind another tab, with the keyboard in this window: out of sight, so told.
+        let behind = crate::notify::Looking {
+            focused: true,
+            panel_in_front: false,
+        };
+        assert!(
+            tell_the_desk(&desk, behind, want, question).is_some(),
+            "a question behind another tab was not told"
+        );
+
+        let shown = desk.shown();
+        assert_eq!(shown.len(), 2, "the desk was told {shown:?}");
+        assert_eq!(shown[0].1, question, "the body is not the question itself");
     }
 
     #[test]

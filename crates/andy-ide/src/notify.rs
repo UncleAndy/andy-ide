@@ -41,6 +41,30 @@ impl Want {
     }
 }
 
+/// Where the person is, as far as the window can tell.
+///
+/// A notification is for someone who is not looking at the window, so this is what decides whether the
+/// desk is told at all. It is asked by the thread of the agent — the thread that tells — and the window
+/// fills it in on every frame it draws.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Looking {
+    /// The window has the keyboard.
+    pub focused: bool,
+    /// The agent's panel is the tab on screen, in a leaf that is not collapsed.
+    pub panel_in_front: bool,
+}
+
+/// Whether a notice is worth sending to a person who is where `looking` says.
+///
+/// Not sent while they are looking at the panel itself: the question is already on the screen in front of
+/// them, and a notice about something being read is noise. Everything else is told — including a window
+/// that has the keyboard with the panel behind another tab, where the agent waits out of sight, and a
+/// window nobody is at. The default (`Looking::default`) is the last of those on purpose: a window that
+/// has not drawn a frame yet cannot claim the person is looking at it.
+pub fn should_tell(looking: Looking) -> bool {
+    !(looking.focused && looking.panel_in_front)
+}
+
 /// Sends one notification from this very process, before anything else is drawn.
 ///
 /// Kept for the question the probes from a terminal cannot answer: whether the desk is willing to show
@@ -249,6 +273,55 @@ impl Surface for Written {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_is_for_someone_who_is_not_looking() {
+        // The expected answers are written out, not computed the way the code computes them.
+        let cases = [
+            (
+                Looking {
+                    focused: true,
+                    panel_in_front: true,
+                },
+                false,
+                "the person is looking at the panel",
+            ),
+            (
+                Looking {
+                    focused: true,
+                    panel_in_front: false,
+                },
+                true,
+                "the panel is behind another tab in a window that has the keyboard",
+            ),
+            (
+                Looking {
+                    focused: false,
+                    panel_in_front: true,
+                },
+                true,
+                "the window shows the panel and nobody is at it",
+            ),
+            (
+                Looking {
+                    focused: false,
+                    panel_in_front: false,
+                },
+                true,
+                "nobody is at the window",
+            ),
+        ];
+        for (looking, expected, why) in cases {
+            assert_eq!(should_tell(looking), expected, "{why}: {looking:?}");
+        }
+
+        // A window that has drawn no frame cannot claim the person is looking at it, so a notice that
+        // arrives before the first frame is still sent.
+        assert!(
+            should_tell(Looking::default()),
+            "the default held a notice back"
+        );
+    }
 
     #[test]
     fn each_want_says_what_it_is_about() {

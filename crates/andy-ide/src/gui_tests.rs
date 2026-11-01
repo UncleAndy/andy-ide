@@ -6902,6 +6902,17 @@ mod the_agent_panel {
         wait(&mut gui, "the agent starting", |gui| {
             gui.app().state.agent.status.starts_with("ready")
         });
+        // The person has walked off, and the panel is not the thing on screen: the notice is due.
+        {
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Agent);
+        }
+        gui.settle();
+        assert!(
+            !gui.app().state.agent.looking.lock().unwrap().panel_in_front,
+            "the check did not manage to put the panel out of sight"
+        );
+
         gui.app_mut().state.agent.input = "choose".to_owned();
         gui.app_mut().state.agent.send();
 
