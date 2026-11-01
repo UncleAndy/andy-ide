@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use egui::Ui;
 
-use crate::agent::{Line, LineLayout, Picked, Spot};
+use crate::agent::Line;
 use crate::state::AppState;
 use ide_agents::{AgentCommand, Model};
 
@@ -16,19 +16,37 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // its conversation would go unread.
     state.agent.shown_rect = Some(ui.max_rect());
     state.agent.shown = true;
-    // The copy shortcut was taken before the editor drew, so that it did not copy a line
-    // of code instead; here it becomes the event egui's text selection listens for, while
-    // the words are being drawn.
+    // The copy shortcut was taken before the editor drew, so that it did not copy a line of code
+    // instead; here it becomes the event egui's text selection listens for, while the words are drawn.
+    //
+    // The words are egui's own selection, and that is the point: egui draws the highlight out of the same
+    // galleys it hit-tests with, so what it copies and what a person sees picked out cannot disagree. The
+    // panel's own reading of a drag could — it rebuilt the words' layout to find the character under the
+    // pointer, and a rebuilt layout is not the one on screen. The panel only hands the event on.
     if state.agent.wants_copy {
         state.agent.wants_copy = false;
-        if let Some(text) = state.agent.picked_text() {
-            // The panel's own selection: copied here, so that egui's own state — which a press may
-            // have dropped, and which a right-click on the words did drop — cannot answer with
-            // something else, or with nothing.
-            ui.ctx().copy_text(text);
-        } else {
+        ui.ctx()
+            .input_mut(|input| input.events.push(egui::Event::Copy));
+    }
+    // Andy's way: the words go into the clipboard the moment the left button comes up, and the panel says
+    // so. The words themselves come back from the clipboard — the same ones egui copied out of the text it
+    // drew — so the count in the notice is the true one.
+    if state.agent.wanting_copy_text {
+        state.agent.wanting_copy_text = false;
+        let words = ui.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Paste(words) => Some(words.clone()),
+                _ => None,
+            })
+        });
+        if let Some(words) = words.filter(|words| !words.trim().is_empty()) {
+            state.agent.copied = Some((words.chars().count(), std::time::Instant::now()));
+            // The highlight has done its job: the words are in the clipboard, and a wash left behind would
+            // say "picked out" when nothing is.
             ui.ctx()
-                .input_mut(|input| input.events.push(egui::Event::Copy));
+                .plugin::<egui::text_selection::LabelSelectionState>()
+                .lock()
+                .clear_selection();
         }
     }
     // `Shift+Insert` pastes and `Ctrl+Insert` copies in every panel, and each panel maps them for
@@ -821,23 +839,18 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                 break 'facts;
             }
             ui.label(elapsed);
-            // What is picked out in the conversation, said in the row of facts as well as in the menu:
-            // a selection the panel keeps itself is otherwise invisible — the highlight looks much like
-            // any other, and a person reading the panel cannot tell the two apart.
-            if let Some(picked) = state.agent.picked_lines {
-                // Which lines, not just how many: a person checking the panel's own selection has to be
-                // able to see where it thinks it is, and a wrong line is invisible in a bare count.
-                let (from, to) = picked.ordered();
-                let picked_note = if from.line == to.line {
-                    format!("line {} picked", from.line + 1)
+            // A copy nobody is told about is a copy nobody trusts: the words went into the clipboard when
+            // the left button came up, and the panel says so for a few seconds after.
+            if let Some((count, when)) = state.agent.copied {
+                if when.elapsed() < Duration::from_secs(3) {
+                    let said = format!("Скопировано: {count} знаков");
+                    if room_for(ui, &said) {
+                        ui.label(said);
+                        ui.ctx().request_repaint_after(Duration::from_millis(200));
+                    }
                 } else {
-                    format!("lines {}–{} picked", from.line + 1, to.line + 1)
-                };
-                if !room_for(ui, &picked_note) {
-                    dropped = true;
-                    break 'facts;
+                    state.agent.copied = None;
                 }
-                ui.label(picked_note);
             }
             if state.agent.busy {
                 // A running timer has to be repainted to move, and the panel is otherwise
@@ -1187,40 +1200,21 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
         egui::pos2(room.left(), ui.cursor().top()),
         egui::pos2(room.right(), ui.cursor().top() + height),
     );
-    // The sensor that carries the menu is a *point*, not the conversation: a widget with a hover
-    // sense over the whole conversation is a widget that can be the one under the pointer — and egui
-    // drops a label's selection on any press that no selected label was hovered by. The anchor is
-    // only ever needed to hang the menu on; the pointer's own position is what the menu opens at.
-    let anchor_at = ui
-        .input(|input| input.pointer.interact_pos())
-        .unwrap_or_else(|| conversation.center());
-    let sensor = ui.interact(
-        egui::Rect::from_min_size(anchor_at, egui::Vec2::ZERO),
-        egui::Id::new("agent-conversation-menu"),
-        egui::Sense::hover(),
-    );
-    let asked = ui.input(|input| {
-        input.pointer.secondary_clicked()
+    // Andy's way, and it needs no menu at all: the words are copied the moment the left button comes up.
+    // A popup was the whole of the trouble — it takes the pointer, so the labels under it are no longer
+    // hovered, egui reads "a press with nothing hovered" as a click somewhere else, and the selection is
+    // dropped. Nothing covers the pointer now: egui keeps the highlight while the words are dragged, and
+    // the panel hears the release and asks for the copy.
+    let let_go_of_the_words = ui.input(|input| {
+        input.pointer.button_released(egui::PointerButton::Primary)
             && input
                 .pointer
                 .interact_pos()
                 .is_some_and(|pos| conversation.contains(pos))
     });
-    // The menu is made here — it needs the conversation's own rectangle — and **shown** after the
-    // conversation has been drawn. That order is the whole of Andy's report: a popup takes the
-    // pointer, so a menu drawn before the labels leaves them unhovered on the frame of the press, and
-    // egui reads "a press with nothing hovered" as a click somewhere else and drops the label
-    // selection — the highlight went the moment the right button came down.
-    let menu = egui::Popup::menu(&sensor)
-        .open_memory(asked.then_some(egui::SetOpenCommand::Bool(true)))
-        .at_pointer_fixed();
-    // The text is taken while it still exists. egui clears a label's selection at the *start* of the
-    // frame in which anything is pressed, so by the time the click on the item is read the selection
-    // is already gone — the item's own press is what erased it. The menu offers one thing, so the
-    // moment it is asked for is the moment to copy; the item is kept as well, for the case where a
-    // selection has somehow outlived the press.
-    if asked {
+    if let_go_of_the_words {
         state.agent.wants_copy = true;
+        state.agent.wanting_copy_text = true;
     }
     // A right-click is not a reason to lose the selection — nothing but a new drag, or a click that
     // picks nothing out, writes it. The reading itself happens *after* the conversation has been drawn
@@ -1236,14 +1230,14 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             .max_height(height)
             .show(ui, |ui| {
                 // The conversation's words are drawn by egui's own labels (the markdown viewer among
-                // them), and a label's selection belongs to egui: it is dropped on any press egui does
-                // not like, which is why a right-click took the highlight away. The panel keeps its own
-                // selection instead — the way the terminal and the editor do — so egui's is turned off
-                // here. One selection, and it behaves like the other two panels.
-                ui.style_mut().interaction.selectable_labels = false;
-                state.agent.line_layouts.clear();
+                // them), and the selection is egui's own too, deliberately: it draws the highlight out of
+                // the same galleys it hit-tests with, so what is picked out and what sits under the
+                // pointer cannot disagree. The panel's own reading of a drag could disagree — it rebuilt
+                // the words' layout to find the character under the pointer, and a rebuilt layout is not
+                // the one on screen.
+                ui.style_mut().interaction.selectable_labels = true;
                 for (index, line) in lines.iter().enumerate() {
-                    let drawn = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
+                    let _ = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
                         match line {
                             Line::You(text) => {
                                 // The request is a block of its own, square and set in bold: an answer
@@ -1324,214 +1318,9 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
                     // Where the line really is, in the window's own coordinates, and how its words
                     // were laid out: a pointer is turned into a place inside a line by laying those
                     // words out again the same way. A `Response::rect` is always in window space,
-                    // while `ui.cursor()` inside a scroll area is not.
-                    let font = ui.style().text_styles[&egui::TextStyle::Body].clone();
-                    let wrap = ui.available_width();
-                    state.agent.line_layouts.push(LineLayout {
-                        rect: drawn.response.rect,
-                        font,
-                        wrap,
-                    });
-                }
-                // The panel's own highlight, over the words: a wash thin enough to read through. The
-                // first and the last line are painted only as far as the drag went; the lines between
-                // them are painted whole.
-                if let Some(picked) = state.agent.picked_lines {
-                    let (from, to) = picked.ordered();
-                    let painter = ui.painter();
-                    let _ = (from, to);
-                    for bands in picked_bands(ui, state, picked) {
-                        for band in bands {
-                            painter.rect_filled(band, 0.0, PICKED_LINE);
-                        }
-                    }
                 }
             });
     }
-
-    // Read now, against the rectangles just drawn: a position belongs to the line it is over *this*
-    // frame. The highlight appears one frame later, which is a frame nobody can see.
-    pick_over_the_conversation(ui, state, conversation);
-
-    let mut copy = false;
-    // The item says how much it will take. The words come from the panel's own selection, so a person
-    // who has just dragged over three lines should not have to guess what "the text" means — and an
-    // item that never counts anything is the sign that the panel read no drag at all.
-    let label = match state.agent.picked_lines {
-        Some(picked) => format!("Copy text ({} lines)", picked.lines()),
-        None => "Copy text".to_owned(),
-    };
-    menu.show(|ui| {
-        if ui.button(label).clicked() {
-            copy = true;
-            ui.close();
-        }
-    });
-    if copy {
-        state.agent.wants_copy = true;
-    }
-}
-
-/// A wash over the lines of the conversation the person picked out. Light enough that the words
-/// under it stay readable: the highlight is drawn over them, not behind them.
-const PICKED_LINE: egui::Color32 = egui::Color32::from_rgba_premultiplied(38, 56, 80, 90);
-
-/// Reads a drag over the conversation back as lines, and keeps the panel's own selection.
-///
-/// A press that never moves picks nothing out — the same rule the terminal follows — and a new drag
-/// replaces whatever was picked out before. `released` only forgets where the drag began.
-fn pick_over_the_conversation(ui: &egui::Ui, state: &mut AppState, conversation: egui::Rect) {
-    let (pos, pressed, down, released) = ui.input(|input| {
-        (
-            input.pointer.interact_pos(),
-            input.pointer.button_pressed(egui::PointerButton::Primary),
-            input.pointer.primary_down(),
-            input.pointer.button_released(egui::PointerButton::Primary),
-        )
-    });
-    let Some(pos) = pos else {
-        return;
-    };
-    if released {
-        state.agent.picked_anchor = None;
-    }
-    if pressed && conversation.contains(pos) {
-        state.agent.picked_lines = None;
-        state.agent.picked_anchor = spot_at(ui, state, pos);
-        return;
-    }
-    let Some(anchor) = state.agent.picked_anchor else {
-        return;
-    };
-    if !down {
-        return;
-    }
-    let Some(head) = spot_at(ui, state, pos) else {
-        return;
-    };
-    state.agent.picked_lines = (head != anchor).then_some(Picked { anchor, head });
-}
-
-/// The rectangles a line's picked-out part covers.
-///
-/// A line that is wholly inside the selection is its own rectangle; the first and last lines are
-/// painted only as far as the drag went, wrapped over as many visual rows as that part runs over. The
-/// words are laid out again exactly as the line was drawn — the panel does not own the widgets that
-/// draw them, so this is how their extent is known at all.
-fn picked_bands(ui: &egui::Ui, state: &AppState, picked: Picked) -> Vec<Vec<egui::Rect>> {
-    let (from, to) = picked.ordered();
-    let mut out = Vec::new();
-    for (index, layout) in state.agent.line_layouts.iter().enumerate() {
-        if !picked.contains(index) {
-            continue;
-        }
-        let Some(line) = state.agent.transcript.get(index) else {
-            continue;
-        };
-        if index != from.line && index != to.line {
-            out.push(vec![layout.rect]);
-            continue;
-        }
-        let said = line.said();
-        let chars = said.chars().count();
-        let start = if index == from.line {
-            from.column.min(chars)
-        } else {
-            0
-        };
-        let end = if index == to.line {
-            to.column.min(chars)
-        } else {
-            chars
-        };
-        if end <= start {
-            continue;
-        }
-        let galley = ui.painter().layout(
-            said.to_owned(),
-            layout.font.clone(),
-            egui::Color32::PLACEHOLDER,
-            layout.wrap,
-        );
-        let shift = layout.rect.min.to_vec2();
-        let start_at = galley
-            .pos_from_cursor(egui::text::CCursor::new(start))
-            .translate(shift);
-        let end_at = galley
-            .pos_from_cursor(egui::text::CCursor::new(end))
-            .translate(shift);
-        let mut bands = Vec::new();
-        for row in galley.rows.iter() {
-            let row = row.rect().translate(shift);
-            if row.bottom() <= start_at.top() || row.top() >= end_at.bottom() {
-                continue;
-            }
-            let left = if row.contains(start_at.center()) {
-                start_at.left()
-            } else {
-                row.left()
-            };
-            let right = if row.contains(end_at.center()) {
-                end_at.left()
-            } else {
-                row.right()
-            };
-            bands.push(egui::Rect::from_min_max(
-                egui::pos2(left, row.top()),
-                egui::pos2(right, row.bottom()),
-            ));
-        }
-        out.push(bands);
-    }
-    out
-}
-
-/// The place in the conversation under a pointer: which line, and which character of it.
-fn spot_at(ui: &egui::Ui, state: &AppState, pos: egui::Pos2) -> Option<Spot> {
-    let index = line_at(state, pos.y)?;
-    let layout = state.agent.line_layouts.get(index)?;
-    let said = state.agent.transcript.get(index)?.said();
-    let galley = ui.painter().layout(
-        said.to_owned(),
-        layout.font.clone(),
-        egui::Color32::PLACEHOLDER,
-        layout.wrap,
-    );
-    // A line's rectangle is taller than the words in it — the space under the last row belongs to the
-    // gap between lines, not to the text — and a position below the glyphs is read by the layout as
-    // "the end of the row". That is what made a press in the middle of a word and a press past its end
-    // land on the same character. The height is clamped to the words, the width is not: past the end
-    // of a line really is the end of it.
-    let local = pos - layout.rect.min;
-    let local = egui::vec2(
-        local.x,
-        local.y.clamp(0.0, (galley.size().y - 1.0).max(0.0)),
-    );
-    let cursor = galley.cursor_from_pos(local);
-    Some(Spot {
-        line: index,
-        column: cursor.index.into(),
-    })
-}
-
-/// The line of the conversation a height falls on, or the nearest one when it falls between lines.
-fn line_at(state: &AppState, y: f32) -> Option<usize> {
-    let rects: Vec<egui::Rect> = state.agent.line_layouts.iter().map(|l| l.rect).collect();
-    let rects = &rects;
-    rects
-        .iter()
-        .position(|rect| y >= rect.top() && y <= rect.bottom())
-        .or_else(|| {
-            rects
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    (a.center().y - y)
-                        .abs()
-                        .total_cmp(&(b.center().y - y).abs())
-                })
-                .map(|(index, _)| index)
-        })
 }
 
 /// The permission question, when the agent is waiting on one.

@@ -94,22 +94,7 @@ pub fn listed_name(name: &str) -> &str {
 }
 
 /// The words of a line, whichever kind of line it is.
-impl Line {
-    /// What the line says: the words of the person, of the agent, or of the panel itself.
-    ///
-    /// A service row keeps its one painted line in `text`, so it answers with that rather than with
-    /// the whole row the runtime wrote.
-    pub fn said(&self) -> &str {
-        match self {
-            Line::You(text)
-            | Line::Agent(text)
-            | Line::Thinking(text)
-            | Line::Tool(text)
-            | Line::Note(text) => text,
-            Line::Notice { text, .. } => text,
-        }
-    }
-}
+impl Line {}
 
 /// One line of the transcript.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -134,68 +119,6 @@ pub enum Line {
     Tool(String),
     /// Something the panel says on its own account.
     Note(String),
-}
-
-/// A place in the conversation: which line, and how far into it, in characters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Spot {
-    /// The line of the transcript.
-    pub line: usize,
-    /// How many characters into that line.
-    pub column: usize,
-}
-
-/// What is picked out in a conversation, by places rather than by lines.
-///
-/// Two places and not two lines, because a person picks words out of a sentence: the ends of what was
-/// chosen fall inside the first and last lines, and the words of those lines are cut where the drag
-/// started and stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Picked {
-    /// Where the drag began.
-    pub anchor: Spot,
-    /// Where the pointer is now.
-    pub head: Spot,
-}
-
-impl Picked {
-    /// The two ends in reading order, so that a drag upwards picks out the same words as one
-    /// downwards.
-    pub fn ordered(self) -> (Spot, Spot) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
-
-    /// Whether a line has anything of it picked out.
-    pub fn contains(self, line: usize) -> bool {
-        let (from, to) = self.ordered();
-        (from.line..=to.line).contains(&line)
-    }
-
-    /// How many lines what was picked out runs over.
-    pub fn lines(self) -> usize {
-        let (from, to) = self.ordered();
-        to.line - from.line + 1
-    }
-}
-
-/// Where a line of the conversation was drawn, and how it was laid out.
-///
-/// A pointer is turned into a place inside the words by laying those words out again exactly as the
-/// line was laid out — the same font and the same width — and asking the galley which character is
-/// under the pointer. The panel does not own the widgets that draw the words, so this is the only way
-/// to answer that question at all.
-#[derive(Debug, Clone)]
-pub struct LineLayout {
-    /// Where the line was drawn, in the window's coordinates.
-    pub rect: egui::Rect,
-    /// The font the words of that line were laid out with.
-    pub font: egui::FontId,
-    /// The width they were wrapped to.
-    pub wrap: f32,
 }
 
 /// The shapes of a service row of the runtime, the name each kind goes by, and the one line to
@@ -386,6 +309,17 @@ pub struct AgentState {
     /// Set when the person asked to copy from the panel: the window turns the shortcut
     /// into the copy event egui's own text selection listens for.
     pub wants_copy: bool,
+    /// Set when the clipboard has been asked for the words egui has selected, and the answer has not
+    /// come back yet.
+    ///
+    /// egui drops a label's selection on the press that opens the menu item, so by the time the item is
+    /// clicked the words are gone from egui's own state. They are taken while they are still there — at
+    /// the right-click — and kept here for the item to hand over.
+    pub wanting_copy_text: bool,
+    /// What was copied for the person, and when: the words are put in the clipboard the moment the left
+    /// button comes up, and the panel says so for a few seconds — a copy nobody is told about is a copy
+    /// nobody trusts.
+    pub copied: Option<(usize, std::time::Instant)>,
     /// Where the question card was drawn, when one is up: the tests hold the panel to it,
     /// and nothing else may read it as a place to click.
     pub card_rect: Option<egui::Rect>,
@@ -483,20 +417,6 @@ pub struct AgentState {
     /// chord for that very reason: a stale rectangle would take `Ctrl+C` and `Ctrl+Insert` away from the
     /// file being edited, and the editor would copy nothing at all.
     pub shown: bool,
-    /// The lines of the conversation the person has picked out, by their places in it.
-    ///
-    /// The panel keeps this itself instead of leaving the selection to egui. egui drops a label's
-    /// selection on any press that no label was under — a right-click on the picked words included —
-    /// and the highlight went exactly that way. This one does not move for a menu, because nothing
-    /// but a new drag writes it.
-    pub picked_lines: Option<Picked>,
-    /// Where a drag began, so that a moving pointer keeps extending from there.
-    pub picked_anchor: Option<Spot>,
-    /// Where each line of the conversation was drawn, so that a pointer can be read back as a line.
-    ///
-    /// Written on every frame the conversation is drawn; a drag is far slower than a frame, and the
-    /// rectangles of the frame before the press are the ones a press is read against.
-    pub line_layouts: Vec<LineLayout>,
     /// Set when the person asked to copy from the panel.
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
@@ -567,6 +487,8 @@ impl Default for AgentState {
             queued: None,
             wants_focus: false,
             wants_copy: false,
+            wanting_copy_text: false,
+            copied: None,
             card_rect: None,
             picked: Vec::new(),
             commands: Vec::new(),
@@ -600,9 +522,6 @@ impl Default for AgentState {
             sessions_loading: false,
             shown_rect: None,
             shown: false,
-            picked_lines: None,
-            picked_anchor: None,
-            line_layouts: Vec::new(),
             started: None,
             took: None,
             busy: false,
@@ -633,41 +552,6 @@ impl Default for AgentState {
 }
 
 impl AgentState {
-    /// The words of the lines the person has picked out, ready for the clipboard.
-    ///
-    /// The places are read against the transcript as it stands now: a conversation that has moved on
-    /// since the drag (an answer arrived, another session was opened) must not hand back words that
-    /// are no longer there.
-    pub fn picked_text(&self) -> Option<String> {
-        let picked = self.picked_lines?;
-        let (from, to) = picked.ordered();
-        let mut lines: Vec<String> = Vec::new();
-        for (index, line) in self.transcript.iter().enumerate() {
-            if !picked.contains(index) {
-                continue;
-            }
-            let said: Vec<char> = line.said().chars().collect();
-            // The first and the last line are cut where the drag began and stopped; the lines in
-            // between are whole.
-            let start = if index == from.line {
-                from.column.min(said.len())
-            } else {
-                0
-            };
-            let end = if index == to.line {
-                to.column.min(said.len())
-            } else {
-                said.len()
-            };
-            lines.push(said[start.min(end)..end].iter().collect());
-        }
-        if lines.is_empty() {
-            return None;
-        }
-        let text = lines.join("\n");
-        (!text.trim().is_empty()).then_some(text)
-    }
-
     /// Points the panel at a project, reading its `agents.toml`.
     ///
     /// The worker is left alone when the root has not changed: a conversation survives
