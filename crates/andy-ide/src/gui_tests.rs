@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
+use crate::agent::Line;
 use crate::app::App;
 use crate::lsp::DiagnosticLine;
 use crate::state::Prompt;
@@ -7059,6 +7060,53 @@ mod the_agent_panel {
         assert!(
             copied.contains("pondering the greeting"),
             "the line wholly inside the drag did not come back: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn the_line_under_the_pointer_is_the_line_that_is_there() {
+        // The harness conversation is three lines long and never scrolls, where every way of reading a
+        // height gives the same answer. Andy's is long: the panel scrolls it, and a position read against
+        // the wrong geometry lands on the wrong line. This writes a long conversation straight into the
+        // panel — minutes of turns reduced to their shape — and drags over a line it knows the number of.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        // The panel has to be the one on screen, or nothing of the conversation is drawn at all.
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        {
+            let agent = &mut gui.app_mut().state.agent;
+            agent.transcript.clear();
+            for index in 0..40 {
+                agent.transcript.push(Line::Agent(format!(
+                    "line number {index} of the conversation"
+                )));
+            }
+        }
+        gui.settle();
+
+        let words = gui
+            .harness
+            .query_by_label_contains("line number 39")
+            .expect("the last line of the conversation is not on screen")
+            .rect();
+        let at = words.center();
+        drag_with_the_left_button(&mut gui, at, egui::pos2(at.x + 40.0, at.y));
+
+        let picked = gui
+            .app()
+            .state
+            .agent
+            .picked_lines
+            .expect("the drag over a line picked nothing out");
+        let (start, _) = picked.ordered();
+        assert_eq!(
+            start.line, 39,
+            "the pointer was over line 39 and the panel read line {}",
+            start.line
         );
     }
 
