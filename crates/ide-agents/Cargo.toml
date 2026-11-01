@@ -8,7 +8,13 @@ repository.workspace = true
 description = "Agent registry and ACP/MCP client"
 
 [dependencies]
+# The Agent Client Protocol, from the official SDK rather than by hand: the client side of the protocol
+# (version negotiation, the request/response and notification shapes) belongs to the standard, not to us.
+# `process` is the transport that starts an agent as a child of the panel.
+agent-client-protocol = { version = "3.6", features = ["process"] }
 anyhow.workspace = true
+# The runtime the SDK is driven with: it has no executor of its own, the embedder brings one.
+futures = "0.3"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true

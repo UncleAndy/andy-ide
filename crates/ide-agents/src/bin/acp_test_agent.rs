@@ -43,7 +43,7 @@ static SPOKEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Ends a turn, saying how much of the window it used: ACP has no field for this, so the
 /// figure rides in `_meta`, the way a real agent would send it.
-fn turn_answer(session: &str, id: Option<u64>) {
+fn turn_answer(session: &str, id: Option<Value>) {
     // The context figure the way Hermes sends it at the end of a turn: a `usage_update`
     // notification, `size` the window and `used` what is spent from it
     // (`acp_adapter/server.py::_build_usage_update`). Not in the answer's `_meta` — that
@@ -60,7 +60,7 @@ fn turn_answer(session: &str, id: Option<u64>) {
 }
 
 /// Ends a turn the person stopped: the agent's own word for it, and nothing else.
-fn turn_cancelled(session: &str, id: Option<u64>) {
+fn turn_cancelled(session: &str, id: Option<Value>) {
     let _ = session;
     answer(id, json!({"stopReason": "cancelled"}));
 }
@@ -202,7 +202,12 @@ fn main() {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let id = message.get("id").and_then(Value::as_u64);
+        // The id is opaque and may be a string: the standard allows both, the official SDK sends a UUID,
+        // and a stand-in that only knew numbers would answer such a client with silence.
+        let id = message
+            .get("id")
+            .cloned()
+            .filter(|id| !id.is_null());
 
         match method.as_str() {
             "initialize" => {
@@ -960,7 +965,11 @@ fn wait_for_answer(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> Option
 }
 
 /// An answer to one of the client's requests.
-fn answer(id: Option<u64>, result: Value) {
+/// Answers a request: the id goes back exactly as it came.
+///
+/// An id is opaque to both sides — a number for our own client, a UUID string for the official SDK — so it
+/// is carried, not read.
+fn answer(id: Option<Value>, result: Value) {
     let Some(id) = id else { return };
     send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
 }
