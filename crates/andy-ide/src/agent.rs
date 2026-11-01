@@ -272,8 +272,13 @@ struct Replies {
 }
 
 impl Replies {
-    fn send(&self, reply: Reply) -> Result<(), std::sync::mpsc::SendError<Reply>> {
-        let sent = self.outlet.send(reply);
+    /// Hands one reply to the panel and wakes it, answering whether it arrived.
+    ///
+    /// A plain yes-or-no and not the error the channel gives: that error carries the reply back, which is
+    /// over a hundred bytes of conversation to say the panel is gone — and the panel being gone is the
+    /// whole of what the worker does with it (it stops).
+    fn send(&self, reply: Reply) -> bool {
+        let sent = self.outlet.send(reply).is_ok();
         self.waker.wake();
         sent
     }
@@ -1615,24 +1620,18 @@ fn work(
     // first and the conversation after would show a restored session as an empty one on the
     // very frame it was looked at, and everything a person had said would seem lost.
     while let Some(event) = session.next_event(Duration::from_millis(1)) {
-        if replies.send(Reply::Event(event)).is_err() {
+        if !replies.send(Reply::Event(event)) {
             return;
         }
     }
-    if replies
-        .send(Reply::Ready {
-            session: session.id().to_owned(),
-            resumed: session.resumed(),
-        })
-        .is_err()
-    {
+    if !replies.send(Reply::Ready {
+        session: session.id().to_owned(),
+        resumed: session.resumed(),
+    }) {
         return;
     }
     // What it offers to choose from, before anything is asked of it.
-    if replies
-        .send(Reply::Event(AgentEvent::Setup(session.state().clone())))
-        .is_err()
-    {
+    if !replies.send(Reply::Event(AgentEvent::Setup(session.state().clone()))) {
         return;
     }
 
@@ -1640,7 +1639,7 @@ fn work(
         match commands.recv_timeout(PUMP) {
             Ok(Command::Prompt(text)) => {
                 if let Err(error) = session.start_turn(&text)
-                    && replies.send(Reply::Failed(format!("{error}"))).is_err()
+                    && !replies.send(Reply::Failed(format!("{error}")))
                 {
                     return;
                 }
@@ -1658,11 +1657,9 @@ fn work(
             }
             Ok(Command::Model(model)) => {
                 if let Err(error) = session.set_model(&model)
-                    && replies
-                        .send(Reply::Event(AgentEvent::Failed(format!(
-                            "the agent would not switch model: {error}"
-                        ))))
-                        .is_err()
+                    && !replies.send(Reply::Event(AgentEvent::Failed(format!(
+                        "the agent would not switch model: {error}"
+                    ))))
                 {
                     return;
                 }
@@ -1670,11 +1667,9 @@ fn work(
             }
             Ok(Command::Setting { config, value }) => {
                 if let Err(error) = session.set_option(&config, &value)
-                    && replies
-                        .send(Reply::Event(AgentEvent::Failed(format!(
-                            "the agent would not change {config}: {error}"
-                        ))))
-                        .is_err()
+                    && !replies.send(Reply::Event(AgentEvent::Failed(format!(
+                        "the agent would not change {config}: {error}"
+                    ))))
                 {
                     return;
                 }
@@ -1717,7 +1712,7 @@ fn work(
                         AgentEvent::Failed(format!("the agent listed no sessions: {error}"))
                     }
                 };
-                if replies.send(Reply::Event(answer)).is_err() {
+                if !replies.send(Reply::Event(answer)) {
                     return;
                 }
             }
@@ -1728,11 +1723,9 @@ fn work(
             }
             Ok(Command::Mode(mode)) => {
                 if let Err(error) = session.set_mode(&mode)
-                    && replies
-                        .send(Reply::Event(AgentEvent::Failed(format!(
-                            "the agent would not switch mode: {error}"
-                        ))))
-                        .is_err()
+                    && !replies.send(Reply::Event(AgentEvent::Failed(format!(
+                        "the agent would not switch mode: {error}"
+                    ))))
                 {
                     return;
                 }
@@ -1756,12 +1749,12 @@ fn work(
                 let looking = telling.where_is_the_person();
                 if let Some(told) = tell_the_desk(telling.desk.as_ref(), looking, want, &detail) {
                     let (title, _) = want.message(&detail);
-                    if replies.send(Reply::Told { title, told }).is_err() {
+                    if !replies.send(Reply::Told { title, told }) {
                         return;
                     }
                 }
             }
-            if replies.send(Reply::Event(event)).is_err() {
+            if !replies.send(Reply::Event(event)) {
                 return;
             }
             if finished {
@@ -1937,9 +1930,7 @@ mod grouping_tests {
         let worker = Replies { outlet, waker };
 
         assert!(
-            worker
-                .send(Reply::Failed("nothing to say".to_owned()))
-                .is_ok(),
+            worker.send(Reply::Failed("nothing to say".to_owned())),
             "the reply did not reach the panel"
         );
         let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
