@@ -182,6 +182,11 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         // arrives as a paste event, exactly as the keys do it.
         let mut copy = false;
         let mut paste = false;
+        // The menu is a popup, and a popup takes the keyboard: every key the editor handles is gated
+        // on `response.has_focus()`, so a menu that kept the focus would leave `Ctrl+C` and
+        // `Ctrl+Insert` doing nothing at all in the file — which is exactly what Andy saw after the
+        // menu arrived. The editor asks for the keyboard back the moment it is gone.
+        let had_the_keyboard = response.has_focus();
         response.context_menu(|ui| {
             if ui.button("Copy text").clicked() {
                 copy = true;
@@ -198,6 +203,9 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         if paste {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        if had_the_keyboard && !response.has_focus() {
+            response.request_focus();
         }
 
         // egui turns arrow keys and Tab into focus navigation unless the
