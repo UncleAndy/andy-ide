@@ -9674,7 +9674,7 @@ mod the_agent_panel {
             .shown_rect
             .expect("the panel is not on screen");
         assert!(
-            panel.bottom() - row.bottom() <= 12.0,
+            panel.bottom() - row.bottom() <= 8.0,
             "the panel keeps {:.1} px of blank under its last row",
             panel.bottom() - row.bottom()
         );

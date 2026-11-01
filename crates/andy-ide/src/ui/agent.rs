@@ -60,7 +60,10 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // frame. Counted, the difference between the guess and the drawing is a gap under the last line.
     let foot_top = ui.cursor().top();
     input(ui, state);
-    state.agent.foot = ui.cursor().top() - foot_top;
+    // The spacing egui leaves after the last row of the foot is not a part of it: counted in, the
+    // reserve was three points too tall and those three points showed up as blank under the row of
+    // facts — the last thing a person sees in the panel.
+    state.agent.foot = (ui.cursor().top() - foot_top - ui.spacing().item_spacing.y).max(0.0);
     // The list of models floats in a layer of its own, above the button that opened it, and the
     // list of conversations the same way.
     models(ui, state);
