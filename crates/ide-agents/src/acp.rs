@@ -309,10 +309,12 @@ enum Order {
     Cancel,
 }
 
-/// A change of setting the panel asked for.
+/// A change the panel asked for.
 enum Change {
     /// The mode the agent answers in.
     Mode(String),
+    /// The model, through the agent's own method — the way back, taken only when the standard has none.
+    Model(String),
     /// One of the other settings, by the id the agent gave it.
     Setting {
         /// Which setting.
@@ -626,16 +628,27 @@ impl Session {
         Ok(())
     }
 
-    /// Changes the model, through the setting the standard gives for it.
+    /// Changes the model: through the standard's setting when the agent offers one, and otherwise through
+    /// the agent's own method.
+    ///
+    /// The standard carries the model as one of the agent's settings and has no request of its own for it.
+    /// Hermes 0.22.5 offers no such setting and names its models in a field of its own, so with that agent
+    /// the way back is the only way the panel keeps a choice the person already had. It is taken only when
+    /// there is no standard road, it is written into the record when it is taken, and it retires itself the
+    /// day the agent offers the setting.
     pub fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
-        let config = model_setting(&self.state.options)
-            .map(|setting| setting.id.clone())
-            .ok_or_else(|| anyhow::anyhow!("this agent offers no setting for the model"))?;
-        let options = self.change(Change::Setting {
-            config: config.clone(),
-            value: model.to_owned(),
-        })?;
-        self.settings_taken(&config, model, options);
+        if let Some(setting) = model_setting(&self.state.options).map(|setting| setting.id.clone())
+        {
+            let options = self.change(Change::Setting {
+                config: setting.clone(),
+                value: model.to_owned(),
+            })?;
+            self.settings_taken(&setting, model, options);
+        } else if !self.state.models.is_empty() {
+            self.change(Change::Model(model.to_owned()))?;
+        } else {
+            anyhow::bail!("this agent offers no way to change the model");
+        }
         // Only after the agent agreed.
         self.state.current_model = Some(model.to_owned());
         Ok(())
@@ -1025,6 +1038,23 @@ async fn converse(
                                 .await
                                 .map(|_| Vec::new())
                                 .map_err(|error| anyhow::anyhow!("{error}")),
+                            Change::Model(model) => {
+                                // Written down as it goes: an agent's own method is not the standard's, and
+                                // whoever reads the record afterwards is the one who needs to know which road
+                                // was taken — and to see the day it stops being taken.
+                                wire.note(&format!(
+                                    "the model is being changed with the agent's own method \
+                                     (session/set_model), because it offers no setting for it: {model}"
+                                ));
+                                cx.send_request(SetModelRaw {
+                                    session_id: opened.clone(),
+                                    model_id: model,
+                                })
+                                .block_task()
+                                .await
+                                .map(|_| Vec::new())
+                                .map_err(|error| anyhow::anyhow!("{error}"))
+                            }
                             Change::Setting { config, value } => cx
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     opened.clone(),
@@ -1252,6 +1282,25 @@ struct LoadSessionRaw {
     session_id: String,
     /// The directory it is picked up in.
     cwd: PathBuf,
+}
+
+/// Hermes' own `session/set_model`: the way back to a model the standard cannot reach.
+///
+/// The standard has no request of its own for the model — there the model is one of the agent's settings —
+/// and Hermes 0.22.5 offers no such setting, naming its models in a field the schema does not know instead.
+/// So its own method is asked for raw, and only when there is no standard road: the day the agent offers the
+/// setting, this stops being called by itself. Every use is written into the record as it goes, so the day it
+/// is no longer needed is a day that can be seen.
+#[derive(
+    Debug, Clone, serde::Deserialize, serde::Serialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[request(method = "session/set_model", response = serde_json::Value)]
+#[serde(rename_all = "camelCase")]
+struct SetModelRaw {
+    /// The conversation.
+    session_id: String,
+    /// The model the panel asked for.
+    model_id: String,
 }
 
 /// How the agent named itself, for the record.

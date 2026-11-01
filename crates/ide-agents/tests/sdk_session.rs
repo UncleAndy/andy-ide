@@ -3,10 +3,12 @@
 //! The first slice of the migration: the handshake, the updates the agent sends being read into the events the
 //! panel already knows, and a turn ending in the agent's own word.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ide_agents::acp;
 use ide_agents::session::{AgentSpec, Event, PermissionPolicy};
+use ide_agents::wire::{Kept, Wire};
 
 /// The stand-in agent, built with the crate and spawned like any other program.
 fn stand_in() -> AgentSpec {
@@ -387,6 +389,11 @@ fn the_model_menu_comes_from_the_setting_the_standard_gives_it() {
         Some("large"),
         "the panel shows a model the agent never took"
     );
+    let (said, _) = one_turn(&mut session, "model");
+    assert_eq!(
+        said, "large / ask",
+        "the agent did not take the model it was given"
+    );
     session.stop();
 }
 
@@ -410,17 +417,86 @@ fn the_model_menu_of_an_agent_that_names_its_models_hermes_way_still_arrives() {
         "the model in force did not arrive with the conversation"
     );
 
-    // And the honest limit of the standard with such an agent: there is no setting for the model to change,
-    // so the panel is told so rather than shown a change that never happened.
-    assert!(
-        session.set_model("large").is_err(),
-        "a model was changed through a setting this agent does not offer"
-    );
+    // No setting for the model is offered, so the way back is taken — the agent's own method — and the
+    // agent's own word is what says it took the choice.
+    session.set_model("large").expect("the model goes out");
     assert_eq!(
         session.state().current_model.as_deref(),
-        Some("small"),
+        Some("large"),
         "the panel shows a model the agent never took"
     );
+    let (said, _) = one_turn(&mut session, "model");
+    assert_eq!(
+        said, "large / ask",
+        "the agent did not take the model it was given"
+    );
+    session.stop();
+}
+
+#[test]
+fn the_way_back_is_written_into_the_record() {
+    // The rule: an agent's own method is not the standard's, so whoever reads the record afterwards has to be
+    // able to see that it was taken — and to see the day it stops being taken.
+    let dir = tempfile::tempdir().unwrap();
+    let kept = Arc::new(Kept::default());
+    let mut session = acp::Session::start_with(
+        &stand_in(),
+        dir.path(),
+        PermissionPolicy::Ask,
+        None,
+        None,
+        Some(Arc::clone(&kept) as Arc<dyn Wire>),
+    )
+    .expect("the agent starts and answers the handshake");
+
+    session.set_model("large").expect("the model goes out");
+
+    let lines = kept.lines().join("\n");
+    // The line the request itself puts on the wire is one thing, and this is another: the note a person
+    // reading the record afterwards needs, saying plainly that an agent's own method was taken and why.
+    assert!(
+        lines.contains("because it offers no setting"),
+        "the way back was taken without a word about it in the record: {lines}"
+    );
+    assert!(
+        lines.contains("\"method\":\"session/set_model\""),
+        "the way back does not show on the wire: {lines}"
+    );
+    assert!(
+        lines.contains("large"),
+        "the record does not say which model was asked for: {lines}"
+    );
+    session.stop();
+}
+
+#[test]
+fn the_standard_road_is_taken_when_the_agent_offers_both() {
+    // Both spellings at once: the agent names models in its own field *and* offers the standard's setting.
+    // The setting is what the standard road goes through, so the settings the agent reads back come changed —
+    // which is how a test can tell the two roads apart, and why the way back is left for agents that have
+    // none.
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = acp::Session::start(
+        &stand_in_with(&["--model-as-setting"]),
+        dir.path(),
+        PermissionPolicy::Ask,
+    )
+    .expect("the agent starts and answers the handshake");
+
+    session.set_model("large").expect("the model goes out");
+
+    let setting = session
+        .state()
+        .options
+        .iter()
+        .find(|setting| setting.id == "model")
+        .expect("the stand-in offers a setting for the model");
+    assert_eq!(
+        setting.current.as_deref(),
+        Some("large"),
+        "the standard road was not taken although the agent offers it"
+    );
+    assert_eq!(session.state().current_model.as_deref(), Some("large"));
     session.stop();
 }
 
