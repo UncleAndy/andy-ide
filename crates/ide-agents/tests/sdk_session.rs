@@ -724,3 +724,45 @@ fn a_mode_the_agent_reports_as_its_edits_setting_reaches_the_panel() {
         "the mode the agent reported as a setting did not reach the panel: {seen:?}"
     );
 }
+
+#[test]
+fn the_model_a_person_chose_is_the_one_every_later_word_agrees_with() {
+    // The model is a setting, the way the standard carries it, and the stand-in offers it that way and
+    // broadcasts the change back as an update, as Hermes does. A client that froze the model at the
+    // session's opening read every later update about its settings as a switch back to that first model.
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = stand_in();
+    agent.args = vec!["--model-as-setting".to_owned()];
+    let mut session = acp::Session::start(&agent, dir.path(), PermissionPolicy::Ask)
+        .expect("the agent starts and answers the handshake");
+
+    let opening = session.state().current_model.clone();
+    let target = session
+        .state()
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .find(|id| Some(id.as_str()) != opening.as_deref())
+        .expect("the stand-in offers more than one model");
+
+    session
+        .set_model(&target)
+        .expect("the agent takes the choice");
+    assert_eq!(
+        session.state().current_model.as_deref(),
+        Some(target.as_str()),
+        "the client kept a model other than the one the agent read back"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(Event::Setup(state)) = session.next_event(Duration::from_millis(200)) {
+            assert_eq!(
+                state.current_model.as_deref(),
+                Some(target.as_str()),
+                "a later word from the agent read as a switch back to {opening:?}"
+            );
+        }
+    }
+    session.stop();
+}

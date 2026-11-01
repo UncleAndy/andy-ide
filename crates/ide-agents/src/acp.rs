@@ -681,8 +681,12 @@ impl Session {
         } else {
             anyhow::bail!("this agent offers no way to change the model");
         }
-        // Only after the agent agreed.
-        self.state.current_model = Some(model.to_owned());
+        // Only after the agent agreed — and to what it read back, not to what was asked of it. An agent
+        // that answers with its settings has said which model it now holds; one that answers without them
+        // (the model's own method) has taken the choice, and the one asked for stands.
+        let read_back =
+            model_setting(&self.state.options).and_then(|setting| setting.current.clone());
+        self.state.current_model = read_back.or_else(|| Some(model.to_owned()));
         Ok(())
     }
 
@@ -1116,6 +1120,11 @@ async fn converse(
                         }
                     }
                     Order::Change { what, done } => {
+                        // The record the panel reads between updates follows the change too: an agent that
+                        // names its models in a field of its own sends no update for them, and the next
+                        // broadcast about some other setting would otherwise rebuild the state from the
+                        // model of the session's first breath — read in the panel as a switch back.
+                        let mut chosen: Option<String> = None;
                         let outcome = match what {
                             Change::Mode(mode) => cx
                                 .send_request(SetSessionModeRequest::new(opened.clone(), mode))
@@ -1131,6 +1140,7 @@ async fn converse(
                                     "the model is being changed with the agent's own method \
                                      (session/set_model), because it offers no setting for it: {model}"
                                 ));
+                                chosen = Some(model.clone());
                                 cx.send_request(SetModelRaw {
                                     session_id: opened.clone(),
                                     model_id: model,
@@ -1151,6 +1161,17 @@ async fn converse(
                                 .map(|answer| options_of(&json_of(&answer)))
                                 .map_err(|error| anyhow::anyhow!("{error}")),
                         };
+                        if let Ok(options) = &outcome
+                            && let Ok(mut known) = settings.lock()
+                        {
+                            if !options.is_empty() {
+                                known.options = options.clone();
+                            }
+                            if let Some(model) = chosen {
+                                known.current_model = Some(model);
+                            }
+                            fill_models(&mut known);
+                        }
                         let _ = done.send(outcome);
                     }
                     Order::Open { session, done } => {
@@ -1371,21 +1392,24 @@ fn mode_reported_as_a_setting(state: &SessionState) -> Option<String> {
 }
 
 fn fill_models(state: &mut SessionState) {
-    if !state.models.is_empty() {
-        return;
-    }
     let Some(setting) = model_setting(&state.options) else {
         return;
     };
-    state.models = setting
-        .choices
-        .iter()
-        .map(|choice| Model {
-            id: choice.value.clone(),
-            name: choice.name.clone(),
-        })
-        .collect();
-    if state.current_model.is_none() {
+    if state.models.is_empty() {
+        state.models = setting
+            .choices
+            .iter()
+            .map(|choice| Model {
+                id: choice.value.clone(),
+                name: choice.name.clone(),
+            })
+            .collect();
+    }
+    // The model is one of the agent's settings, and that setting carries the one in use, so the panel
+    // follows it instead of freezing the first value it ever saw. A panel that froze it read the agent's
+    // own update about its settings — sent again on every switch — as a change back to the model of the
+    // session's first breath.
+    if setting.current.is_some() {
         state.current_model = setting.current.clone();
     }
 }

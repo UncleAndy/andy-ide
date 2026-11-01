@@ -258,7 +258,6 @@ fn main() {
         // The id is opaque and may be a string: the standard allows both, the official SDK sends a UUID,
         // and a stand-in that only knew numbers would answer such a client with silence.
         let id = message.get("id").cloned().filter(|id| !id.is_null());
-
         match method.as_str() {
             "initialize" => {
                 // A start that is slow on purpose, for the test that watches the panel say
@@ -609,6 +608,26 @@ fn main() {
                     "edit_approval_policy" => policy = value,
                     _ => {}
                 }
+                // Hermes answers a setting change with the whole list read back *and* broadcasts it as an
+                // update, so a panel hears about the change twice. The stand-in must do both or the panel's
+                // reading of that broadcast — which is where a frozen model read as a switch back — goes
+                // untested.
+                let session = params
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                send(json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session,
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": settings(&effort, &policy, &model)
+                        }
+                    }
+                }));
                 answer(
                     id,
                     json!({"configOptions": settings(&effort, &policy, &model)}),
