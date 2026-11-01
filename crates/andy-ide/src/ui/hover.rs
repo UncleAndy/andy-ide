@@ -45,6 +45,24 @@ impl Spot {
     pub fn same_symbol(&self, path: &Path, line: u32, character: u32) -> bool {
         self.path == path && self.line == line && self.character == character
     }
+
+    /// Whether this is the same *place* as another spot, as a resting pointer sees it.
+    ///
+    /// The measure is the place on screen, not the symbol under it: a hand held still drifts by a pixel or
+    /// two, and that drift can cross a line boundary — so counting `line` and `character` made the pointer
+    /// look like it had moved on every frame, and the rest clock (`HOVER_DELAY`) never ran out. Andy's
+    /// hints were never asked for because of it; measured with `ANDY_IDE_HOVER_PROBE` as `rest 0.00s` on a
+    /// symbol he was holding the pointer on.
+    ///
+    /// Four points is about a line of text's height in these fonts: enough for a hand, far less than a
+    /// deliberate move to another word.
+    pub fn same_place(&self, other: &Spot) -> bool {
+        if self.path != other.path {
+            return false;
+        }
+        self.screen.distance(other.screen) <= 4.0
+            || (self.line == other.line && self.character.abs_diff(other.character) <= 2)
+    }
 }
 
 /// What the pointer is doing and what the server said about it.
@@ -92,8 +110,13 @@ impl Hover {
     pub fn look_at(&mut self, spot: Option<Spot>, now: f64) {
         match (&self.current, &spot) {
             (None, None) => return,
-            (Some(old), Some(new)) if old.same_symbol(&new.path, new.line, new.character) => {
-                // Same symbol, possibly a pixel away: only the draw position moves.
+            // The rest clock is a debounce, not a lock. A hand is never still, and a pointer a pixel away
+            // can land on the *neighbouring character*: counting that as "moved on" reset the clock on
+            // every frame, so the delay never elapsed and the server was never asked at all. Andy's
+            // missing hints, measured with `ANDY_IDE_HOVER_PROBE`: `rest 0.00s` on a symbol he was holding
+            // the pointer on. A file change or another line still counts as moving on.
+            (Some(old), Some(new)) if old.same_place(new) => {
+                // Same place, a pixel or two away: only the draw position moves.
                 let screen = new.screen;
                 self.current = Some(Spot {
                     screen,
@@ -259,6 +282,27 @@ impl Hover {
     }
 
     /// The text of the hint, if one is to be drawn.
+    /// The whole state of the hint in one line, for the `ANDY_IDE_HOVER_PROBE` run: how long the pointer
+    /// has rested, whether it is over the hint itself, which spot it is on, which one was asked about,
+    /// which one the server said nothing about, and whether an answer is held. A hint that never appears is
+    /// one of a few things, and this tells them apart without guessing.
+    pub fn probe_line(&self, now: f64) -> String {
+        let spot = |what: &Option<Spot>| match what {
+            Some(spot) => format!("{}:{}:{}", spot.path.display(), spot.line, spot.character),
+            None => "-".to_owned(),
+        };
+        format!(
+            "rest {:.2}s | over_hint {} | current {} | asked {} | nothing {} | answered {} | text {}",
+            (now - self.arrived).max(0.0),
+            self.is_over_hint(),
+            spot(&self.current),
+            spot(&self.asked),
+            spot(&self.nothing),
+            spot(&self.answered),
+            self.text.as_ref().map_or(0, |text| text.len()),
+        )
+    }
+
     pub fn text(&self) -> Option<&str> {
         let answered = self.answered.as_ref()?;
         let current = self.current.as_ref()?;
@@ -401,12 +445,18 @@ pub fn split_hover(text: &str) -> (Option<String>, String) {
 mod tests {
     use super::*;
 
+    /// A spot at a symbol of the one file these checks hover in.
+    ///
+    /// The place *on screen* follows the symbol: a pointer that moved to another symbol is somewhere else on
+    /// screen, and the rest clock reads places rather than symbols. A fixture with one fixed screen position
+    /// for every symbol would describe a pointer that never moved — which the checks about "the pointer went
+    /// elsewhere" then read as "it stayed", because it really had not.
     fn spot(line: u32, character: u32) -> Spot {
         Spot {
             path: PathBuf::from("src/main.rs"),
             line,
             character,
-            screen: Pos2::new(300.0, 200.0),
+            screen: Pos2::new(300.0 + character as f32 * 8.0, 200.0 + line as f32 * 17.0),
         }
     }
 
@@ -445,6 +495,48 @@ mod tests {
         assert!(
             hover.due(HOVER_DELAY + 5.0).is_none(),
             "an answer of \"nothing\" was asked for again"
+        );
+    }
+
+    /// A hand is never still: the spot under the pointer can be the neighbouring character of the same
+    /// line, and the rest clock has to survive that — otherwise the server is never asked at all.
+    #[test]
+    fn a_pointer_a_character_away_is_still_resting_on_the_same_place() {
+        // The pointer has drifted a pixel, which in these fonts is enough to land on the neighbouring
+        // character — or, when the y sits on a line's edge, on the neighbouring line.
+        let path = std::path::PathBuf::from("src/main.rs");
+        let spot = |character| Spot {
+            path: path.clone(),
+            line: 7,
+            character,
+            screen: egui::pos2(10.0, 20.0),
+        };
+        let mut hover = Hover::new();
+        hover.look_at(Some(spot(33)), 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        hover.look_at(Some(spot(34)), 0.5);
+        let _ = &mut hover;
+        // The place the pointer came to rest at is the one that matters — the panel keeps the first of the
+        // two, and only the draw position moves with the pointer.
+        assert_eq!(
+            hover.due(0.5).map(|due| due.character),
+            Some(33),
+            "a pixel of drift reset the rest clock: the hint would never be asked for"
+        );
+        // A move that carries the pointer elsewhere on screen is moving on, and the clock starts again:
+        // the place on screen is what a resting hand keeps, so a real move changes it.
+        hover.look_at(
+            Some(Spot {
+                character: 5,
+                line: 8,
+                screen: egui::pos2(300.0, 120.0),
+                ..spot(34)
+            }),
+            0.6,
+        );
+        assert!(
+            hover.due(0.6).is_none(),
+            "moving to another line kept the old rest"
         );
     }
 

@@ -351,6 +351,22 @@ impl App {
         }
         self.state.hover.show(ui.ctx());
 
+        // A window is started from a terminal, so its stderr is where a person can read this without digging
+        // for a log file: which place the pointer is over, and the hint's own text once the server has
+        // answered. Once a second — often enough to see the path, rarely enough to read.
+        // Over text it prints five times a second — a second apart cannot tell "the hand moved on" from "the
+        // rest clock keeps being reset", and that is the whole question here. Off the text a line a second is
+        // enough to see the pointer leave.
+        let probing = std::env::var_os("ANDY_IDE_HOVER_PROBE").is_some();
+        let over_text = self.state.hover_spot().is_some();
+        if probing && self.frames.is_multiple_of(if over_text { 12 } else { 60 }) {
+            eprintln!(
+                "hover probe: hints {} | {}",
+                self.state.hints,
+                self.state.hover.probe_line(now)
+            );
+        }
+
         self.frames += 1;
         self.state.poll_index();
         let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
