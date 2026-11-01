@@ -1008,7 +1008,9 @@ impl AppState {
         };
         match receiver.try_recv() {
             Ok(Ok((count, index))) => {
-                self.status = format!("{count} files indexed");
+                if self.lsp_status.is_empty() || !self.lsp_status.starts_with("starting") {
+                    self.status = format!("{count} files indexed");
+                }
                 self.index = Some(index);
                 self.index_job = None;
             }
