@@ -204,10 +204,7 @@ fn main() {
             .to_owned();
         // The id is opaque and may be a string: the standard allows both, the official SDK sends a UUID,
         // and a stand-in that only knew numbers would answer such a client with silence.
-        let id = message
-            .get("id")
-            .cloned()
-            .filter(|id| !id.is_null());
+        let id = message.get("id").cloned().filter(|id| !id.is_null());
 
         match method.as_str() {
             "initialize" => {

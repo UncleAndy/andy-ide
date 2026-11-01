@@ -15,7 +15,8 @@
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema, InitializeRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
+    ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
+    InitializeRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, TextContent,
 };
@@ -92,12 +93,11 @@ fn main() -> anyhow::Result<()> {
                     _ => None,
                 };
                 let action = match answer {
-                    Some(value) => ElicitationAction::Accept(ElicitationAcceptAction::new().content(
-                        std::collections::BTreeMap::from([(
-                            "variant".to_owned(),
-                            ElicitationContentValue::String(value),
-                        )]),
-                    )),
+                    Some(value) => ElicitationAction::Accept(
+                        ElicitationAcceptAction::new().content(std::collections::BTreeMap::from([
+                            ("variant".to_owned(), ElicitationContentValue::String(value)),
+                        ])),
+                    ),
                     None => ElicitationAction::Cancel,
                 };
                 let _ = responder.respond(CreateElicitationResponse::new(action));
@@ -119,7 +119,10 @@ fn main() -> anyhow::Result<()> {
         );
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-        let session = cx.send_request(NewSessionRequest::new(cwd)).block_task().await?;
+        let session = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?;
         println!("SESSION {}", session.session_id);
 
         let answer = cx
