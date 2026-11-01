@@ -69,7 +69,7 @@ impl Preview {
             .id_salt("markdown-preview")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                super::markdown::answer(
+                super::markdown::written(
                     ui,
                     cache,
                     egui::Id::new("markdown-preview-text"),

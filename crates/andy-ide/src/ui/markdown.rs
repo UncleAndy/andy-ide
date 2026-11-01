@@ -29,14 +29,178 @@ const NARROWEST_CELL: f32 = 24.0;
 /// the room it was given, so a word exactly as wide as its column is a coin toss.
 const WORD_ROOM: f32 = 1.0;
 
-/// Draws the Markdown of one answer, under an id of its own.
+/// Draws the Markdown of an agent's answer, under an id of its own.
+///
+/// The agent's own lines are kept: an answer of labelled lines, or a listing it lined up, is what a person
+/// asked for when they asked for `/status` or `/help`.
 pub fn answer(ui: &mut Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str) {
+    parts(ui, cache, id, text, true);
+}
+
+/// Draws the Markdown of a file, as it was written.
+///
+/// A file's line breaks are Markdown's own, not a listing of an agent's, and a preview that turned every
+/// soft break into a line of its own would be showing a document other than the one in the editor.
+pub fn written(ui: &mut Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str) {
+    parts(ui, cache, id, text, false);
+}
+
+/// Draws one piece after another, the tables apart from the rest.
+fn parts(ui: &mut Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str, keep_lines: bool) {
     for (index, part) in split(text).into_iter().enumerate() {
         ui.push_id((id, index), |ui| match part {
-            Part::Markdown(markdown) => render(ui, cache, &markdown),
+            Part::Markdown(markdown) => {
+                if keep_lines {
+                    draw_markdown(ui, cache, &markdown);
+                } else {
+                    render(ui, cache, &markdown);
+                }
+            }
             Part::Table(table) => draw_table(ui, cache, &table),
         });
     }
+}
+
+/// One block of an answer: a listing the agent aligned, or prose written as Markdown.
+#[derive(Debug)]
+enum Block {
+    /// Lines the agent laid out itself, spaces and all.
+    Listing(String),
+    /// Everything else, which the renderer reads as Markdown.
+    Written(String),
+}
+
+/// Draws the Markdown of an answer, block by block.
+///
+/// Two things the renderer would otherwise take away from an agent's own answer. A single newline is a
+/// *soft* break in Markdown, and the renderer draws it as a space: an answer of labelled lines — `/status`,
+/// which is what a person asks for to see one — collapses into a paragraph of noise. And a listing lined up
+/// by spaces loses its columns the same way, so `/help` stops being a list of commands and becomes a
+/// sentence. Prose is untouched: a paragraph is written as one line, and blank lines still separate them.
+fn draw_markdown(ui: &mut Ui, cache: &mut CommonMarkCache, markdown: &str) {
+    for block in blocks(markdown) {
+        match block {
+            Block::Listing(text) => listing(ui, &text),
+            Block::Written(text) => render(ui, cache, &kept_lines(&text)),
+        }
+    }
+}
+
+/// An agent's own lines, kept as lines.
+///
+/// In Markdown a line ending in two spaces is a *hard* break, and that is the only way to say to the
+/// renderer what the agent already said on the wire. Fenced code keeps its own lines and is left alone.
+fn kept_lines(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut fence: Option<char> = None;
+    let lines: Vec<&str> = text.split('\n').collect();
+    for (index, line) in lines.iter().enumerate() {
+        kept.push_str(line);
+        if index + 1 >= lines.len() {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if let Some(mark) = fence {
+            if trimmed.starts_with(&mark.to_string().repeat(3)) {
+                fence = None;
+            }
+        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(if trimmed.starts_with("```") { '`' } else { '~' });
+        }
+        let next = lines[index + 1];
+        let holds = fence.is_none()
+            && !line.trim().is_empty()
+            && !next.trim().is_empty()
+            && !trimmed.starts_with('|');
+        if holds {
+            // Two spaces, and only then the newline: that is how a hard break is written, and a hard break
+            // is the only thing the renderer draws as a line of its own.
+            kept.push_str("  ");
+        }
+        kept.push('\n');
+    }
+    kept
+}
+
+/// The blocks of an answer: consecutive lines, blank lines apart, fenced code kept whole.
+fn blocks(text: &str) -> Vec<Block> {
+    let mut made: Vec<Block> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut fence: Option<char> = None;
+    for line in text.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = match fence {
+                Some(_) => None,
+                None => Some(if trimmed.starts_with("```") { '`' } else { '~' }),
+            };
+        }
+        if fence.is_none() && line.trim().is_empty() {
+            if !current.is_empty() {
+                made.push(classify(&current));
+                current.clear();
+            }
+            continue;
+        }
+        current.push(line);
+    }
+    if !current.is_empty() {
+        made.push(classify(&current));
+    }
+    made
+}
+
+/// Whether a block is a listing the agent laid out, or prose to be read as Markdown.
+fn classify(lines: &[&str]) -> Block {
+    let written = lines.join("\n");
+    let rows: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let lined_up = rows.len() >= 2
+        && rows.iter().all(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with('/') || trimmed.starts_with('\u{2022}')
+        });
+    // Columns held by spaces: what `/help` is written with, and what Markdown would fold away.
+    let columns = rows.len() >= 2
+        && rows
+            .iter()
+            .filter(|line| holds_columns(line))
+            .count()
+            .saturating_mul(2)
+            >= rows.len();
+    let carry_markup = written.contains('*') || written.contains('`') || written.contains('#');
+    if (lined_up || columns) && !carry_markup {
+        return Block::Listing(written);
+    }
+    Block::Written(written)
+}
+
+/// Whether a line keeps two things apart by two spaces, the way a column does.
+fn holds_columns(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if !trimmed.starts_with(' ') && !trimmed.starts_with('\t') && !line.contains("  ") {
+        return false;
+    }
+    let words: Vec<&str> = line.split_whitespace().collect();
+    if words.is_empty() {
+        return false;
+    }
+    // A gap wider than one space between two words: a column, not a sentence.
+    line.split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| {
+            let at = line.find(pair[1]).unwrap_or(0);
+            line[..at].ends_with("  ") || line[..at].ends_with('\t')
+        })
+}
+
+/// Draws a listing as it was written: one line each, columns where the agent put them.
+fn listing(ui: &mut Ui, text: &str) {
+    ui.label(egui::RichText::new(text).monospace());
 }
 
 /// One piece of an answer: Markdown for the renderer, or a table drawn here.
@@ -487,4 +651,88 @@ pub(super) fn bold_label_in(ui: &mut Ui, text: &str, fill: bool, colour: egui::C
 /// and a cell carrying Markdown of its own is drawn by the renderer as it was written.
 fn plain(cell: &str) -> bool {
     !cell.contains(['*', '`', '_', '[', ']', '\\'])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the agent sends for `/status`: a labelled line each, bold, single newlines.
+    const STATUS: &str = "\u{1F4CA} **Hermes Gateway Status**\n\n**Session ID:** `local-abc`\n**Created:** 2026-11-01 07:47\n**Model:** `deepseek/deepseek-v4.1-flash` (nous)\n**Context:** 0 / 1,048,576 (0%)\n\n**Connected Platforms:** local, telegram";
+
+    /// What it sends for `/help`: a table lined up by spaces, and no Markdown in sight.
+    const HELP: &str = "Available commands:\n\n  /help        List available commands\n  /model       Show current model and provider, or switch models\n  /status      Show session, model, token, and context info\n\nOther Hermes commands run on the gateway.";
+
+    #[test]
+    fn the_labelled_lines_of_a_status_answer_are_kept() {
+        let kept = kept_lines(STATUS);
+        // No two labelled lines may be left joined: each one that has another line under it keeps its own.
+        let lines: Vec<&str> = STATUS.split('\n').collect();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(next) = lines.get(index + 1) else {
+                continue;
+            };
+            if line.trim().is_empty() || next.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                kept.contains(&format!("{line}  \n{next}")),
+                "{line:?} was folded into the line under it: {kept:?}"
+            );
+        }
+        // And the answer's own Markdown is left as it was written.
+        assert!(kept.contains("**Session ID:** `local-abc`"));
+        assert!(
+            kept.contains("\n\n"),
+            "a blank line is a paragraph, not a break"
+        );
+    }
+
+    #[test]
+    fn a_listing_lined_up_by_spaces_is_drawn_as_it_was_written() {
+        let made = blocks(HELP);
+        let listing = made
+            .iter()
+            .find_map(|block| match block {
+                Block::Listing(text) => Some(text.clone()),
+                Block::Written(_) => None,
+            })
+            .expect("the commands were not read as a listing");
+        assert!(
+            listing.contains("  /help        List available commands"),
+            "the columns were folded away: {listing:?}"
+        );
+        assert!(
+            !listing.contains("  \n"),
+            "a listing is drawn as it was written, not as Markdown: {listing:?}"
+        );
+    }
+
+    #[test]
+    fn prose_is_left_to_the_renderer() {
+        let made = blocks("A paragraph, written as one line.\n\n- one\n- another");
+        assert!(
+            made.iter().all(|block| matches!(block, Block::Written(_))),
+            "prose was taken for a listing: {made:?}"
+        );
+    }
+
+    #[test]
+    fn a_fenced_block_keeps_its_own_lines_and_its_blanks() {
+        let text = "Before.\n\n```\nfn one() {}\n\nfn two() {}\n```\n\nAfter.";
+        let made = blocks(text);
+        assert_eq!(made.len(), 3, "a fence was cut in half: {made:?}");
+        let fenced = made
+            .iter()
+            .find_map(|block| match block {
+                Block::Written(text) if text.contains("fn one") => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the fenced block is not one block");
+        assert!(
+            !kept_lines(&fenced).contains("  \n"),
+            "a code block was given hard breaks: {:?}",
+            kept_lines(&fenced)
+        );
+    }
 }
