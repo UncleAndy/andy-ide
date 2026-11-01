@@ -404,8 +404,12 @@ impl Terminal {
             self.focused = focused;
         }
         let cell_size = egui::vec2(cell_width, cell_height);
-        // Whose keys these are: the canvas holds the keyboard when the terminal is the panel in front.
-        let has_keyboard = response.has_focus();
+        // Whose keys these are. `focused` is the flag the application reads to decide whether the
+        // strokes of this frame go to the shell or to the editor (`take_keys`), and that is what a
+        // person means by "the terminal I am typing into". The canvas' own egui focus is **not** that
+        // flag: the keyboard is never given to the canvas, so `has_focus()` is false even while the
+        // shell is taking every key — which is how the cursor stayed hollow in the active terminal.
+        let has_keyboard = self.focused;
         self.track_selection(ui, rect, cell_size, cols, rows);
         let hovered = self.link_under_pointer(ui, rect, cell_size, cols, rows);
         self.follow_clicked_link(ui, &hovered);
@@ -503,21 +507,26 @@ impl Terminal {
                     rect.left_top() + egui::vec2(col as f32 * cell_width, row as f32 * cell_height);
                 let cursor_cell =
                     egui::Rect::from_min_size(position, egui::vec2(cell_width, cell_height));
-                if has_keyboard {
-                    // Half a second on, half a second off. A frame is asked for while the terminal is
-                    // on screen, or the blink would be a still block that is on half the time.
-                    if ui.input(|input| input.time) % 1.0 < 0.5 {
+                match cursor_of(has_keyboard, ui.input(|input| input.time)) {
+                    Cursor::Block => {
                         painter.rect_filled(cursor_cell, 0.0, egui::Color32::from_gray(200));
                     }
+                    Cursor::Hollow => {
+                        painter.rect_stroke(
+                            cursor_cell,
+                            0.0,
+                            egui::Stroke::new(1.0, egui::Color32::LIGHT_GRAY),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    // The dark half of the blink: nothing at all is drawn.
+                    Cursor::Nothing => {}
+                }
+                if has_keyboard {
+                    // The blink needs frames, and this window draws on demand: without the ask the
+                    // block would stand still and lit.
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(120));
-                } else {
-                    painter.rect_stroke(
-                        cursor_cell,
-                        0.0,
-                        egui::Stroke::new(1.0, egui::Color32::LIGHT_GRAY),
-                        egui::StrokeKind::Inside,
-                    );
                 }
             }
         });
@@ -1061,6 +1070,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_cursor_blinks_where_the_keys_go_and_stands_still_where_they_do_not() {
+        // The terminal that is taking the strokes: a block, and it blinks.
+        assert_eq!(cursor_of(true, 0.1), Cursor::Block);
+        assert_eq!(cursor_of(true, 0.7), Cursor::Nothing);
+        // The terminal that is merely on screen: the hollow frame, and it does not blink — the frame
+        // is what says "not here".
+        assert_eq!(cursor_of(false, 0.1), Cursor::Hollow);
+        assert_eq!(cursor_of(false, 0.7), Cursor::Hollow);
+    }
+
+    #[test]
     fn the_arrows_are_escape_sequences() {
         let up = input_for_key(Key::ArrowUp, Modifiers::NONE, false).unwrap();
         assert_eq!(up.bytes(), b"\x1b[A".to_vec());
@@ -1190,6 +1210,34 @@ mod stealing {
 /// a press anywhere else gives it back to whoever was clicked. Without the second half
 /// the shell kept every keystroke after the pointer had left it, which is how typed
 /// text ended up in the file being edited.
+/// What the cursor looks like in one frame.
+///
+/// The one thing a person has to read off the cursor at a glance is where the keys go, so the shape
+/// says it: a filled block where the shell is taking the strokes, a hollow rectangle where the
+/// terminal is merely on screen. The block blinks, half a second on and half off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cursor {
+    /// The terminal has the keys, and this is the lit half of the blink.
+    Block,
+    /// The terminal has the keys, and this is the dark half.
+    Nothing,
+    /// The keys are elsewhere: the terminal is here, and so is a still hollow frame.
+    Hollow,
+}
+
+/// The cursor of a frame: `focused` is the terminal's own "these keys are mine" flag, `time` the
+/// seconds the window has been open.
+fn cursor_of(focused: bool, time: f64) -> Cursor {
+    if !focused {
+        return Cursor::Hollow;
+    }
+    if time % 1.0 < 0.5 {
+        Cursor::Block
+    } else {
+        Cursor::Nothing
+    }
+}
+
 pub fn focus_after(rect: egui::Rect, pressed_at: Option<egui::Pos2>, inside: bool) -> Option<bool> {
     match pressed_at {
         Some(at) if rect.contains(at) => Some(true),

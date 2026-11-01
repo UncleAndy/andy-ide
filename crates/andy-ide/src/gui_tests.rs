@@ -3437,6 +3437,47 @@ mod the_terminal_selection {
     }
 
     #[test]
+    fn a_click_without_a_drag_picks_nothing_out() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = open_terminal(&mut gui);
+        type_text(&mut gui, "echo click-me\n");
+        wait_until(&mut gui, "the output to arrive", |gui| {
+            gui.app().state.terminal.contents().contains("click-me")
+        });
+        let row = row_of(&gui, "click-me");
+        let cell = at(&gui, rect, 3, row);
+
+        // Press and release on one cell, with the pointer never moving: the click is the program's,
+        // and nothing is picked out. A single lit cell reads as a selection nobody asked for.
+        // The pointer arrives at the cell and then presses and releases there: without the arrival
+        // egui has no position for the click and nothing reaches the pane at all.
+        gui.harness.event(egui::Event::PointerMoved(cell));
+        gui.settle();
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: cell,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            gui.settle();
+        }
+        assert!(
+            gui.app().state.terminal.selection().is_none(),
+            "a click that never moved left a selection behind"
+        );
+
+        // And a drag over the same text does pick it out, so the press did begin one.
+        let further = at(&gui, rect, 7, row);
+        drag(&mut gui, cell, further, false);
+        assert!(
+            gui.app().state.terminal.selection().is_some(),
+            "the drag that followed picked nothing out"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
     fn a_shift_drag_picks_the_text_and_leaves_the_program_alone() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let rect = open_terminal(&mut gui);
