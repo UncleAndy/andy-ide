@@ -1228,6 +1228,12 @@ fn transcript(ui: &mut Ui, state: &mut AppState) {
             .auto_shrink([false, false])
             .max_height(height)
             .show(ui, |ui| {
+                // The conversation's words are drawn by egui's own labels (the markdown viewer among
+                // them), and a label's selection belongs to egui: it is dropped on any press egui does
+                // not like, which is why a right-click took the highlight away. The panel keeps its own
+                // selection instead — the way the terminal and the editor do — so egui's is turned off
+                // here. One selection, and it behaves like the other two panels.
+                ui.style_mut().interaction.selectable_labels = false;
                 state.agent.line_layouts.clear();
                 for (index, line) in lines.iter().enumerate() {
                     let drawn = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
