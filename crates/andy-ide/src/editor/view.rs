@@ -928,18 +928,23 @@ fn draw_completions(ctx: &egui::Context, at: Pos2, row_h: f32, view: &crate::ui:
                 ui.set_max_width(WIDTH);
                 for (index, (word, beside)) in view.lines.iter().enumerate() {
                     let chosen = index == view.chosen;
-                    let text = if beside.is_empty() {
-                        word.clone()
-                    } else {
-                        format!("{word}   {beside}")
-                    };
-                    let label = egui::RichText::new(text);
-                    let label = if chosen {
-                        label.background_color(ui.visuals().selection.bg_fill)
-                    } else {
-                        label
-                    };
-                    ui.label(label);
+                    // Two pieces, not one line of text: the word is the key of the row, and what stands beside
+                    // it — the kind, or the type the server told — is what the eye skips until it needs it. Andy:
+                    // "ключевые слова надо подсвечивать ярче, а описание можно и так как сейчас".
+                    let mut row = egui::Frame::NONE;
+                    if chosen {
+                        row = row.fill(ui.visuals().selection.bg_fill);
+                    }
+                    row.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(word).color(ui.visuals().strong_text_color()),
+                            );
+                            if !beside.is_empty() {
+                                ui.label(egui::RichText::new(beside).weak());
+                            }
+                        });
+                    });
                 }
             });
         });

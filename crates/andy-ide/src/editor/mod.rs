@@ -690,12 +690,16 @@ impl EditorBuffer {
                 at
             }
         };
-        // A method is taken with its brackets, and the caret goes inside them: that is where the arguments go,
-        // and a person who has just taken `unwrap()` wants to write into it, not after it.
+        // A method is taken with its brackets. The caret goes inside them, where the arguments go — but only
+        // when there is something to write there: with no arguments at all, `unwrap()`, it goes after the
+        // closing bracket, because a person who took a method with nothing in it wants to write on. Andy:
+        // "если у метода нет аргументов, курсор после вставки надо ставить после закрывающей скобки; если
+        // аргументы есть — оставить как сейчас".
         let inside = word
             .find('(')
-            .map(|at| word[..at].chars().count() + 1)
-            .filter(|_| word.ends_with(')'));
+            .and_then(|open| word.rfind(')').map(|close| (open, close)))
+            .filter(|(open, close)| !word[open + 1..*close].trim().is_empty())
+            .map(|(open, _)| word[..open].chars().count() + 1);
         self.cursor = Cursor::caret(from + inside.unwrap_or_else(|| word.chars().count()));
         self.refresh();
         true
@@ -1106,24 +1110,43 @@ mod complete_with_tests {
     }
 
     #[test]
-    fn a_taken_method_leaves_the_caret_inside_its_brackets() {
+    fn a_taken_method_with_arguments_leaves_the_caret_inside_its_brackets() {
         // Andy: "при выборе метода хорошо бы его добавлять уже с первой скобкой и с подсказкой по параметрам".
         let mut buf = buffer("value.le");
         buf.set_caret(buf.text().len());
         assert!(buf.complete_with("len()"));
         assert_eq!(buf.text(), "value.len()");
+
+        // With arguments in the brackets the caret goes between them, where the arguments are written.
+        let mut buf = buffer("stack.");
+        buf.set_caret(buf.text().len());
+        assert!(buf.complete_with("push(value)"));
+        assert_eq!(buf.text(), "stack.push(value)");
         assert_eq!(
             buf.caret(),
-            "value.len(".chars().count(),
-            "the caret went after the brackets"
+            "stack.push(".chars().count(),
+            "the caret did not go inside the brackets that have something in them"
         );
+    }
 
-        // After a dot the same: the name and its brackets go in at the caret, and the caret goes inside.
+    #[test]
+    fn a_taken_method_without_arguments_leaves_the_caret_after_its_brackets() {
+        // Andy: "если у метода нет аргументов, курсор после вставки надо ставить после закрывающей скобки".
         let mut buf = buffer("project.unwrap().");
         buf.set_caret(buf.text().len());
         assert!(buf.complete_with("unwrap()"));
         assert_eq!(buf.text(), "project.unwrap().unwrap()");
-        assert_eq!(buf.caret(), "project.unwrap().unwrap(".chars().count());
+        assert_eq!(
+            buf.caret(),
+            "project.unwrap().unwrap()".chars().count(),
+            "the caret stayed inside brackets with nothing in them"
+        );
+
+        // The same after a plain name: brackets with nothing in them leave the caret after them.
+        let mut buf = buffer("value.le");
+        buf.set_caret(buf.text().len());
+        assert!(buf.complete_with("len()"));
+        assert_eq!(buf.caret(), "value.len()".chars().count());
     }
 
     #[test]
