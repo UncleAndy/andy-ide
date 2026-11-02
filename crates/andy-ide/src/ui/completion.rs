@@ -41,6 +41,17 @@ pub struct Place {
     pub character: u32,
 }
 
+/// Whether two places are about the same word: the same file, on the same line.
+///
+/// The character is left out on purpose. Letters are added to the right of a word, which moves the caret with
+/// every key — so an answer about this object would be thrown away for a caret that took a step while the
+/// answer was on its way. That is why a method list appeared only once the hand stopped: Andy, "варианты
+/// начинают предлагаться только после набора первых 3-х символов из имени метода". Which word it is on that
+/// line is decided by the letters themselves (see the prefix the offers are filtered by).
+fn about_the_same_line(one: &Place, other: &Place) -> bool {
+    one.path == other.path && one.line == other.line
+}
+
 /// The word being written under the caret: the byte it starts at, and its letters.
 ///
 /// The caret may stand inside a word, not only at its end — a person editing the middle of a name
@@ -205,7 +216,11 @@ impl Completion {
         let typing = keystrokes != self.seen_keystrokes;
         self.seen_keystrokes = keystrokes;
         let word = if worth_asking(text, caret) {
+            // A dot or `::` just behind the caret: the person is choosing a member of what stands before it,
+            // and what they are choosing begins where the caret stands — empty, but worth asking about. Until
+            // this existed a dot asked nothing at all (`due` needs a word), so no list could come out of one.
             word_under_caret(text, caret)
+                .or_else(|| Some((on_a_character(text, caret), String::new())))
         } else {
             None
         };
@@ -227,6 +242,13 @@ impl Completion {
             if !typing || self.word.is_none() {
                 self.offers.clear();
             }
+            // What was offered for a longer word still stands for its beginning, but nothing that no longer
+            // fits the letters on screen: the list is about this word, not the one it grew out of.
+            if let Some((_, word)) = &self.word {
+                let prefix = word.to_lowercase();
+                self.offers
+                    .retain(|offer| offer.label.to_lowercase().starts_with(&prefix));
+            }
         }
         self.place = Some(place);
     }
@@ -245,14 +267,14 @@ impl Completion {
         if self
             .asked
             .as_ref()
-            .is_some_and(|(asked, w)| asked == &place && w == word)
+            .is_some_and(|(asked, w)| about_the_same_line(asked, &place) && w == word)
         {
             return None;
         }
         if self
             .closed
             .as_ref()
-            .is_some_and(|(closed, w)| closed == &place && w == word)
+            .is_some_and(|(closed, w)| about_the_same_line(closed, &place) && w == word)
         {
             return None;
         }
@@ -284,7 +306,10 @@ impl Completion {
     /// about a word that is no longer being written. What survives is filtered once more by the word
     /// on screen, so a list can never contradict the letters the person can see.
     pub fn answer(&mut self, place: Place, items: Vec<lsp_types::CompletionItem>) {
-        let current = self.place.as_ref().is_some_and(|here| here == &place);
+        let current = self
+            .place
+            .as_ref()
+            .is_some_and(|here| about_the_same_line(here, &place));
         if !current {
             return;
         }
@@ -493,6 +518,76 @@ mod tests {
         assert!(
             !worth_asking("let self . thing", 4),
             "a dot elsewhere in the line is not a place"
+        );
+    }
+
+    /// The place with the caret standing at the told character, so a check can say where it looks.
+    fn place_at(character: u32) -> Place {
+        Place {
+            character,
+            ..place()
+        }
+    }
+
+    /// One thing the server could offer.
+    fn offered(label: &str) -> lsp_types::CompletionItem {
+        lsp_types::CompletionItem {
+            label: label.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dot_asks_for_the_members_of_what_stands_before_it() {
+        // Andy: "разве список всех методов не должен выдаваться сразу после нажатия на точку?" — and it did
+        // not: `due` needs a word, and after a dot there is none.
+        let mut list = Completion::new();
+        list.look_at("value.", 6, place_at(6), 0.0, 1);
+        assert_eq!(
+            list.due(0.3),
+            Some(place_at(6)),
+            "the dot was not asked about at all"
+        );
+        list.answer(
+            place_at(6),
+            vec![offered("len"), offered("lines"), offered("push")],
+        );
+        assert!(
+            list.is_open(),
+            "the members of what stands before the dot never arrived"
+        );
+    }
+
+    #[test]
+    fn an_answer_about_a_member_survives_the_letters_typed_after_the_dot() {
+        // The caret moves a step to the right with every letter, but the place the question was asked at does
+        // not: it is where the word starts. So an answer that is still on its way is not thrown away for a
+        // caret that has moved — which is what made the list appear only after three letters.
+        let mut list = Completion::new();
+        list.look_at("value.", 6, place_at(6), 0.0, 1);
+        assert_eq!(
+            list.due(0.3),
+            Some(place_at(6)),
+            "the dot was not asked about"
+        );
+
+        list.look_at("value.l", 7, place_at(7), 0.4, 2);
+        list.answer(
+            place_at(6),
+            vec![offered("len"), offered("lines"), offered("push")],
+        );
+        assert!(
+            list.is_open(),
+            "an answer about this object was thrown away because the caret moved"
+        );
+        assert_eq!(
+            list.offers().len(),
+            2,
+            "the list showed words that do not fit the letter on screen: {:?}",
+            list.offers()
+                .iter()
+                .map(|o| o.label.clone())
+                .collect::<Vec<_>>()
         );
     }
 
