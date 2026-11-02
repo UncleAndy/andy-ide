@@ -345,16 +345,6 @@ fn stand_in_with(flags: &[&str]) -> AgentSpec {
     spec
 }
 
-/// The stand-in, told to ask the client for a path of the test's choosing.
-fn stand_in_asking_for(path: &std::path::Path) -> AgentSpec {
-    let mut spec = stand_in();
-    spec.env.insert(
-        "ACP_TEST_ASK_PATH".to_owned(),
-        path.to_string_lossy().into_owned(),
-    );
-    spec
-}
-
 /// What the agent says during one turn, and how it ends.
 fn one_turn(session: &mut acp::Session, words: &str) -> (String, Option<String>) {
     session.start_turn(words).expect("the turn goes out");
@@ -508,84 +498,6 @@ fn the_standard_road_is_taken_when_the_agent_offers_both() {
         "the standard road was not taken although the agent offers it"
     );
     assert_eq!(session.state().current_model.as_deref(), Some("large"));
-    session.stop();
-}
-
-#[test]
-fn a_file_the_agent_asks_for_inside_the_project_is_served() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "the project's own words").unwrap();
-    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
-        .expect("the agent starts and answers the handshake");
-
-    let (said, finished) = one_turn(&mut session, "read");
-    assert_eq!(
-        said, "the project's own words",
-        "the file the agent asked for was not served"
-    );
-    assert_eq!(
-        finished.as_deref(),
-        Some("end_turn"),
-        "the turn did not end: an unanswered request is a turn that never ends"
-    );
-    session.stop();
-}
-
-#[test]
-fn a_file_outside_the_project_is_refused_and_the_turn_goes_on() {
-    let outside = tempfile::tempdir().unwrap();
-    std::fs::write(
-        outside.path().join("secret.txt"),
-        "not the project's business",
-    )
-    .unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let spec = stand_in_asking_for(&outside.path().join("secret.txt"));
-    let mut session = acp::Session::start(&spec, project.path(), PermissionPolicy::Ask)
-        .expect("the agent starts and answers the handshake");
-
-    let (said, finished) = one_turn(&mut session, "read");
-    assert_ne!(
-        said, "not the project's business",
-        "a file outside the project was served"
-    );
-    assert_eq!(
-        finished.as_deref(),
-        Some("end_turn"),
-        "the turn did not end after the refusal"
-    );
-    session.stop();
-}
-
-#[test]
-fn a_write_the_panel_has_not_allowed_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
-        .expect("the agent starts and answers the handshake");
-
-    let (said, _) = one_turn(&mut session, "write");
-    assert_eq!(said, "write refused", "a write went through unallowed");
-    assert!(
-        !dir.path().join("written.txt").exists(),
-        "the file was written although the panel had not allowed it"
-    );
-    session.stop();
-}
-
-#[test]
-fn a_write_the_panel_has_allowed_goes_through() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut session = acp::Session::start(&stand_in(), dir.path(), PermissionPolicy::Ask)
-        .expect("the agent starts and answers the handshake");
-    session.allow_writes(true);
-
-    let (said, _) = one_turn(&mut session, "write");
-    assert_eq!(said, "written", "an allowed write did not go through");
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("written.txt")).unwrap_or_default(),
-        "from the agent\n",
-        "the file the agent wrote does not hold what it wrote"
-    );
     session.stop();
 }
 

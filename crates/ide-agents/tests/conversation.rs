@@ -113,15 +113,6 @@ fn the_answer_streams_in_pieces() {
 }
 
 #[test]
-fn the_agent_reads_a_file_through_the_client() {
-    let (_dir, mut session) = start(PermissionPolicy::Deny);
-    session
-        .prompt("read", Duration::from_secs(10))
-        .expect("the turn");
-    assert_eq!(text_of(&drain(&mut session)), "what the file says\n");
-}
-
-#[test]
 fn a_permission_that_is_allowed_is_taken() {
     let (_dir, mut session) = start(PermissionPolicy::Allow);
     session
@@ -162,52 +153,6 @@ fn a_permission_that_is_asked_reaches_the_panel_and_waits_for_the_answer() {
         .answer_permission(id, Some("yes"))
         .expect("the answer went back");
     assert_eq!(text_of(&drain(&mut session)), "allowed");
-}
-
-#[test]
-fn writing_a_file_is_refused_until_the_editor_allows_it() {
-    let (dir, mut session) = start(PermissionPolicy::Deny);
-    session
-        .prompt("write", Duration::from_secs(10))
-        .expect("the turn");
-    assert_eq!(text_of(&drain(&mut session)), "write refused");
-    assert!(
-        !dir.path().join("written.txt").exists(),
-        "the file was written without permission"
-    );
-
-    session.allow_writes(true);
-    session
-        .prompt("write", Duration::from_secs(10))
-        .expect("the second turn");
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("written.txt")).expect("the file"),
-        "from the agent\n"
-    );
-}
-
-#[test]
-fn a_path_outside_the_project_is_refused() {
-    let dir = project();
-    // The agent is told to read a file that is not in the project by a small detour:
-    // the stand-in reads `a.txt`, so `a.txt` is removed and a link to outside is put in
-    // its place — the canonical path leaves the project, and the client must say so.
-    let outside = tempfile::tempdir().unwrap();
-    std::fs::write(outside.path().join("secret.txt"), "not yours\n").unwrap();
-    std::fs::remove_file(dir.path().join("a.txt")).unwrap();
-    std::os::unix::fs::symlink(outside.path().join("secret.txt"), dir.path().join("a.txt"))
-        .unwrap();
-
-    let mut session =
-        Session::start(&stand_in(), dir.path(), PermissionPolicy::Deny).expect("the agent started");
-    session
-        .prompt("read", Duration::from_secs(10))
-        .expect("the turn");
-    let said = text_of(&drain(&mut session));
-    assert_eq!(
-        said, "nothing",
-        "the client served a file from outside the project: {said:?}"
-    );
 }
 
 #[test]

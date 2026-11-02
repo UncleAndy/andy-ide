@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -24,12 +24,10 @@ use agent_client_protocol::schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
     ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
     ErrorCode, Implementation, InitializeRequest, KillTerminalRequest, ListSessionsRequest,
-    PromptRequest, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalOutputRequest,
-    TextContent, ToolCallStatus, WaitForTerminalExitRequest, WriteTextFileRequest,
-    WriteTextFileResponse,
+    PromptRequest, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionValue,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    StopReason, TerminalOutputRequest, TextContent, ToolCallStatus, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, ByteStreams, Client, Responder};
 use anyhow::Context as _;
@@ -357,7 +355,6 @@ pub struct Session {
     /// The agent's own error output, as it arrives.
     complaints: Arc<Mutex<String>>,
     /// Whether the panel has agreed that the agent may write files through this window.
-    writes: Arc<AtomicBool>,
     /// Events a waiting caller set aside before the one it was waiting for.
     ///
     /// [`Session::prompt`] waits for the end of a turn and nothing else, and the pieces of the answer arrive
@@ -401,7 +398,6 @@ impl Session {
         let waiting: Arc<Mutex<HashMap<u64, Waiting>>> = Arc::new(Mutex::new(HashMap::new()));
         let questions = Arc::new(AtomicU64::new(1));
         let settings: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
-        let writes = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(started.child));
         // The thread that speaks to the agent gets a share of the process: it is the one watching for it.
         let driven = Arc::clone(&child);
@@ -414,7 +410,6 @@ impl Session {
             let questions = Arc::clone(&questions);
             let settings = Arc::clone(&settings);
             let steps = progress.clone();
-            let writes = Arc::clone(&writes);
             let wire = Arc::clone(&wire);
             let record = Arc::clone(&wire);
             std::thread::Builder::new()
@@ -432,7 +427,6 @@ impl Session {
                         waiting,
                         questions,
                         settings,
-                        writes,
                         steps,
                         driven,
                         policy,
@@ -470,7 +464,6 @@ impl Session {
             state,
             usage: None,
             complaints,
-            writes,
             pending: std::collections::VecDeque::new(),
             closed: false,
         })
@@ -600,14 +593,6 @@ impl Session {
                 chosen: chosen.map(<[String]>::to_vec),
             })
             .map_err(|_| anyhow::anyhow!("the agent is no longer listening"))
-    }
-
-    /// Allows or forbids the agent to write files through this window.
-    ///
-    /// A write the panel has not agreed to is refused in the protocol's own words. The agreement is the
-    /// panel's to give: the mode the agent was switched to is the agent's own word, not this.
-    pub fn allow_writes(&mut self, allow: bool) {
-        self.writes.store(allow, Ordering::Relaxed);
     }
 
     /// Opens a fresh conversation with the agent.
@@ -834,7 +819,6 @@ async fn converse(
     waiting: Arc<Mutex<HashMap<u64, Waiting>>>,
     questions: Arc<AtomicU64>,
     settings: Arc<Mutex<SessionState>>,
-    writes: Arc<AtomicBool>,
     steps: Option<Arc<Mutex<String>>>,
     child: Arc<Mutex<Child>>,
     policy: PermissionPolicy,
@@ -845,9 +829,6 @@ async fn converse(
     let words = note_the_agent_words(stderr, Arc::clone(&wire), Some(complaints));
     let told = events.clone();
     let notes = Arc::clone(&settings);
-    let reads_root = cwd.clone();
-    let writes_root = cwd.clone();
-    let allowed = Arc::clone(&writes);
     // Each handler is a `move` closure of its own, so each gets its own share of the same state.
     let asking_permission = events.clone();
     let waiting_permission = Arc::clone(&waiting);
@@ -919,43 +900,6 @@ async fn converse(
                     id,
                     request: ChoiceRequest::from_params(&json_of(&request)),
                 });
-                Ok(())
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |request: ReadTextFileRequest, responder, _cx| {
-                // A request nobody answers is a turn that never ends, and a hidden line looks exactly like
-                // silence: every request the panel is asked is answered, even when the answer is a refusal.
-                match serve_read(&reads_root, &request.path) {
-                    Ok(text) => {
-                        let _ = responder.respond(ReadTextFileResponse::new(text));
-                    }
-                    Err((code, words)) => {
-                        let _ = responder.respond_with_error(refusal(code, &words));
-                    }
-                }
-                Ok(())
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |request: WriteTextFileRequest, responder, _cx| {
-                if !allowed.load(Ordering::Relaxed) {
-                    let _ = responder.respond_with_error(refusal(
-                        ErrorCode::MethodNotFound,
-                        "the panel has not allowed the agent to write files",
-                    ));
-                    return Ok(());
-                }
-                match serve_write(&writes_root, &request.path, &request.content) {
-                    Ok(()) => {
-                        let _ = responder.respond(WriteTextFileResponse::new());
-                    }
-                    Err((code, words)) => {
-                        let _ = responder.respond_with_error(refusal(code, &words));
-                    }
-                }
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -1373,42 +1317,6 @@ fn words_of(error: &agent_client_protocol::Error) -> String {
 /// A refusal in the protocol's own words.
 fn refusal(code: ErrorCode, message: &str) -> agent_client_protocol::Error {
     agent_client_protocol::Error::new(code.into(), message.to_owned())
-}
-
-/// Reads a file the agent asked for, if it lives in the project.
-fn serve_read(root: &Path, path: &Path) -> Result<String, (ErrorCode, String)> {
-    let full = inside_project(root, path)?;
-    std::fs::read_to_string(&full).map_err(|error| (ErrorCode::InternalError, error.to_string()))
-}
-
-/// Writes a file the agent asked for, once the panel has agreed to it.
-fn serve_write(root: &Path, path: &Path, content: &str) -> Result<(), (ErrorCode, String)> {
-    let full = inside_project(root, path)?;
-    std::fs::write(&full, content).map_err(|error| (ErrorCode::InternalError, error.to_string()))
-}
-
-/// A path the agent named, if it lives in the project.
-///
-/// `..` and absolute paths outside the root are refused: an agent may reach the project it was started in,
-/// and nothing else.
-fn inside_project(root: &Path, path: &Path) -> Result<PathBuf, (ErrorCode, String)> {
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let full = joined.canonicalize().unwrap_or(joined);
-    if !full.starts_with(&root) {
-        return Err((
-            ErrorCode::InvalidParams,
-            format!(
-                "{} is outside the project; this editor serves nothing else",
-                path.display()
-            ),
-        ));
-    }
-    Ok(full)
 }
 
 /// The conversation the agent opened, out of its own answer.

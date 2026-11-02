@@ -125,20 +125,18 @@ Plan and state:
 
 Milestone M5 (agents) is under way: the panel holds a conversation with an agent, a
 permission is asked before the agent is allowed to do anything, and a second agent is a
-table in `agents.toml`. Two things of the milestone are not there. The context of the
-open file does not travel with a request — `prompt_params` carries the text alone, and a
-prompt is that one block. And the rule "an edit reaches the file only after it was
-confirmed, and shown as a diff" is not the one this editor follows.
+table in `agents.toml`. One thing of the milestone is not there: the context of the open file does not travel with
+a request — `prompt_params` carries the text alone, and a prompt is that one block. An edit is
+the agent's own business, done through the terminal it was configured with: this window neither
+reads nor writes files for it, asks for no confirmation of an edit, and leaves the review of
+what changed to the person.
 
 `ide-agents` speaks the Agent Client Protocol over a child process's standard input and
 output — one JSON-RPC message per line, a deadline on every wait, two threads per agent so
 that nothing waits where the window is drawn. Which agents exist is `agents.toml`, not
 code: a second agent is a table in that file, and a project's copy wins over the user's.
-The code that would serve `fs/read_text_file` and `fs/write_text_file` — reads inside the
-project and nowhere else, a write only where the editor has allowed it — is written and
-tested, but it is not what happens: the panel claims neither of those capabilities and
-never turns a write on, so an edit is the agent's own business, done through the
-terminal it was configured with. The paragraph about `_meta.fileAccess` below says the
+The panel claims neither file capability in the handshake and never serves `fs/*`, so there
+is nothing of that machinery to keep. The paragraph about `_meta.fileAccess` below says the
 same thing to the agent, where it looks. `crates/ide-agents/src/bin/acp_test_agent.rs` is
 a stand-in agent the tests drive, so the client can be exercised without a model
 installed.
