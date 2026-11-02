@@ -19,6 +19,13 @@ pub fn strip(ui: &mut Ui, state: &mut AppState) {
         .map(|item| item.path.clone())
         .collect();
     let labels = crate::state::tab_labels(&paths, root);
+    // Where each open file lives: its path from the project root, or the crate it came from and
+    // the path inside that crate. On the hint rather than in the label, because a label is a tab
+    // and a path is long.
+    let tips: Vec<String> = paths
+        .iter()
+        .map(|path| crate::state::tab_tip(path, root))
+        .collect();
     let entries: Vec<(usize, String, bool)> = labels
         .into_iter()
         .enumerate()
@@ -39,7 +46,9 @@ pub fn strip(ui: &mut Ui, state: &mut AppState) {
                     } else {
                         name.clone()
                     };
-                    let response = ui.selectable_label(active == Some(*index), title);
+                    let response = ui
+                        .selectable_label(active == Some(*index), title)
+                        .on_hover_text(&tips[*index]);
                     if response.clicked() {
                         activate = Some(*index);
                     }

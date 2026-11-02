@@ -2307,6 +2307,76 @@ pub fn tab_title(path: &Path, root: Option<&Path>) -> String {
     parts[parts.len() - 3..].join("/")
 }
 
+/// What a tab's hover hint says: a file of the project by its path from the root, a file from
+/// outside it by its crate and the path within that crate.
+///
+/// The case this is for is a dependency's source. A jump into `serde` opens a file under
+/// `~/.cargo/registry/src/<registry>/serde-1.0.215/src/lib.rs`, and what a person wants to read
+/// there is "serde-1.0.215, src/lib.rs" — not sixty characters of registry hash. A path that fits
+/// none of the known shapes keeps its whole path: a crate name guessed out of a directory name
+/// would be worse than a long line.
+pub fn tab_tip(path: &Path, root: Option<&Path>) -> String {
+    if let Some(root) = root
+        && let Ok(relative) = path.strip_prefix(root)
+    {
+        return relative.display().to_string();
+    }
+    match crate_of_a_dependency(path) {
+        Some((krate, inside)) => format!("{krate} · {inside}"),
+        None => path.display().to_string(),
+    }
+}
+
+/// The crate a file outside the project belongs to, and its path within that crate.
+///
+/// Read from the shape of the path alone — nothing is looked up on disk, so a file that has just
+/// been opened from a deleted checkout still says what it is. Three shapes are known: cargo's
+/// registry (`…/.cargo/registry/src/<registry>/<crate>-<version>/…`), a git checkout
+/// (`…/.cargo/git/checkouts/<repo>-<hash>/<revision>/<crate>/…`, where the revision is stepped
+/// over), and the standard library's sources (`…/rustlib/src/rust/library/<crate>/…`). Anything
+/// else answers `None`, and the caller shows the whole path.
+fn crate_of_a_dependency(path: &Path) -> Option<(String, String)> {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let at = |needle: &[&str]| -> Option<usize> {
+        parts.windows(needle.len()).position(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(part, want)| part.as_str() == *want)
+        })
+    };
+    // The crate is the directory the file is under, the rest is its path inside that directory.
+    // `crate_at` is where that directory sits, counted from the anchor: a registry keeps the
+    // registry's own name between them, a checkout keeps a revision as well, and the standard
+    // library's sources keep nothing at all.
+    let named = |crate_at: usize| -> Option<(String, String)> {
+        (parts.len() > crate_at + 1)
+            .then(|| (parts[crate_at].clone(), parts[crate_at + 1..].join("/")))
+    };
+    if let Some(at) = at(&[".cargo", "registry", "src"])
+        && let Some(found) = named(at + 4)
+    {
+        return Some(found);
+    }
+    if let Some(at) = at(&[".cargo", "git", "checkouts"])
+        && let Some(found) = named(at + 5)
+    {
+        return Some(found);
+    }
+    if let Some(at) = at(&["rustlib", "src", "rust", "library"])
+        && let Some(found) = named(at + 4)
+    {
+        return Some(found);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2683,4 +2753,73 @@ pub fn tab_labels(paths: &[PathBuf], root: Option<&Path>) -> Vec<String> {
         }
     }
     labels
+}
+
+#[cfg(test)]
+mod tab_tip_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_of_the_project_is_shown_by_its_path_from_the_root() {
+        let root = Path::new("/home/andy/projects/RUST/andy-ide");
+        let path = root.join("crates/andy-ide/src/app.rs");
+        assert_eq!(
+            tab_tip(&path, Some(root)),
+            "crates/andy-ide/src/app.rs",
+            "a file of the project is not named by its path from the root"
+        );
+    }
+
+    #[test]
+    fn a_dependency_is_shown_by_its_crate_and_the_path_inside_it() {
+        // The shape cargo keeps a registry crate in: the crate and its version is the directory,
+        // the file inside it follows. Nothing is read from disk, so the paths need not exist.
+        let registry = Path::new(
+            "/home/andy/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.215/src/lib.rs",
+        );
+        assert_eq!(
+            tab_tip(registry, None),
+            "serde-1.0.215 · src/lib.rs",
+            "a registry dependency is not named by its crate and the path inside it"
+        );
+
+        // A git checkout keeps the revision between the checkout and the crate: it is stepped over.
+        let checkout = Path::new(
+            "/home/andy/.cargo/git/checkouts/tokio-1a2b3c4d5e6f/9f8e7d6c/tokio/src/lib.rs",
+        );
+        assert_eq!(
+            tab_tip(checkout, None),
+            "tokio · src/lib.rs",
+            "a git dependency is named with its revision instead of its crate"
+        );
+
+        // The standard library, which a jump into `Vec` opens.
+        let std_src = Path::new(
+            "/home/andy/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/lib.rs",
+        );
+        assert_eq!(
+            tab_tip(std_src, None),
+            "core · src/lib.rs",
+            "the standard library is not named by its crate"
+        );
+    }
+
+    #[test]
+    fn a_file_that_fits_no_known_shape_keeps_its_whole_path() {
+        // Another project's file, and a shape that only looks like cargo's: a name guessed out of a
+        // directory would be a lie, so the path is shown as it is.
+        assert_eq!(
+            tab_tip(Path::new("/tmp/notes.txt"), None),
+            "/tmp/notes.txt",
+            "an unknown file lost its path"
+        );
+        assert_eq!(
+            tab_tip(
+                Path::new("/home/andy/other/registry/src/thing/src/lib.rs"),
+                None
+            ),
+            "/home/andy/other/registry/src/thing/src/lib.rs",
+            "a path that only resembles cargo's was read as a dependency"
+        );
+    }
 }
