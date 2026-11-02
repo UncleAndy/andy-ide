@@ -2,6 +2,7 @@
 
 mod agent;
 mod app;
+mod credits;
 mod editor;
 mod git;
 #[cfg(test)]

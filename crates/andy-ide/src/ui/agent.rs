@@ -1040,6 +1040,18 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                     ui.weak("ctx —");
                 }
             }
+            // What is left on the agent's account, as `/usage` prints it: asked of the agent itself,
+            // because the protocol carries no money at all. It sits right of the context figure and
+            // follows every turn.
+            if let Some(credits) = state.agent.credits() {
+                ui.separator();
+                if !room_for(ui, credits) {
+                    dropped = true;
+                    break 'facts;
+                }
+                ui.label(credits)
+                    .on_hover_text(format!("Top-up credits: {credits} (the agent's account)"));
+            }
             if dropped {
                 // The row is one row: what was left out is said by a mark in it, never by a
                 // second row under it.

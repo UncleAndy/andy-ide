@@ -116,3 +116,59 @@ pub enum Event {
     /// Its own words, when it failed.
     Failed(String),
 }
+
+impl AgentSpec {
+    /// The same agent, asked for its account instead of a conversation.
+    ///
+    /// A Hermes agent answers ACP as `... hermes acp`; the same program with `usage --json` prints the
+    /// account block `/usage` shows, as a JSON document whose schema Hermes' own documentation calls
+    /// stable. Any other command line is not known to have such a door, so it gets nothing and the panel
+    /// asks nobody: a figure from a guessed invocation would be a figure made up.
+    pub fn usage_args(&self) -> Option<Vec<String>> {
+        if self.args.last().map(String::as_str) != Some("acp") {
+            return None;
+        }
+        let mut args = self.args.clone();
+        args.pop();
+        args.push("usage".to_owned());
+        args.push("--json".to_owned());
+        Some(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(args: &[&str]) -> AgentSpec {
+        AgentSpec {
+            name: "Hermes Docker".to_owned(),
+            command: "docker".to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_account_is_asked_on_the_same_command_line_as_the_conversation() {
+        // The agent the panel talks to is `docker exec -i hermes-agent hermes acp`. The account is the
+        // same program with `usage --json` where `acp` was: the credentials, the home and the version
+        // are the agent's own, and the editor holds no copy of any of them.
+        let asked = spec(&["exec", "-i", "hermes-agent", "hermes", "acp"])
+            .usage_args()
+            .expect("a Hermes agent can be asked for its account");
+        assert_eq!(
+            asked,
+            vec!["exec", "-i", "hermes-agent", "hermes", "usage", "--json"]
+        );
+    }
+
+    #[test]
+    fn an_agent_that_is_not_that_command_line_is_asked_nothing() {
+        // A stand-in, or any other agent: there is no reason to believe it has a usage command, and a
+        // stray process after every turn is worse than a figure that is not there.
+        assert_eq!(spec(&[]).usage_args(), None);
+        assert_eq!(spec(&["serve"]).usage_args(), None);
+        assert_eq!(spec(&["acp", "--debug"]).usage_args(), None);
+    }
+}

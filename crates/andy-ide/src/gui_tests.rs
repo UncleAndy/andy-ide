@@ -176,6 +176,56 @@ fn the_status_bar_says_what_is_being_waited_for_and_stops_when_the_server_answer
 }
 
 #[test]
+fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
+    // Andy asked for the `Top-up credits` figure of `/usage` on the agent status line, right of
+    // `ctx ...`, following every request to the agent. ACP carries no money at all, so the panel asks
+    // the agent itself; this holds the line to what it does with the answer it gets.
+    let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
+    let path = gui
+        .app_mut()
+        .dock
+        .find_tab(&crate::ui::Tab::Agent)
+        .expect("the agent tab is in the layout");
+    gui.app_mut().dock.set_active_tab(path).unwrap();
+    gui.settle();
+
+    let spots = |gui: &mut Gui, text: &str| gui.harness.query_all_by_label_contains(text).count();
+    gui.app_mut().state.agent.credits_arrived(None);
+    gui.settle();
+    assert_eq!(
+        spots(&mut gui, "$14.06"),
+        0,
+        "a balance is shown that nobody reported"
+    );
+
+    gui.app_mut()
+        .state
+        .agent
+        .credits_arrived(Some("$14.06".to_owned()));
+    gui.settle();
+    assert!(
+        spots(&mut gui, "$14.06") >= 1,
+        "the balance is not on the status line"
+    );
+
+    // A later answer replaces it: an account moves, and a figure that cannot fall is not a balance.
+    gui.app_mut()
+        .state
+        .agent
+        .credits_arrived(Some("$9.01".to_owned()));
+    gui.settle();
+    assert_eq!(
+        spots(&mut gui, "$14.06"),
+        0,
+        "the old balance is still on the line"
+    );
+    assert!(
+        spots(&mut gui, "$9.01") >= 1,
+        "the new balance is not on the line"
+    );
+}
+
+#[test]
 fn clicking_a_file_in_the_tree_opens_its_tab() {
     let mut gui = Gui::new(&[("a.rs", "fn a() {}\n"), ("notes.txt", "text\n")], None);
     assert_eq!(gui.app().state.tabs.len(), 0, "nothing is open yet");

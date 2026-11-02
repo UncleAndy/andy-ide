@@ -384,6 +384,14 @@ pub struct AgentState {
     pub options: Vec<ConfigOption>,
     /// How much of the model's context is spent, when the agent says.
     pub usage: Option<Usage>,
+    /// What the agent says is left on its account: the `Top-up credits` figure of `/usage`, which the
+    /// protocol does not carry at all and the agent is therefore asked for directly.
+    credits: Option<String>,
+    /// The account fetch in flight, if one is. One at a time: a figure of money does not move between
+    /// two answers, and a process per frame would.
+    credits_job: Option<Receiver<Option<String>>>,
+    /// When the account was last asked. Every turn is answered, but a turn is not a frame.
+    credits_asked: Option<Instant>,
     /// The conversations the agent keeps for this project, as it last listed them.
     pub sessions: Vec<SessionInfo>,
     /// The names a person gave the conversations, by session id: what the list shows instead of
@@ -512,6 +520,9 @@ impl Default for AgentState {
             current_mode: None,
             options: Vec::new(),
             usage: None,
+            credits: None,
+            credits_job: None,
+            credits_asked: None,
             contexts: std::collections::BTreeMap::new(),
             sessions: Vec::new(),
             session_names: std::collections::BTreeMap::new(),
@@ -1334,6 +1345,12 @@ impl AgentState {
         // Work the panel only heard about is ended by its silence: no other frame is going
         // to say that a turn nobody started has finished.
         self.quiet_down();
+        self.poll_credits();
+        // The figure is asked for once the panel is talking to an agent, and after that it follows
+        // the turns: a first look before the first turn, so the status line is not empty until then.
+        if self.worker.is_some() && self.credits_asked.is_none() {
+            self.ask_for_credits();
+        }
         // A crash is answered between frames, on the frame that notices it is due: the
         // panel does not keep a timer thread for a process it is about to start anyway.
         if self.retry_at.is_some_and(|at| Instant::now() >= at) {
@@ -1353,6 +1370,66 @@ impl AgentState {
                     return;
                 }
             }
+        }
+    }
+
+    /// How often the account is asked at most: once a turn, not once a frame.
+    const CREDITS_EVERY: Duration = Duration::from_secs(10);
+
+    /// What the agent last said is left on its account, for the status line.
+    pub fn credits(&self) -> Option<&str> {
+        self.credits.as_deref()
+    }
+
+    /// Takes what a fetch found. Nothing found is nothing said - the last figure stands, because an
+    /// account that could not be reached is not an account with no money.
+    pub fn credits_arrived(&mut self, credits: Option<String>) {
+        if let Some(credits) = credits {
+            self.credits = Some(credits);
+        }
+    }
+
+    /// Asks the agent for its account, unless one answer is still on its way or the last one is fresh.
+    ///
+    /// Only an agent that can be asked: a stand-in has no account, and a command line that is not an
+    /// ACP one has no usage command either (`AgentSpec::usage_args`).
+    pub fn ask_for_credits(&mut self) {
+        if self.credits_job.is_some() {
+            return;
+        }
+        if self
+            .credits_asked
+            .is_some_and(|asked| asked.elapsed() < Self::CREDITS_EVERY)
+        {
+            return;
+        }
+        let Some(spec) = self
+            .chosen
+            .as_deref()
+            .and_then(|name| self.registry.get(name))
+            .cloned()
+        else {
+            return;
+        };
+        if spec.usage_args().is_none() {
+            return;
+        }
+        self.credits_asked = Some(Instant::now());
+        self.credits_job = Some(crate::credits::ask(spec));
+    }
+
+    /// Takes the answer, if it has come.
+    fn poll_credits(&mut self) {
+        let Some(job) = &self.credits_job else {
+            return;
+        };
+        match job.try_recv() {
+            Ok(found) => {
+                self.credits_arrived(found);
+                self.credits_job = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.credits_job = None,
         }
     }
 
@@ -1573,6 +1650,9 @@ impl AgentState {
                     // A turn that came back is proof the agent works: a crash after it is
                     // not part of a crash loop.
                     self.attempts = 0;
+                    // Andy asked for the figure to follow every request to the agent: a turn that has
+                    // come back is the moment to look at what it left.
+                    self.ask_for_credits();
                     self.status = reason.clone();
                     if let Some(queued) = self.queued.take() {
                         self.input = queued;
