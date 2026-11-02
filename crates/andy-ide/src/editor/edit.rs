@@ -55,16 +55,16 @@ pub fn apply(
 
 /// Where the Home key stops on this line.
 ///
-/// The three stops every editor has: the first letter of the line, the line's own edge, and the start of the
-/// text. Andy: "при нажатии на клавишу Home, если текстовый курсор находится дальше начала текста в строке, он
-/// должен перемещаться на начало текста; если он находится в начале текста или левее — в начало строки; если
-/// находится в начале строки — на начало текста".
+/// Two stops on the line, taking turns — the first letter of the text on that line, and the line's own edge.
+/// Andy: "если курсор дальше начала текста в строке — на начало текста; если он в начале текста или левее — в
+/// начало строки; если в начале строки — на начало текста В ТОЙ-ЖЕ СТРОКЕ". The start of the text there means
+/// the start of the text on that line, not the start of the file: reaching the file is what Ctrl+Home is for.
 fn home_stop(doc: &Document, line: usize, col: usize) -> usize {
     let Some(text) = doc.line(line) else {
         return doc.line_col_to_char(line, 0);
     };
     // The first letter: the first column that is neither a space nor a tab. A line of nothing but spaces has
-    // no first letter of its own, and its only stop is its edge.
+    // no first letter of its own, and then both stops fall on its edge.
     let first = text
         .chars()
         .position(|ch| ch != ' ' && ch != '\t')
@@ -75,7 +75,7 @@ fn home_stop(doc: &Document, line: usize, col: usize) -> usize {
     } else if col > 0 {
         doc.line_col_to_char(line, 0)
     } else {
-        0
+        doc.line_col_to_char(line, first)
     }
 }
 
@@ -183,10 +183,13 @@ mod tests {
         assert_eq!(apply(&d, d.line_col_to_char(0, 4), None, Motion::Home).0, 0);
         // Left of it, inside the indent: to the line's edge as well.
         assert_eq!(apply(&d, d.line_col_to_char(0, 2), None, Motion::Home).0, 0);
-        // At the edge: to the start of the text.
-        assert_eq!(apply(&d, 0, None, Motion::Home).0, 0);
-        // On a later line the line has no indent of its own, so the second step is its edge and the third is
-        // the start of the text.
+        // At the edge: back to the first letter of that same line — Andy: "если курсор стоит в начале строки и
+        // нажимается Home, курсор должен переместиться в начало текста В ТОЙ-ЖЕ СТРОКЕ".
+        assert_eq!(apply(&d, 0, None, Motion::Home).0, d.line_col_to_char(0, 4));
+        // And so the two stops take turns, without ever leaving the line.
+        assert_eq!(apply(&d, d.line_col_to_char(0, 4), None, Motion::Home).0, 0);
+        assert_eq!(apply(&d, 0, None, Motion::Home).0, d.line_col_to_char(0, 4));
+        // A line whose first letter is its edge has nowhere to take turns to, and the caret stays.
         assert_eq!(
             apply(&d, d.line_col_to_char(1, 2), None, Motion::Home).0,
             d.line_col_to_char(1, 0),
@@ -194,8 +197,8 @@ mod tests {
         );
         assert_eq!(
             apply(&d, d.line_col_to_char(1, 0), None, Motion::Home).0,
-            0,
-            "at the edge of a later line the caret did not go to the start of the text"
+            d.line_col_to_char(1, 0),
+            "the caret left a line that has nowhere to turn to"
         );
     }
 
