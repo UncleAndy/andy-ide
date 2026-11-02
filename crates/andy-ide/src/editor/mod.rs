@@ -118,6 +118,8 @@ pub struct EditorBuffer {
     /// long as it is set — Andy's report: "при нажатии правой клавиши мыши и появлении контекстного
     /// меню, подсказка не исчезает".
     pub menu_open: bool,
+    /// What the completion list looks like this frame, when there is one.
+    pub completions: Option<crate::ui::completion::View>,
     /// Byte ranges of every use of the symbol under the caret, in this file.
     /// Emptied by every edit: the offsets stop meaning anything.
     pub occurrences: Vec<(usize, usize)>,
@@ -163,6 +165,7 @@ impl EditorBuffer {
 
             hover: None,
             menu_open: false,
+            completions: None,
             occurrences: Vec::new(),
             reveal_caret: false,
             needle: None,
@@ -609,6 +612,25 @@ impl EditorBuffer {
         self.set_caret_byte(start);
         self.set_drag_caret(self.text[..end].chars().count());
         self.request_reveal();
+        true
+    }
+
+    /// Writes a word over the one being written under the caret, and leaves the caret after it.
+    ///
+    /// What the completion list needs: the person typed `alp`, the server offered `alpha`, and the
+    /// word has to be replaced rather than appended to. Answers `false` when the caret is not in a
+    /// word at all — a word taken after the word it was about has gone.
+    pub fn complete_with(&mut self, word: &str) -> bool {
+        let Some((start, existing)) =
+            crate::ui::completion::word_under_caret(&self.text, self.caret_byte())
+        else {
+            return false;
+        };
+        let from = self.byte_to_char(start);
+        self.doc
+            .replace_range(from..from + existing.chars().count(), word);
+        self.cursor = Cursor::caret(from + word.chars().count());
+        self.refresh();
         true
     }
 

@@ -178,6 +178,17 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             response.request_focus();
         }
 
+        // A word taken from the completion list is written here, where every other edit of this file
+        // happens: the buffer's own bookkeeping, the undo step and the word sent to the server come
+        // with it, and the caret is left after the word.
+        let taken = buffer
+            .completions
+            .as_mut()
+            .and_then(|view| view.taken.take());
+        if let Some(word) = taken {
+            changed |= buffer.complete_with(&word);
+        }
+
         // A right-click in the editor asks what to do with the text: take what is selected, or put
         // the clipboard at the caret. The window owns the clipboard, so a paste is asked for and
         // arrives as a paste event, exactly as the keys do it.
@@ -440,6 +451,14 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             .request_repaint_after(std::time::Duration::from_secs_f64(interval));
 
         let caret_pos = paint_caret(paint_ctx(), buffer, caret_galley.as_ref(), lit);
+
+        // The list of words the server offered stands beside the caret, over everything: it is not
+        // part of the text, and it may hang past the edge of the file.
+        if let Some(view) = buffer.completions.as_ref()
+            && !view.lines.is_empty()
+        {
+            draw_completions(ui.ctx(), caret_pos, row_h, view);
+        }
 
         // The view followed the caret in the same frame, so the caret is where
         // it was asked to be, and the scroll target is in screen coordinates:
@@ -878,6 +897,50 @@ fn paint_galleys(
 /// The position is needed even when the caret is dark: the view follows the
 /// caret and a jump scrolls to it, and both have to work in the dark half of the
 /// blink.
+/// Draws the completion list beside the caret.
+///
+/// Kept inside the window: a list under the last line of a file would otherwise hang off the bottom
+/// of the screen, and one at the right edge would run off the side. The chosen word is painted like
+/// a selection, because that is what it is — the word Enter would take.
+fn draw_completions(ctx: &egui::Context, at: Pos2, row_h: f32, view: &crate::ui::completion::View) {
+    const WIDTH: f32 = 340.0;
+    let height = row_h * view.lines.len() as f32 + 8.0;
+    // `screen_rect` left egui in 0.36; the window is the viewport now.
+    let screen = ctx.viewport_rect();
+    let mut pos = at + egui::vec2(0.0, row_h);
+    if pos.y + height > screen.bottom() {
+        // Above the line instead of below it: the room under the caret is gone.
+        pos.y = (at.y - height).max(screen.top());
+    }
+    if pos.x + WIDTH > screen.right() {
+        pos.x = (screen.right() - WIDTH - 4.0).max(screen.left());
+    }
+    egui::Area::new(egui::Id::new("completion_list"))
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(WIDTH);
+                ui.set_max_width(WIDTH);
+                for (index, (word, beside)) in view.lines.iter().enumerate() {
+                    let chosen = index == view.chosen;
+                    let text = if beside.is_empty() {
+                        word.clone()
+                    } else {
+                        format!("{word}   {beside}")
+                    };
+                    let label = egui::RichText::new(text);
+                    let label = if chosen {
+                        label.background_color(ui.visuals().selection.bg_fill)
+                    } else {
+                        label
+                    };
+                    ui.label(label);
+                }
+            });
+        });
+}
+
 fn paint_caret(
     ctx: PaintCtx<'_>,
     buffer: &EditorBuffer,

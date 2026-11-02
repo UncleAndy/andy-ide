@@ -312,7 +312,13 @@ impl App {
         self.state.git.follow(root);
         let config = self.state.config_dir.clone();
         self.state.agent.follow(root, &config);
-        self.handle_keys(ui);
+        // The keys the completion list takes while it is open — the arrows, Enter and Escape — are
+        // read before the window's own table: while a list is up, Enter takes a word rather than
+        // starting a new line.
+        if !crate::ui::completion::handle_keys(ui, &mut self.state.completion) {
+            self.handle_keys(ui);
+        }
+        self.state.publish_completions();
         self.state.poll_fs_events();
         self.state.poll_lsp();
         // Only documents with unsaved edits need telling, and not on every
@@ -361,6 +367,9 @@ impl App {
         if let Some(wait) = self.state.track_hover(ui.ctx().pointer_hover_pos(), now) {
             ui.ctx().request_repaint_after(wait);
         }
+        if let Some(wait) = self.state.track_completion(now) {
+            ui.ctx().request_repaint_after(wait);
+        }
         if let Some(wait) = self.state.track_highlights(now) {
             ui.ctx().request_repaint_after(wait);
         }
@@ -390,6 +399,13 @@ impl App {
             if before != u64::MAX && packed == u64::MAX {
                 PROBE_GAPS.fetch_add(1, Ordering::Relaxed);
             }
+        }
+
+        // The list of words has no such line of its own: it is read here, on its own switch, so a
+        // person checking completion in the window can see what the list thinks it is doing.
+        if std::env::var_os("ANDY_IDE_COMPLETION_PROBE").is_some() && self.frames.is_multiple_of(60)
+        {
+            eprintln!("completion probe: {}", self.state.completion.probe_line());
         }
 
         if probing && self.frames.is_multiple_of(if over_text { 12 } else { 60 }) {

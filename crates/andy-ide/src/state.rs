@@ -122,6 +122,8 @@ pub struct AppState {
     /// read from the window itself: whether it stands in full screen is the window's to know, and the
     /// state that holds the text and the panels has no business guessing it.
     pub fullscreen_asked: bool,
+    /// The list of words the server offers for the word under the caret.
+    pub completion: crate::ui::completion::Completion,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
     /// The panels the person has put away, in the order they were put away. What is not here is
@@ -221,6 +223,7 @@ impl AppState {
             config,
             fonts_set: false,
             fullscreen_asked: false,
+            completion: crate::ui::completion::Completion::new(),
             recent,
             project: None,
             tabs: Tabs::new(),
@@ -513,6 +516,12 @@ impl AppState {
             self.hover.forget();
             return None;
         }
+        // While the completion list is open the hint stays away: the list stands where the hint would be
+        // drawn, and two things floating over the same line are one too many.
+        if self.completion.is_open() {
+            self.hover.forget();
+            return None;
+        }
         // The editor's own menu is over the text: the pointer is on the menu, not on the symbol, so the hint
         // on screen is a lie and no new one may appear while the menu is there. Forgetting and stopping here
         // is what Andy asked for — the hint goes with the right-click and shows nothing until the menu is gone.
@@ -566,6 +575,83 @@ impl AppState {
         });
         self.hover.asked(spot);
         None
+    }
+
+    /// Asks the server what could stand where the caret is, once the word under it has rested.
+    ///
+    /// The same rest clock the hint at the pointer uses, for the same reason: a request per letter
+    /// would queue in front of the next one, and the list would arrive about words long gone. A word
+    /// the person closed with Escape is left alone until it changes, and nothing is asked while no
+    /// server is running — but a server is not started for a list alone.
+    pub fn track_completion(&mut self, now: f64) -> Option<std::time::Duration> {
+        let Some(buffer) = self.active_buffer() else {
+            self.completion.forget();
+            return None;
+        };
+        let (line, character) = buffer.line_col();
+        let place = crate::ui::completion::Place {
+            path: buffer.path.clone(),
+            line: line as u32,
+            character: character as u32,
+        };
+        let text = buffer.text().to_owned();
+        let caret = buffer.caret_byte();
+        self.completion.look_at(&text, caret, place, now);
+        let Some(place) = self.completion.due(now) else {
+            return self.completion.wait(now);
+        };
+        if !self.start_server_for(&place.path) {
+            // Nothing to ask yet: the server is still coming up. The word is marked as asked so the
+            // question is not repeated every frame — and `forget_marks` takes that back when the
+            // server appears, as it does for the hint.
+            self.completion.asked(place);
+            return None;
+        }
+        let Some(lsp) = &self.lsp else {
+            return None;
+        };
+        lsp.send(crate::lsp::Job::Completion {
+            path: place.path.clone(),
+            position: lsp_types::Position::new(place.line, place.character),
+        });
+        self.completion.asked(place);
+        None
+    }
+
+    /// Hands the list to the editor for this frame: the lines to draw, and the word taken with Enter
+    /// — if there is one — for the editor to write over the word under the caret.
+    ///
+    /// Published rather than drawn from here because the text is the editor's: a word written there
+    /// goes through the same path as typing, and the server hears about the change like any other.
+    pub fn publish_completions(&mut self) {
+        let taken = if self.completion.accepted() {
+            self.completion.accepted_handled();
+            self.completion.take()
+        } else {
+            None
+        };
+        let lines: Vec<(String, String)> = self
+            .completion
+            .offers()
+            .iter()
+            .map(|offer| {
+                let beside = if offer.detail.is_empty() {
+                    offer.kind.clone()
+                } else {
+                    offer.detail.clone()
+                };
+                (offer.label.clone(), beside)
+            })
+            .collect();
+        let chosen = self.completion.selected();
+        let view = crate::ui::completion::View {
+            taken,
+            lines,
+            chosen,
+        };
+        if let Some(buffer) = self.active_buffer_mut() {
+            buffer.completions = Some(view);
+        }
     }
 
     /// Asks the server where the symbol under the caret is used in this file.
@@ -1810,6 +1896,19 @@ impl AppState {
                 character,
                 text,
             } => self.hover.answer(&path, line, character, text),
+            crate::lsp::Outcome::Completions {
+                path,
+                line,
+                character,
+                items,
+            } => self.completion.answer(
+                crate::ui::completion::Place {
+                    path,
+                    line,
+                    character,
+                },
+                items,
+            ),
             crate::lsp::Outcome::Highlights {
                 path,
                 line,

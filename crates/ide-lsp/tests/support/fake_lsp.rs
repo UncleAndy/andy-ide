@@ -233,6 +233,25 @@ fn main() {
                     }),
                 );
             }
+            "textDocument/completion" => {
+                // Two words, one of them with a detail, under the `CompletionList` shape. A client
+                // that asked for another method gets that method's answer, which carries no items at
+                // all — so the test cannot pass by accident.
+                write_message(
+                    &mut out,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "isIncomplete": false,
+                            "items": [
+                                {"label": "alpha", "kind": 3, "detail": "fn() -> u8"},
+                                {"label": "beta", "kind": 6, "detail": "u8"}
+                            ]
+                        }
+                    }),
+                );
+            }
             "textDocument/documentHighlight" => {
                 // With `--ask` on the command line, this server behaves like one that needs a
                 // setting before it can answer: it asks the client and *waits*. A client

@@ -282,6 +282,31 @@ fn implementations_come_back_as_a_list_of_places() {
 }
 
 #[test]
+fn completion_comes_back_as_a_list_of_words() {
+    let dir = project();
+    let mut session = LspSession::start(&FAKE, dir.path()).unwrap();
+    let items = session
+        .completion(
+            std::path::Path::new("lib.rs"),
+            Position {
+                line: 0,
+                character: 0,
+            },
+        )
+        .expect("completions are answered");
+    // The fixture answers with two words inside a `CompletionList`; a client that asked for another
+    // method gets that method's answer, which holds no items.
+    assert_eq!(items.len(), 2, "two words, got {items:?}");
+    assert_eq!(items[0].label, "alpha");
+    assert_eq!(items[1].label, "beta");
+    assert_eq!(
+        items[1].detail.as_deref(),
+        Some("u8"),
+        "the detail the server sent did not survive"
+    );
+}
+
+#[test]
 fn incoming_calls_come_back_as_the_places_that_call_it() {
     let dir = project();
     let mut session = LspSession::start(&FAKE, dir.path()).unwrap();

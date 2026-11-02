@@ -479,6 +479,21 @@ impl LspSession {
         Ok(definition_locations(result))
     }
 
+    /// The words that could stand where the cursor is.
+    ///
+    /// The protocol answers with a list of items, with a `CompletionList` that holds one, or with
+    /// `null` when the server has nothing to offer; all three are read here. `isIncomplete` is not
+    /// carried out of this function: a server that marks the list incomplete is asking to be asked
+    /// again as the word grows, and the window asks again on every pause anyway.
+    pub fn completion(
+        &mut self,
+        path: &Path,
+        position: Position,
+    ) -> Result<Vec<lsp_types::CompletionItem>> {
+        let result = self.positioned_request("textDocument/completion", path, position)?;
+        Ok(completion_items(result))
+    }
+
     /// The places that call the function whose name is under the cursor.
     ///
     /// Two requests, not one: the protocol first asks for the hierarchy item of the symbol and then
@@ -648,6 +663,17 @@ impl LspSession {
     }
 }
 
+/// `textDocument/completion` may answer with a bare list of items, or with a list inside a
+/// `CompletionList` beside `isIncomplete`. Both are read; anything else answers nothing rather than
+/// erroring — an empty list is what a server with no suggestions means.
+fn completion_items(result: Value) -> Vec<lsp_types::CompletionItem> {
+    if result.is_null() {
+        return Vec::new();
+    }
+    let items = result.get("items").cloned().unwrap_or(result);
+    serde_json::from_value(items).unwrap_or_default()
+}
+
 /// `textDocument/definition` may answer with one location, a list, or links.
 fn definition_locations(result: Value) -> Vec<Location> {
     if let Ok(response) = serde_json::from_value::<GotoDefinitionResponse>(result.clone()) {
@@ -718,5 +744,22 @@ mod tests {
         assert_eq!(range.start.character, 2);
         let uri: Uri = "file:///x.rs".parse().unwrap();
         assert_eq!(uri.as_str(), "file:///x.rs");
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn both_shapes_of_a_completion_answer_are_read() {
+        let inside = json!({"isIncomplete": false, "items": [{"label": "one"}]});
+        let bare = json!([{"label": "one"}, {"label": "two"}]);
+        assert_eq!(completion_items(inside).len(), 1);
+        assert_eq!(completion_items(bare).len(), 2);
+        // `null` is a server with nothing to offer, not a broken answer.
+        assert!(completion_items(Value::Null).is_empty());
+        // And an answer of another shape is empty rather than a crash.
+        assert!(completion_items(json!({"unexpected": true})).is_empty());
     }
 }

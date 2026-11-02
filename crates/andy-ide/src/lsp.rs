@@ -60,6 +60,11 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// What could stand where the caret is.
+    Completion {
+        path: PathBuf,
+        position: Position,
+    },
     /// What the symbol at one position is: signature and documentation.
     Hover {
         path: PathBuf,
@@ -114,6 +119,13 @@ pub enum Outcome {
     IncomingCalls {
         from: PathBuf,
         locations: Vec<Location>,
+    },
+    /// The words the server offers for the place the caret stands in.
+    Completions {
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        items: Vec<lsp_types::CompletionItem>,
     },
     /// What the server says about the symbol at a position. `text: None` means it
     /// said nothing, which is the usual answer over whitespace.
@@ -611,6 +623,15 @@ fn apply(
                 Err(error) => Outcome::Failed(format!("{error:#}")),
             })
         }
+        Job::Completion { path, position } => Some(match session.completion(&path, position) {
+            Ok(items) => Outcome::Completions {
+                path,
+                line: position.line,
+                character: position.character,
+                items,
+            },
+            Err(error) => Outcome::Failed(format!("{error:#}")),
+        }),
         Job::Symbols { path } => {
             let mut found = session.document_symbols(&path);
             // Same cold start as a definition: an empty outline before the

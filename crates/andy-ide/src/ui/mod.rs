@@ -1,6 +1,7 @@
 //! Panels and the dock contents.
 
 pub mod agent;
+pub mod completion;
 pub mod diff;
 pub mod editor;
 pub mod git;
