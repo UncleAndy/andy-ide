@@ -506,6 +506,13 @@ impl AppState {
             self.hover.forget();
             return None;
         }
+        // The editor's own menu is over the text: the pointer is on the menu, not on the symbol, so the hint
+        // on screen is a lie and no new one may appear while the menu is there. Forgetting and stopping here
+        // is what Andy asked for — the hint goes with the right-click and shows nothing until the menu is gone.
+        if self.active_buffer().is_some_and(|buffer| buffer.menu_open) {
+            self.hover.forget();
+            return None;
+        }
         // What takes the hint away is a window *over* the editor: the pointer is on that window, and the text
         // underneath it is not what it is on. A panel *beside* the editor — the file preview — is not such a
         // window: hovering the code with the preview open left no hints at all, because `forget()` ran every

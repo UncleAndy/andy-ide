@@ -2321,6 +2321,78 @@ mod the_hint {
     }
 
     #[test]
+    fn the_hint_goes_when_the_editors_own_menu_opens_and_comes_back_when_it_closes() {
+        // Andy's report (02.11): the hint stayed on screen after a right-click brought up the editor's
+        // menu. The menu floats over the text, so the pointer is on the menu and not on the symbol: the
+        // hint goes with the right-click, nothing new appears while the menu is there, and closing the
+        // menu gives the hints back.
+        let mut gui = window();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+        assert!(
+            hint_on_screen(&gui, "The first letter."),
+            "the hint did not show before the menu opened"
+        );
+
+        // The right-click lands on the text but not on the hint itself: the hint is a window and would
+        // take the click, and the question here is what the *editor's* menu does to it.
+        let hint = gui
+            .app()
+            .state
+            .hover
+            .shown_rect()
+            .expect("the hint has no place on screen");
+        let mut at = egui::pos2(315.0, 125.0);
+        if hint.expand(6.0).contains(at) {
+            at.y = hint.min.y - 14.0;
+        }
+        for pressed in [true, false] {
+            gui.harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            gui.harness.step();
+        }
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label("Copy text").is_some(),
+            "the right-click did not open the editor's menu"
+        );
+        assert!(
+            !hint_on_screen(&gui, "The first letter."),
+            "the hint stayed on screen under the menu"
+        );
+        assert!(
+            gui.app().state.hover.text().is_none(),
+            "the menu left an answer behind"
+        );
+
+        // Nothing new comes while it is there: a pointer resting again must not bring it back.
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+        assert!(
+            !hint_on_screen(&gui, "The first letter."),
+            "a hint appeared while the editor's menu was on screen"
+        );
+
+        // And closing the menu gives the hint back, so the flag is a frame's, not a latch.
+        gui.harness.get_by_label("Copy text").click();
+        gui.settle();
+        rest_on_text(&mut gui);
+        run_for(&mut gui, HOVER_DELAY + 0.1);
+        answer(&mut gui, "```text\nalpha\n```\n---\n\nThe first letter.");
+        assert!(
+            hint_on_screen(&gui, "The first letter."),
+            "the hint did not come back after the menu closed"
+        );
+    }
+
+    #[test]
     fn nothing_is_shown_before_the_pointer_rests() {
         let mut gui = window();
         rest_on_text(&mut gui);

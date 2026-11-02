@@ -189,7 +189,11 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         // menu arrived. The editor asks for the keyboard back the moment it is gone.
         let had_the_keyboard = response.has_focus();
         let mut asked: Option<Ask> = None;
+        // Whether the menu is on screen this frame: the closure below is run only while it is, and
+        // the flag is published on the buffer for the hint to read (see `EditorBuffer::menu_open`).
+        let mut menu_open = false;
         response.context_menu(|ui| {
+            menu_open = true;
             if ui.button("Copy text").clicked() {
                 copy = true;
                 ui.close();
@@ -232,6 +236,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
                 item(ui, ask, &mut asked);
             }
         });
+        buffer.menu_open = menu_open;
         if let Some(ask) = asked {
             buffer.request_ask(ask);
         }

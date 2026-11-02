@@ -111,6 +111,13 @@ pub struct EditorBuffer {
     /// Where the pointer rests in the text, in line and column, with the screen
     /// position of the hint. Set by the view every frame it draws.
     pub hover: Option<(usize, usize, egui::Pos2)>,
+    /// Whether the editor's own context menu is on screen this frame.
+    ///
+    /// The menu floats over the text, so the pointer is on the menu and not on the symbol the hint
+    /// would be about. The editor sets it while it draws the menu, and the hint is kept away for as
+    /// long as it is set — Andy's report: "при нажатии правой клавиши мыши и появлении контекстного
+    /// меню, подсказка не исчезает".
+    pub menu_open: bool,
     /// Byte ranges of every use of the symbol under the caret, in this file.
     /// Emptied by every edit: the offsets stop meaning anything.
     pub occurrences: Vec<(usize, usize)>,
@@ -155,6 +162,7 @@ impl EditorBuffer {
             menu_request: None,
 
             hover: None,
+            menu_open: false,
             occurrences: Vec::new(),
             reveal_caret: false,
             needle: None,
