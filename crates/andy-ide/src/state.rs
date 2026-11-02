@@ -170,6 +170,13 @@ pub struct AppState {
     /// The caret whose uses were last asked for, and when it got there.
     highlight_key: Option<(PathBuf, usize)>,
     highlight_asked: Option<(PathBuf, usize)>,
+    /// The length of the text and the word under the caret when the highlights were last asked for.
+    ///
+    /// The line and the column are not enough to recognise an answer about the place now: Andy's report
+    /// — "набираю `pro`, выбираю `project`, удаляю, набираю `pro` снова, и `pro` с параметром `project`
+    /// помечаются как одинаковые" — was a text that changed between question and answer, so the old
+    /// columns pointed into the new text and one symbol's places were painted over another's.
+    highlight_asked_word: Option<(usize, String)>,
     highlight_since: f64,
     /// A question about this caret came back without an answer, and when it was noticed. The
     /// question is put again, but only after a pause: a retry that follows the failure as fast
@@ -253,6 +260,7 @@ impl AppState {
             lsp_status: String::new(),
             highlight_key: None,
             highlight_asked: None,
+            highlight_asked_word: None,
             highlight_since: 0.0,
             highlight_failed: false,
             highlight_failed_at: None,
@@ -714,8 +722,19 @@ impl AppState {
         let buffer = self.active_buffer()?;
         let position = ide_lsp::byte_to_position(buffer.text(), caret);
         let lsp = self.lsp.as_ref()?;
+        // What the question is about, kept with the length of the text it was asked in: an answer coming
+        // back after the text has grown or shrunk is about another text, whatever its line and column say.
+        // The pair is built first so the buffer is no longer borrowed when the field is written.
+        let asked = (
+            buffer.text().len(),
+            crate::rename::word_at(buffer.text(), caret)
+                .map(|(start, end)| buffer.text()[start..end].to_owned())
+                .unwrap_or_default(),
+        );
         lsp.send(crate::lsp::Job::Highlights { path, position });
         self.highlight_asked = self.highlight_key.clone();
+        // Written after the send: `lsp` is borrowed from `self`, and a field cannot be written while it is.
+        self.highlight_asked_word = Some(asked);
         None
     }
 
@@ -727,16 +746,32 @@ impl AppState {
         character: u32,
         spots: &[(u32, u32, u32, u32)],
     ) {
+        // Taken before the buffer is borrowed: the memo lives on the state, and the buffer is a mutable
+        // borrow of that same state.
+        let asked = self.highlight_asked_word.clone();
         let Some(buffer) = self.active_buffer_mut() else {
             return;
         };
         if buffer.path != path {
             return;
         }
-        // The caret may have moved while the server was thinking: the places of
-        // the old symbol are not the places of the new one.
+        // The caret may have moved while the server was thinking: the places of the old symbol are not
+        // the places of the new one. The line and the column alone are not enough — Andy's report was
+        // "набираю `pro`, выбираю `project`, удаляю, набираю `pro` снова, и `pro` с параметром `project`
+        // помечаются как одинаковые": the text changed between the question and the answer, the old
+        // columns then point into the new text, and the places of one symbol are painted over another.
         let (caret_line, caret_col) = buffer.line_col();
         if caret_line != line as usize || caret_col != character as usize {
+            return;
+        }
+        let Some((asked_length, asked_word)) = asked else {
+            return;
+        };
+        let text_now = buffer.text().to_owned();
+        let word_now = crate::rename::word_at(&text_now, buffer.caret_byte())
+            .map(|(start, end)| text_now[start..end].to_owned())
+            .unwrap_or_default();
+        if text_now.len() != asked_length || word_now != asked_word {
             return;
         }
         let text = buffer.text().to_owned();
@@ -2499,7 +2534,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn state_with_project() -> (tempfile::TempDir, AppState) {
+    pub(crate) fn state_with_project() -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -2870,6 +2905,63 @@ pub fn tab_labels(paths: &[PathBuf], root: Option<&Path>) -> Vec<String> {
         }
     }
     labels
+}
+
+#[cfg(test)]
+mod highlight_staleness_tests {
+
+    #[test]
+    fn an_answer_about_another_text_is_thrown_away() {
+        // Andy's report: `pro` typed, `project` taken from the list, both deleted, `pro` typed again —
+        // and `pro` was marked as if it were the parameter `project`. The text had changed between the
+        // question and the answer, so the old columns pointed into other words.
+        let (_dir, mut state) = super::tests::state_with_project();
+        let path = state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .join("src/main.rs");
+        state.open_file(&path);
+        let (line, character) = {
+            let buffer = state.active_buffer_mut().expect("the file is open");
+            buffer.set_caret(7);
+            let (line, character) = buffer.line_col();
+            (line as u32, character as u32)
+        };
+
+        // The answer is about a text five characters longer than the one on screen now.
+        let length_now = state.active_buffer().expect("the file").text().len();
+        state.highlight_asked_word = Some((length_now + 5, "main".to_owned()));
+        state.apply_highlights(&path, line, character, &[(0, 0, 0, 4)]);
+        assert!(
+            state
+                .active_buffer()
+                .expect("the file")
+                .occurrences
+                .is_empty(),
+            "the places of another text were painted over this one"
+        );
+
+        // And an answer about this very text is taken, places and all.
+        let word = {
+            let buffer = state.active_buffer().expect("the file");
+            let text = buffer.text().to_owned();
+            crate::rename::word_at(&text, buffer.caret_byte())
+                .map(|(start, end)| text[start..end].to_owned())
+                .unwrap_or_default()
+        };
+        state.highlight_asked_word = Some((length_now, word));
+        state.apply_highlights(&path, line, character, &[(0, 0, 0, 4)]);
+        assert!(
+            !state
+                .active_buffer()
+                .expect("the file")
+                .occurrences
+                .is_empty(),
+            "an answer about this very text was thrown away"
+        );
+    }
 }
 
 #[cfg(test)]
