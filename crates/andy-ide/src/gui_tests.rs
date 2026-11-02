@@ -144,7 +144,7 @@ fn the_status_bar_says_what_is_being_waited_for_and_stops_when_the_server_answer
     let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
     let said = |gui: &mut Gui| {
         gui.harness
-            .query_all_by_label_contains("rust-analyzer starting")
+            .query_all_by_label_contains("rust-analyzer processing")
             .count()
     };
 
@@ -156,7 +156,7 @@ fn the_status_bar_says_what_is_being_waited_for_and_stops_when_the_server_answer
         "the panel claims a wait with none to wait for"
     );
 
-    gui.app_mut().state.lsp_status = "rust-analyzer starting".to_string();
+    gui.app_mut().state.lsp_status = "rust-analyzer processing".to_string();
     gui.settle();
     assert!(
         said(&mut gui) >= 1,

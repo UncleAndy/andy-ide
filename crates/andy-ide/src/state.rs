@@ -97,6 +97,12 @@ pub struct BlameView {
     pub lines: Vec<ide_git::BlameLine>,
 }
 
+/// What a line says while the thing it names is still coming up.
+///
+/// One word for two places: the status bar draws moving dots after such a line, and `warming` decides by it
+/// whether a language server is still on its way. Kept here, where the line is written, so the two cannot drift.
+pub const PROCESSING: &str = " processing";
+
 pub struct AppState {
     /// Whether the window's fonts have been handed to egui yet.
     ///
@@ -1165,13 +1171,12 @@ impl AppState {
         self.index_job = Some(receiver);
     }
 
-    /// Takes the freshly built index when the background walk has finished.
     /// What the panel is waiting for while a language server warms, or `None` once it has answered its first
-    /// question. The status bar shows this and stops showing it exactly then: a line that went on saying
-    /// "starting" while the hints already answered is a line that lies.
+    /// question. The status bar shows this and stops showing it exactly then: a line that went on saying a
+    /// server was on its way, while the hints already answered, is a line that lies.
     pub fn warming(&self) -> Option<&str> {
         self.lsp_status
-            .ends_with(" starting")
+            .ends_with(PROCESSING)
             .then_some(self.lsp_status.as_str())
     }
 
@@ -1183,8 +1188,8 @@ impl AppState {
             Ok(Ok((count, index))) => {
                 // While a server warms the line belongs to it: the count of indexed files is a smaller
                 // thing to say than the reason the hints are not there yet. (The check used to ask whether
-                // `lsp_status` began with "starting", which it never does — it is "<server> starting" — so
-                // the count overwrote the warm-up every time.)
+                // `lsp_status` began with the warm-up word, which it never does — the word comes after the
+                // server's name — so the count overwrote the warm-up every time.)
                 if self.warming().is_none() {
                     self.status = format!("{count} files indexed");
                 }
@@ -1494,7 +1499,11 @@ impl AppState {
             self.lsp_status = format!("{} is not installed", server.name);
             return;
         }
-        self.lsp_status = format!("{} starting", server.name);
+        // "starting" reads like a thing that has already happened, and a person glancing at the bar cannot
+        // tell it from a finished state. "processing" says the process is under way, and the status bar gives
+        // it moving dots on top of that. Andy: "во время загрузки анализатора… лучше выдать что-то вроде
+        // «analyzer processed...», чтобы было видно, что это длящийся процесс".
+        self.lsp_status = format!("{}{PROCESSING}", server.name);
         self.lsp = Some(crate::lsp::LanguageService::start(server, &root));
     }
 
