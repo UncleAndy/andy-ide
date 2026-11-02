@@ -116,6 +116,12 @@ pub struct AppState {
     pub status: String,
     /// Requests collected while drawing, applied afterwards.
     pub pending: Vec<Action>,
+    /// Set when the window has been asked for full screen.
+    ///
+    /// The frame turns one ask into one viewport command and clears it. Which way the toggle goes is
+    /// read from the window itself: whether it stands in full screen is the window's to know, and the
+    /// state that holds the text and the panels has no business guessing it.
+    pub fullscreen_asked: bool,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
     /// The panels the person has put away, in the order they were put away. What is not here is
@@ -214,6 +220,7 @@ impl AppState {
             },
             config,
             fonts_set: false,
+            fullscreen_asked: false,
             recent,
             project: None,
             tabs: Tabs::new(),

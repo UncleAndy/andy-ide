@@ -405,6 +405,17 @@ impl App {
 
         self.frames += 1;
         self.state.poll_index();
+        // One ask, one command. The direction comes from the window, which is the only place that
+        // knows whether it already stands in full screen; the ask is read and cleared together, so a
+        // key pressed once sends one command and not one per frame.
+        if std::mem::take(&mut self.state.fullscreen_asked) {
+            let in_full_screen = ui
+                .ctx()
+                .input(|input| input.viewport().fullscreen)
+                .unwrap_or(false);
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!in_full_screen));
+        }
         let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
         if self.state.quit_requested {
             // The user answered the question already: let the window go.
@@ -516,6 +527,7 @@ pub(crate) enum Command {
     Agent,
     NextTab,
     PreviousTab,
+    Fullscreen,
 }
 
 impl Command {
@@ -538,6 +550,11 @@ impl Command {
             }
             Command::TogglePreview => {
                 state.preview_open = !state.preview_open;
+            }
+            Command::Fullscreen => {
+                // Which way the toggle goes is the window's to know: the frame reads it and sends
+                // `ViewportCommand::Fullscreen`.
+                state.fullscreen_asked = true;
             }
             Command::QuickOpen => {
                 state.quick_open.open();
@@ -622,6 +639,7 @@ impl Command {
             Command::Agent => "the agent panel",
             Command::NextTab => "the next tab",
             Command::PreviousTab => "the tab before",
+            Command::Fullscreen => "full screen",
         }
     }
 }
@@ -749,6 +767,12 @@ pub(crate) const KEYS: &[(KeyboardShortcut, Command)] = &[
     (
         KeyboardShortcut::new(Modifiers::NONE, Key::F12),
         Command::Definition,
+    ),
+    // The window itself, both ways: F11 is the one key here that is about the window rather than
+    // about what is in it, and the frame decides the direction from the window.
+    (
+        KeyboardShortcut::new(Modifiers::NONE, Key::F11),
+        Command::Fullscreen,
     ),
     (
         KeyboardShortcut::new(Modifiers::CTRL, Key::W),
@@ -880,6 +904,12 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 None => {}
             }
             ui.separator();
+            // The window, not what is in it. The key is named beside it, the way the panels above
+            // name theirs.
+            if ui.button("full screen\tF11").clicked() {
+                state.fullscreen_asked = true;
+                ui.close();
+            }
             let mut dark = state.config.theme == ide_core::Theme::Dark;
             if ui.checkbox(&mut dark, "dark theme").changed() {
                 state.config.theme = if dark {
@@ -2528,6 +2558,17 @@ mod clipboard_keys_tests {
             })
         }
 
+        /// Whether the frame asked the window for full screen, and which way.
+        fn asked_for_full_screen(&self, want: bool, output: &egui::FullOutput) -> bool {
+            output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| viewport.commands.iter())
+                .any(|command| {
+                    matches!(command, egui::ViewportCommand::Fullscreen(asked) if *asked == want)
+                })
+        }
+
         fn asked_for_a_paste(&self, output: &egui::FullOutput) -> bool {
             output
                 .viewport_output
@@ -2535,6 +2576,18 @@ mod clipboard_keys_tests {
                 .flat_map(|viewport| viewport.commands.iter())
                 .any(|command| matches!(command, egui::ViewportCommand::RequestPaste))
         }
+    }
+
+    #[test]
+    fn f11_asks_the_window_for_full_screen() {
+        // The window's own key, and the only one about the window rather than about what is in it.
+        // The check sits in this module because this is the harness that reads the window's commands.
+        let mut harness = Harness::with_text("a.rs", "fn a() {}\n");
+        let output = harness.key_with(egui::Key::F11, egui::Modifiers::NONE);
+        assert!(
+            harness.asked_for_full_screen(true, &output),
+            "F11 did not ask the window for full screen"
+        );
     }
 
     #[test]
