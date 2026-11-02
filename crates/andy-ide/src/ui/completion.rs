@@ -131,6 +131,12 @@ pub struct View {
     pub lines: Vec<(String, String)>,
     /// Which of them is chosen.
     pub chosen: usize,
+    /// The key the editor met while the list was open, to be answered where the list lives.
+    ///
+    /// The editor reads a *clone* of the frame's events (`input.events.clone()`), so taking a key in
+    /// the input does not keep it out of the editor's hands; the list therefore says which key it
+    /// wants and answers it at the end of the frame, where the words are.
+    pub taken_key: Option<egui::Key>,
 }
 
 /// The list, and what it is about.
@@ -337,39 +343,36 @@ impl Completion {
     }
 }
 
-/// The keys the list takes while it is open, read before the editor sees them: while a list is up,
-/// the arrows walk it, Enter takes a word and Escape puts it away. Answers whether it took the keys.
-pub fn handle_keys(ui: &egui::Ui, list: &mut Completion) -> bool {
+/// The keys the list answers to, and only those: the arrows to walk it, Enter to take a word, Escape
+/// to put it away. Left and right are the list's too — a caret that walks out of the word has nothing
+/// left to complete — and the response there is to close rather than to move.
+pub fn list_key(key: Key, modifiers: egui::Modifiers) -> Option<Key> {
+    if modifiers != egui::Modifiers::NONE {
+        return None;
+    }
+    matches!(
+        key,
+        Key::ArrowUp | Key::ArrowDown | Key::Enter | Key::Escape | Key::ArrowLeft | Key::ArrowRight
+    )
+    .then_some(key)
+}
+
+/// Answers one key the editor met while the list was open. True when the list used it.
+pub fn handle_key(list: &mut Completion, key: Key) -> bool {
     if !list.is_open() {
         return false;
     }
-    let mut took = false;
-    ui.ctx().input_mut(|input| {
-        if input.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
-            list.move_selection(1);
-            took = true;
-        }
-        if input.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
-            list.move_selection(-1);
-            took = true;
-        }
-        if input.consume_key(egui::Modifiers::NONE, Key::Enter) {
-            list.accepted = true;
-            took = true;
-        }
-        if input.consume_key(egui::Modifiers::NONE, Key::Escape) {
-            list.close();
-            took = true;
-        }
-        // The caret leaving the word leaves the list behind: what is offered no longer fits the
-        // letters the person is about to stand among.
-        if input.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
-            || input.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
-        {
-            list.close();
-        }
-    });
-    took
+    match key {
+        Key::ArrowDown => list.move_selection(1),
+        Key::ArrowUp => list.move_selection(-1),
+        Key::Enter => list.accepted = true,
+        Key::Escape => list.close(),
+        // The caret leaving the word leaves the list behind: what is offered no longer fits the letters
+        // the person is about to stand among.
+        Key::ArrowLeft | Key::ArrowRight => list.close(),
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]
@@ -382,6 +385,54 @@ mod tests {
             line: 3,
             character: 8,
         }
+    }
+
+    #[test]
+    fn the_keys_the_list_answers_to_are_its_own() {
+        assert_eq!(
+            list_key(Key::ArrowDown, egui::Modifiers::NONE),
+            Some(Key::ArrowDown)
+        );
+        assert_eq!(
+            list_key(Key::Enter, egui::Modifiers::SHIFT),
+            None,
+            "Shift+Enter is the editor's: a new line, not a word"
+        );
+        assert_eq!(
+            list_key(Key::A, egui::Modifiers::NONE),
+            None,
+            "letters belong to the text"
+        );
+        // And what it does with one: the arrows walk, Enter takes, Escape puts away.
+        let mut list = Completion::new();
+        list.look_at("let al", 6, place(), 0.0);
+        list.answer(
+            place(),
+            vec![
+                lsp_types::CompletionItem {
+                    label: "alpha".to_owned(),
+                    ..Default::default()
+                },
+                lsp_types::CompletionItem {
+                    label: "alpine".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert!(
+            handle_key(&mut list, Key::ArrowDown),
+            "the list refused an arrow"
+        );
+        assert_eq!(list.selected(), 1);
+        assert!(handle_key(&mut list, Key::Enter), "the list refused Enter");
+        assert!(list.accepted());
+        // Taking is what closes it: the state takes the word at the end of the frame, once the word has
+        // been written into the file — not the moment Enter is read.
+        assert_eq!(list.take().as_deref(), Some("alpine"));
+        assert!(
+            !list.is_open(),
+            "the list stayed open after a word was taken"
+        );
     }
 
     #[test]

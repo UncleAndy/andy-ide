@@ -1151,12 +1151,45 @@ fn cut_to_clipboard(ui: &Ui, buffer: &mut EditorBuffer) -> bool {
     true
 }
 
+/// The key the completion list answers to, when the editor meets one and a list is open.
+///
+/// The editor does not answer it: it writes the key down for the list and goes on. The list is answered
+/// at the end of the frame, where the words are (`state::track_completion`).
+fn the_list_takes_this_key(buffer: &mut EditorBuffer, event: &Event) -> bool {
+    let Event::Key {
+        key,
+        modifiers,
+        pressed: true,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let Some(key) = crate::ui::completion::list_key(*key, *modifiers) else {
+        return false;
+    };
+    let Some(view) = buffer.completions.as_mut() else {
+        return false;
+    };
+    if view.lines.is_empty() {
+        return false;
+    }
+    view.taken_key = Some(key);
+    true
+}
+
 fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
     let mut changed = false;
     let mut navigated = false;
     let events = ui.input(|input| input.events.clone());
 
     for event in events {
+        // A list on screen takes the keys that mean something to it — the arrows, Enter and Escape —
+        // before the editor reads them for itself: while a list is up, Enter takes a word rather than
+        // writing a line, and the arrows walk the list rather than the text.
+        if the_list_takes_this_key(buffer, &event) {
+            continue;
+        }
         match event {
             Event::Text(text) => {
                 buffer.insert_text(&text);

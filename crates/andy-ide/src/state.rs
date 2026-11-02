@@ -124,11 +124,6 @@ pub struct AppState {
     pub fullscreen_asked: bool,
     /// The list of words the server offers for the word under the caret.
     pub completion: crate::ui::completion::Completion,
-    /// Whether the completion list took this frame's keys.
-    ///
-    /// Read at the start of the frame — before the editor, which takes the arrows for itself — and
-    /// answered at the window's own key table further down, so one key is answered once.
-    pub completion_took_the_keys: bool,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
     /// The panels the person has put away, in the order they were put away. What is not here is
@@ -229,7 +224,6 @@ impl AppState {
             fonts_set: false,
             fullscreen_asked: false,
             completion: crate::ui::completion::Completion::new(),
-            completion_took_the_keys: false,
             recent,
             project: None,
             tabs: Tabs::new(),
@@ -590,6 +584,15 @@ impl AppState {
     /// the person closed with Escape is left alone until it changes, and nothing is asked while no
     /// server is running — but a server is not started for a list alone.
     pub fn track_completion(&mut self, now: f64) -> Option<std::time::Duration> {
+        // A key the editor met while the list was open is answered here, where the words are: the editor
+        // writes it down for the list and knows nothing else about it.
+        let taken = self
+            .active_buffer_mut()
+            .and_then(|buffer| buffer.completions.as_mut())
+            .and_then(|view| view.taken_key.take());
+        if let Some(key) = taken {
+            crate::ui::completion::handle_key(&mut self.completion, key);
+        }
         let Some(buffer) = self.active_buffer() else {
             self.completion.forget();
             return None;
@@ -654,6 +657,7 @@ impl AppState {
             taken,
             lines,
             chosen,
+            taken_key: None,
         };
         if let Some(buffer) = self.active_buffer_mut() {
             buffer.completions = Some(view);
