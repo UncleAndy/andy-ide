@@ -1043,14 +1043,29 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // What is left on the agent's account, as `/usage` prints it: asked of the agent itself,
             // because the protocol carries no money at all. It sits right of the context figure and
             // follows every turn.
-            if let Some(credits) = state.agent.credits() {
+            let credits = state.agent.credits().map(str::to_owned);
+            let asked = state.agent.credits_asked.is_some();
+            let said = credits.as_deref().unwrap_or("$\u{2014}");
+            if credits.is_some() || asked {
                 ui.separator();
-                if !room_for(ui, credits) {
+                if !room_for(ui, said) {
                     dropped = true;
                     break 'facts;
                 }
-                ui.label(credits)
-                    .on_hover_text(format!("Top-up credits: {credits} (the agent's account)"));
+                match credits {
+                    Some(credits) => {
+                        ui.label(&credits).on_hover_text(format!(
+                            "Top-up credits: {credits} (the agent's account)"
+                        ));
+                    }
+                    // Asked, and nothing came back: said in a word, because a figure that is simply
+                    // absent cannot be told from one that failed to arrive. The log has the reason.
+                    None => {
+                        ui.weak(said).on_hover_text(
+                            "Top-up credits: unknown - the agent's account was asked and said nothing",
+                        );
+                    }
+                }
             }
             if dropped {
                 // The row is one row: what was left out is said by a mark in it, never by a

@@ -386,12 +386,15 @@ pub struct AgentState {
     pub usage: Option<Usage>,
     /// What the agent says is left on its account: the `Top-up credits` figure of `/usage`, which the
     /// protocol does not carry at all and the agent is therefore asked for directly.
-    credits: Option<String>,
+    pub credits: Option<String>,
     /// The account fetch in flight, if one is. One at a time: a figure of money does not move between
     /// two answers, and a process per frame would.
     credits_job: Option<Receiver<Option<String>>>,
     /// When the account was last asked. Every turn is answered, but a turn is not a frame.
-    credits_asked: Option<Instant>,
+    ///
+    /// Asked at all is itself news, and the status line says it: asked and answered with nothing is a
+    /// figure that cannot be had, and looks the same as no figure at all otherwise.
+    pub credits_asked: Option<Instant>,
     /// The conversations the agent keeps for this project, as it last listed them.
     pub sessions: Vec<SessionInfo>,
     /// The names a person gave the conversations, by session id: what the list shows instead of

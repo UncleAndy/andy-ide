@@ -208,7 +208,26 @@ fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
         "the balance is not on the status line"
     );
 
+    // Asked, and the agent had nothing to say: the line says so, because a figure that is absent
+    // cannot be told from one that failed to arrive.
+    gui.app_mut().state.agent.credits = None;
+    gui.app_mut().state.agent.credits_asked = Some(std::time::Instant::now());
+    gui.settle();
+    assert_eq!(
+        spots(&mut gui, "$9.01"),
+        0,
+        "a balance is shown that the agent did not report"
+    );
+    assert!(
+        spots(&mut gui, "$\u{2014}") >= 1,
+        "the line says nothing at all about an account that was asked and did not answer"
+    );
+
     // A later answer replaces it: an account moves, and a figure that cannot fall is not a balance.
+    gui.app_mut()
+        .state
+        .agent
+        .credits_arrived(Some("$9.01".to_owned()));
     gui.app_mut()
         .state
         .agent
