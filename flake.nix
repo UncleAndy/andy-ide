@@ -29,8 +29,41 @@
           libxi
           libxext
         ];
+
+        # The same program as an installable package, plus the two ways to carry it to another machine.
+        #
+        # A binary built here cannot simply be copied: its ELF interpreter points into /nix/store, so the
+        # kernel of a machine without Nix cannot even start it. Both ways out are here:
+        #
+        #   nix copy / nix run   — to another machine that has Nix; the whole closure travels with it;
+        #   nix bundle           — to a machine with no Nix at all: the closure is packed into a single
+        #                          self-extracting file.
+        #
+        # Either way the window system stays the host's: winit opens libwayland-client, libxkbcommon,
+        # libX11 and libGL at run time with `dlopen` rather than linking them, so those libraries have to
+        # exist where the program runs. Every Linux desktop has them; the wrapper below hands them over.
+        windowed = pkgs.rustPlatform.buildRustPackage {
+          pname = "andy-ide";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          # The checks of a windowed program need a window; the devshell is where they run.
+          doCheck = false;
+        };
+
+        runnable = pkgs.writeShellScriptBin "andy-ide" ''
+          export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (graphicsLibs ++ xorgLibs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec ${windowed}/bin/andy-ide "$@"
+        '';
       in
       {
+        packages.default = windowed;
+        packages.run = runnable;
+        apps.default = {
+          type = "app";
+          program = "${runnable}/bin/andy-ide";
+        };
+
         devShells.default = pkgs.mkShell {
           name = "andy-ide-dev";
 
