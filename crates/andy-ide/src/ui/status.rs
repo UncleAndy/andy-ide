@@ -17,6 +17,13 @@ pub fn bar(ui: &mut Ui, state: &AppState) {
         }
         ui.separator();
         ui.label(&state.status);
+        if let Some(warming) = state.warming() {
+            ui.separator();
+            // A wait, and it says so in words. A spinner was tried here and does not belong: it asks for a
+            // repaint every frame, which is more than the egui test harness will do (it stops after sixteen
+            // steps), so every check that draws a warming server would fail on the animation.
+            ui.label(warming);
+        }
         if let Some(line) = state.blame_at_caret() {
             ui.separator();
             let when = jiff::Timestamp::from_second(line.when)

@@ -138,6 +138,44 @@ fn the_window_has_a_menu_a_project_tree_and_a_status_bar() {
 }
 
 #[test]
+fn the_status_bar_says_what_is_being_waited_for_and_stops_when_the_server_answers() {
+    // The warming belongs on the line, and off it the moment the server answers. Andy asked for exactly this:
+    // a wait that shows itself while it lasts, and does not go on claiming itself after the hints work.
+    let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
+    let said = |gui: &mut Gui| {
+        gui.harness
+            .query_all_by_label_contains("rust-analyzer starting")
+            .count()
+    };
+
+    gui.app_mut().state.lsp_status.clear();
+    gui.settle();
+    assert_eq!(
+        said(&mut gui),
+        0,
+        "the panel claims a wait with none to wait for"
+    );
+
+    gui.app_mut().state.lsp_status = "rust-analyzer starting".to_string();
+    gui.settle();
+    assert!(
+        said(&mut gui) >= 1,
+        "the status bar did not say that a server is warming"
+    );
+
+    // The server's first answer: from here on nothing is being waited for, and the line says nothing.
+    gui.app_mut()
+        .state
+        .apply_outcome(crate::lsp::Outcome::Ready);
+    gui.settle();
+    assert_eq!(
+        said(&mut gui),
+        0,
+        "the status bar went on saying it was warming after the server had answered"
+    );
+}
+
+#[test]
 fn clicking_a_file_in_the_tree_opens_its_tab() {
     let mut gui = Gui::new(&[("a.rs", "fn a() {}\n"), ("notes.txt", "text\n")], None);
     assert_eq!(gui.app().state.tabs.len(), 0, "nothing is open yet");

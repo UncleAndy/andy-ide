@@ -1011,13 +1011,26 @@ impl AppState {
     }
 
     /// Takes the freshly built index when the background walk has finished.
+    /// What the panel is waiting for while a language server warms, or `None` once it has answered its first
+    /// question. The status bar shows this and stops showing it exactly then: a line that went on saying
+    /// "starting" while the hints already answered is a line that lies.
+    pub fn warming(&self) -> Option<&str> {
+        self.lsp_status
+            .ends_with(" starting")
+            .then_some(self.lsp_status.as_str())
+    }
+
     pub fn poll_index(&mut self) {
         let Some(receiver) = self.index_job.as_ref() else {
             return;
         };
         match receiver.try_recv() {
             Ok(Ok((count, index))) => {
-                if self.lsp_status.is_empty() || !self.lsp_status.starts_with("starting") {
+                // While a server warms the line belongs to it: the count of indexed files is a smaller
+                // thing to say than the reason the hints are not there yet. (The check used to ask whether
+                // `lsp_status` began with "starting", which it never does — it is "<server> starting" — so
+                // the count overwrote the warm-up every time.)
+                if self.warming().is_none() {
                     self.status = format!("{count} files indexed");
                 }
                 self.index = Some(index);
