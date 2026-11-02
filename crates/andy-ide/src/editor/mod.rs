@@ -162,11 +162,17 @@ pub struct EditorBuffer {
     pub menu_open: bool,
     /// What the completion list looks like this frame, when there is one.
     pub completions: Option<crate::ui::completion::View>,
+    /// How many keys have written text into this file since it was opened.
+    ///
+    /// A count and not a flag for the frame, because the completion list is for writing and a flag is
+    /// lost the moment the buffer is drawn twice in one frame: the list then stays unarmed exactly while
+    /// a person types, which is how "набрал часть слова быстро — автодополнение не срабатывает" looked.
+    /// Only keys count: a word the window writes itself (the list taking one) is not the person writing.
+    pub typed: u64,
     /// Whether a key wrote text into this file on the frame being drawn.
     ///
     /// The completion list is for writing: a word the caret was merely moved into is not being written,
     /// and asking the server about it is what put a list under every identifier Andy crossed.
-    pub typed: bool,
     /// Byte ranges of every use of the symbol under the caret, in this file.
     /// Emptied by every edit: the offsets stop meaning anything.
     pub occurrences: Vec<(usize, usize)>,
@@ -213,7 +219,7 @@ impl EditorBuffer {
             hover: None,
             menu_open: false,
             completions: None,
-            typed: false,
+            typed: 0,
             occurrences: Vec::new(),
             reveal_caret: false,
             needle: None,

@@ -161,6 +161,10 @@ pub struct Completion {
     /// подсказка для автозаполнения, хотя там нечего автозаполнять". A word the caret merely walked
     /// into is not being written, and nothing is asked about it.
     arming: bool,
+    /// The file's key count as it was when this word was last looked at: it has grown since only if a
+    /// key wrote something, which is what "being written" means here. A count, not a flag: a flag for
+    /// the frame is lost the moment the buffer is drawn twice in one frame.
+    seen_keystrokes: u64,
     /// Set when Enter took a word: the window writes it into the file and clears this.
     accepted: bool,
 }
@@ -195,7 +199,11 @@ impl Completion {
 
     /// Tells the list where the caret is. The rest clock is restarted only when the word itself
     /// changes: a hand is never still, and comparing exact positions would restart it every frame.
-    pub fn look_at(&mut self, text: &str, caret: usize, place: Place, now: f64, typing: bool) {
+    pub fn look_at(&mut self, text: &str, caret: usize, place: Place, now: f64, keystrokes: u64) {
+        // A key has written something since the last look — and a count cannot be lost the way a
+        // per-frame flag could be.
+        let typing = keystrokes != self.seen_keystrokes;
+        self.seen_keystrokes = keystrokes;
         let word = if worth_asking(text, caret) {
             word_under_caret(text, caret)
         } else {
@@ -418,7 +426,7 @@ mod tests {
         );
         // And what it does with one: the arrows walk, Enter takes, Escape puts away.
         let mut list = Completion::new();
-        list.look_at("let al", 6, place(), 0.0, true);
+        list.look_at("let al", 6, place(), 0.0, 1);
         list.answer(
             place(),
             vec![
@@ -483,23 +491,33 @@ mod tests {
     #[test]
     fn a_word_the_caret_only_walked_into_is_not_asked_about() {
         let mut list = Completion::new();
-        // The caret arrives in a word without a key having written anything: nothing to complete.
-        // The caret stands inside `alpha` — a column in whitespace would prove nothing at all.
-        list.look_at("let alpha = 1;", 9, place(), 0.0, false);
-        assert_eq!(list.word(), Some("alpha"), "the check is not on a word");
+        // The person writes `alpha`, and the count grows: this one is being written, so it is asked
+        // about.
+        list.look_at("let alpha = 1;", 9, place(), 0.0, 1);
+        assert_eq!(list.word(), Some("alpha"));
         assert!(
-            list.due(0.0 + COMPLETION_DELAY + 0.1).is_none(),
-            "an existing identifier was asked about"
+            list.due(0.0 + COMPLETION_DELAY + 0.1).is_some(),
+            "a written word is not asked about"
         );
-        // One key written into it, and it is worth asking about again.
-        list.look_at("let alphax = 1;", 10, place(), 1.0, true);
+
+        // The caret then walks into another word with no key written — the count stands still — and
+        // nothing is asked about it: Andy's "вылезает подсказка, хотя там нечего автозаполнять".
+        list.look_at("let alpha = beta;", 16, place(), 1.0, 1);
         assert_eq!(
             list.word(),
-            Some("alphax"),
-            "the check is not on the written word"
+            Some("beta"),
+            "the check is not on the walked-into word"
         );
         assert!(
-            list.due(1.0 + COMPLETION_DELAY + 0.1).is_some(),
+            list.due(1.0 + COMPLETION_DELAY + 0.1).is_none(),
+            "an existing identifier was asked about"
+        );
+
+        // One key written into it — the count grows — and it is worth asking about again.
+        list.look_at("let alpha = betax;", 17, place(), 2.0, 2);
+        assert_eq!(list.word(), Some("betax"));
+        assert!(
+            list.due(2.0 + COMPLETION_DELAY + 0.1).is_some(),
             "a word being written is not asked about"
         );
     }
@@ -507,7 +525,7 @@ mod tests {
     #[test]
     fn the_server_is_asked_once_the_word_has_rested() {
         let mut list = Completion::new();
-        list.look_at("let al", 6, place(), 10.0, true);
+        list.look_at("let al", 6, place(), 10.0, 1);
         assert!(
             list.due(10.0 + COMPLETION_DELAY / 2.0).is_none(),
             "asked too soon"
@@ -523,7 +541,7 @@ mod tests {
             "the same word was asked about twice"
         );
         // Typing one more letter is a new word, and it is worth asking again.
-        list.look_at("let alp", 7, place(), 11.0, true);
+        list.look_at("let alp", 7, place(), 11.0, 2);
         assert!(
             list.due(11.0 + COMPLETION_DELAY + 0.1).is_some(),
             "the new word is not asked"
@@ -533,7 +551,7 @@ mod tests {
     #[test]
     fn an_answer_about_another_place_is_thrown_away() {
         let mut list = Completion::new();
-        list.look_at("let al", 6, place(), 0.0, true);
+        list.look_at("let al", 6, place(), 0.0, 1);
         let elsewhere = Place { line: 9, ..place() };
         list.answer(
             elsewhere,
@@ -562,7 +580,7 @@ mod tests {
     #[test]
     fn only_words_that_fit_the_letters_on_screen_are_shown() {
         let mut list = Completion::new();
-        list.look_at("let al", 6, place(), 0.0, true);
+        list.look_at("let al", 6, place(), 0.0, 1);
         let item = |label: &str| lsp_types::CompletionItem {
             label: label.to_owned(),
             ..Default::default()
@@ -583,7 +601,7 @@ mod tests {
     #[test]
     fn taking_a_word_closes_the_list_and_escape_keeps_it_closed() {
         let mut list = Completion::new();
-        list.look_at("let al", 6, place(), 0.0, true);
+        list.look_at("let al", 6, place(), 0.0, 1);
         let item = |label: &str| lsp_types::CompletionItem {
             label: label.to_owned(),
             ..Default::default()
@@ -594,15 +612,15 @@ mod tests {
         assert!(!list.is_open(), "the list stayed after a word was taken");
 
         // Escape, and the same word is not asked about again; a new letter is a new word.
-        list.look_at("let al", 6, place(), 1.0, true);
+        list.look_at("let al", 6, place(), 1.0, 1);
         list.answer(place(), vec![item("alpha")]);
         list.close();
-        list.look_at("let al", 6, place(), 2.0, true);
+        list.look_at("let al", 6, place(), 2.0, 1);
         assert!(
             list.due(2.0 + COMPLETION_DELAY + 0.1).is_none(),
             "the word closed with Escape was asked about again"
         );
-        list.look_at("let alp", 7, place(), 3.0, true);
+        list.look_at("let alp", 7, place(), 3.0, 2);
         assert!(
             list.due(3.0 + COMPLETION_DELAY + 0.1).is_some(),
             "a word the person went on writing must be asked about"

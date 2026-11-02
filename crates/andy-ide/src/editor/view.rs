@@ -378,10 +378,12 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         // single-line field gives the focus up when Enter commits it, and the key
         // that closed the field is still in this frame's event queue — reading it
         // here is how a message meant for the agent put a newline in the editor.
-        buffer.typed = false;
         if response.has_focus() && !response.gained_focus() {
             let (text_changed, moved) = handle_input(ui, buffer);
-            buffer.typed = text_changed;
+            if text_changed {
+                // One more key that wrote text. The count only grows, so a reading of it cannot be lost.
+                buffer.typed += 1;
+            }
             changed |= text_changed;
             typed = text_changed;
             navigated = moved;
