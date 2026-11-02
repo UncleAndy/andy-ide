@@ -378,7 +378,16 @@ impl LspSession {
                     "definition": { "linkSupport": true },
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                    "references": {}
+                    "references": {},
+                    // A server may write its words as snippets — `unwrap()$0`, brackets and a place for the
+                    // caret — only if the client says it can take them, and rust-analyzer takes this at its
+                    // word: without it the answer is the bare name. That is why a taken method had no
+                    // brackets. Andy: "метод подставился без скобок".
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": true
+                        }
+                    }
                 },
                 "workspace": { "workspaceFolders": true }
             }

@@ -233,17 +233,22 @@ pub struct View {
 pub struct Completion {
     /// The word under the caret and where it starts, when there is one.
     word: Option<(usize, String)>,
+    /// Where that word begins, counted the way a place counts — from the start of its line.
+    ///
+    /// Two dots on one line are two different places, and a question asked at the first must not stand for the
+    /// second. Andy's log on `project.unwrap().`: the second dot was never asked about.
+    word_start: u32,
     /// The place the list belongs to.
     place: Option<Place>,
-    /// The place that has been asked about and not yet answered, with the word it was asked for.
-    asked: Option<(Place, String)>,
+    /// The place that has been asked about and not yet answered, with where the word began and its letters.
+    asked: Option<(Place, u32, String)>,
     /// What the server offered for the place now on screen.
     offers: Vec<Offer>,
     selected: usize,
     /// When the hand settled on this word — the rest clock.
     arrived: f64,
     /// The word the person closed with Escape: not asked about again until it changes.
-    closed: Option<(Place, String)>,
+    closed: Option<(Place, u32, String)>,
     /// Whether the word on screen is one the person wrote: the list is for writing, not for reading.
     ///
     /// Andy: "при переходе текстового курсора на любой уже существующий идентификатор вылезает
@@ -256,6 +261,10 @@ pub struct Completion {
     seen_keystrokes: u64,
     /// Set when Enter took a word: the window writes it into the file and clears this.
     accepted: bool,
+    /// Whether the last look saw a key that had written something. A count comparison inside `look_at`,
+    /// written down so the probe can say it: this is what arms a word, and a word that was never armed is
+    /// never asked about — the second dot of `project.unwrap().` was such a word.
+    was_typed: bool,
 }
 
 impl Completion {
@@ -281,6 +290,21 @@ impl Completion {
         self.selected
     }
 
+    /// Whether a word is armed to be asked about, for the probe.
+    pub fn arming(&self) -> bool {
+        self.arming
+    }
+
+    /// Whether the last look saw something written, for the probe.
+    pub fn was_typed(&self) -> bool {
+        self.was_typed
+    }
+
+    /// Where the word the list is about begins, for the probe.
+    pub fn word_start(&self) -> u32 {
+        self.word_start
+    }
+
     /// The word the list is about, for the probe and for the checks.
     pub fn word(&self) -> Option<&str> {
         self.word.as_ref().map(|(_, word)| word.as_str())
@@ -293,6 +317,7 @@ impl Completion {
         // per-frame flag could be.
         let typing = keystrokes != self.seen_keystrokes;
         self.seen_keystrokes = keystrokes;
+        self.was_typed = typing;
         let word = if worth_asking(text, caret) {
             // A dot or `::` just behind the caret: the person is choosing a member of what stands before it,
             // and what they are choosing begins where the caret stands — empty, but worth asking about. Until
@@ -328,6 +353,16 @@ impl Completion {
                     .retain(|offer| offer.label.to_lowercase().starts_with(&prefix));
             }
         }
+        // Where the word begins, counted the way the place counts (from the start of its line): a question
+        // belongs to the word it was asked about, not to the line it stands on.
+        self.word_start = match &self.word {
+            Some((start, _)) => place.character.saturating_sub(
+                text.get(*start..on_a_character(text, caret))
+                    .map(|run| run.chars().count() as u32)
+                    .unwrap_or(0),
+            ),
+            None => place.character,
+        };
         self.place = Some(place);
     }
 
@@ -342,18 +377,14 @@ impl Completion {
         if now - self.arrived < COMPLETION_DELAY {
             return None;
         }
-        if self
-            .asked
-            .as_ref()
-            .is_some_and(|(asked, w)| about_the_same_line(asked, &place) && w == word)
-        {
+        if self.asked.as_ref().is_some_and(|(asked, start, w)| {
+            about_the_same_line(asked, &place) && *start == self.word_start && w == word
+        }) {
             return None;
         }
-        if self
-            .closed
-            .as_ref()
-            .is_some_and(|(closed, w)| about_the_same_line(closed, &place) && w == word)
-        {
+        if self.closed.as_ref().is_some_and(|(closed, start, w)| {
+            about_the_same_line(closed, &place) && *start == self.word_start && w == word
+        }) {
             return None;
         }
         Some(place)
@@ -366,7 +397,7 @@ impl Completion {
             .as_ref()
             .map(|(_, word)| word.clone())
             .unwrap_or_default();
-        self.asked = Some((place, word));
+        self.asked = Some((place, self.word_start, word));
     }
 
     /// How long the rest clock still has to run, for a window that would otherwise sleep through it.
@@ -442,7 +473,7 @@ impl Completion {
     /// again until the word changes.
     pub fn close(&mut self) {
         if let (Some(place), Some((_, word))) = (self.place.clone(), self.word.clone()) {
-            self.closed = Some((place, word));
+            self.closed = Some((place, self.word_start, word));
         }
         self.offers.clear();
         self.selected = 0;
@@ -456,8 +487,11 @@ impl Completion {
     /// One line of state, for an env-gated probe.
     pub fn probe_line(&self) -> String {
         format!(
-            "word {} | open {} ({} of {}) | asked {} | place {}",
+            "word {} | from {} | armed {} typed {} | open {} ({} of {}) | asked {} | place {}",
             self.word().unwrap_or("-"),
+            self.word_start,
+            self.arming,
+            self.was_typed,
             self.offers.len(),
             self.selected + 1,
             self.offers.len(),
