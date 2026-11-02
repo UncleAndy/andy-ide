@@ -396,7 +396,7 @@ fn how_much_of_the_window_is_used_arrives_with_the_turn() {
     let usage = events
         .iter()
         .find_map(|event| match event {
-            Event::Usage(usage) => Some(*usage),
+            Event::Usage(usage) => Some(usage.clone()),
             _ => None,
         })
         .expect("the figure did not arrive");

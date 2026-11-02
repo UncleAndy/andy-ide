@@ -493,7 +493,7 @@ impl Session {
 
     /// The last context figure the agent gave.
     pub fn usage(&self) -> Option<Usage> {
-        self.usage
+        self.usage.clone()
     }
 
     /// Says what the panel is doing while the agent comes up.
@@ -568,7 +568,7 @@ impl Session {
     /// Keeps what the panel asks for separately from what it is shown.
     fn keep_in_step(&mut self, event: &Event) {
         match event {
-            Event::Usage(usage) => self.usage = Some(*usage),
+            Event::Usage(usage) => self.usage = Some(usage.clone()),
             Event::Setup(state) => self.state = state.clone(),
             _ => {}
         }
@@ -1638,6 +1638,7 @@ fn event_of(update: &SessionUpdate, settings: &Arc<Mutex<SessionState>>) -> Opti
         SessionUpdate::UsageUpdate(update) => Some(Event::Usage(Usage {
             used: update.used,
             window: Some(update.size),
+            account: crate::protocol::account_usage_of(&json_of(update)),
         })),
         SessionUpdate::ConfigOptionUpdate(update) => {
             let mut known = settings.lock().ok()?;

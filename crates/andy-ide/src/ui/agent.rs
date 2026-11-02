@@ -1040,29 +1040,27 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                     ui.weak("ctx —");
                 }
             }
-            // What is left on the agent's account, as `/usage` prints it: asked of the agent itself,
-            // because the protocol carries no money at all. It sits right of the context figure and
-            // follows every turn.
-            let credits = state.agent.credits().map(str::to_owned);
-            let asked = state.agent.credits_asked.is_some();
-            let said = credits.as_deref().unwrap_or("$\u{2014}");
-            if credits.is_some() || asked {
+            // What is left on the agent's account, in its provider's own words: the figure here, the
+            // whole block on hover. The agent attaches it to the same update that carries the context
+            // figure, so it follows every turn without a process of ours.
+            let credits = state.agent.credits.clone();
+            let spoke = state.agent.usage.is_some();
+            let said = credits.clone().unwrap_or_else(|| "$\u{2014}".to_owned());
+            if credits.is_some() || spoke {
                 ui.separator();
-                if !room_for(ui, said) {
+                if !room_for(ui, &said) {
                     dropped = true;
                     break 'facts;
                 }
-                match credits {
+                match &credits {
                     Some(credits) => {
-                        ui.label(&credits).on_hover_text(format!(
-                            "Top-up credits: {credits} (the agent's account)"
-                        ));
+                        ui.label(credits).on_hover_text(account_tip(state));
                     }
-                    // Asked, and nothing came back: said in a word, because a figure that is simply
-                    // absent cannot be told from one that failed to arrive. The log has the reason.
+                    // The agent spoke of the session and said nothing about its account: said in a
+                    // word, because a figure that is absent cannot be told from one on its way.
                     None => {
-                        ui.weak(said).on_hover_text(
-                            "Top-up credits: unknown - the agent's account was asked and said nothing",
+                        ui.weak(&said).on_hover_text(
+                            "The account: unknown - the agent has said nothing about it",
                         );
                     }
                 }
@@ -1075,6 +1073,21 @@ fn status(ui: &mut Ui, state: &mut AppState) {
         }
     });
     state.agent.status_rect = Some(row.response.rect);
+}
+
+/// What the account's tooltip says: the provider's own lines, as they arrived, and a word about their
+/// age when the agent warns they are old. Nothing is paraphrased, so a provider nobody has written code
+/// for yet is still read correctly by the person looking at it.
+fn account_tip(state: &AppState) -> String {
+    let mut tip = "The agent's account, in its provider's own words:".to_owned();
+    for line in &state.agent.credits_lines {
+        tip.push('\n');
+        tip.push_str(line);
+    }
+    if state.agent.credits_stale {
+        tip.push_str("\n(the agent says these may be out of date)");
+    }
+    tip
 }
 
 /// Whether a fact of this shape has room in the row that is left, measured the way egui will

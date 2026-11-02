@@ -1071,9 +1071,12 @@ impl AppState {
             .contexts
             .into_iter()
             .map(|(session, span)| {
+                // The account is not kept with the span: it belongs to an answer, and until the agent
+                // answers again nothing is known about it. Nothing is not zero - the line says so.
                 let usage = Usage {
                     used: span.used,
                     window: span.window,
+                    account: None,
                 };
                 (session, usage)
             })

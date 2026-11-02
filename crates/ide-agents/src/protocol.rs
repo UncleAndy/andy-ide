@@ -176,12 +176,64 @@ impl ConfigOption {
 ///
 /// ACP does not standardise this, so it is read from `_meta` and every field is optional:
 /// a panel that invents a context window is a panel that lies about how much room is left.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
     /// Tokens spent so far.
     pub used: u64,
     /// The window they are spent from, if the agent names one.
     pub window: Option<u64>,
+    /// What the agent's account says, when its update carries it.
+    ///
+    /// The protocol has no field for money — the update's own `cost` is what this conversation spent —
+    /// so an agent that knows a balance puts it in `_meta`, which the protocol reserves for exactly
+    /// this. Not every agent sends one, and one that sends nothing says nothing: an account that could
+    /// not be read is not an account with no money.
+    pub account: Option<AccountUsage>,
+}
+
+/// What an agent says about its account, in its provider's own words.
+///
+/// Lines rather than fields, because that is what a provider reports: `/usage` prints a list of
+/// labelled facts, and a Nous top-up, a Codex window and any other provider's balance are all the
+/// same list. The panel shows what came, so a provider nobody has written code for yet is still read
+/// correctly by the person looking at it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountUsage {
+    /// The provider the lines belong to, when the agent names one.
+    pub provider: Option<String>,
+    /// The labelled lines, as the provider wrote them: `Top-up credits: $14.06`.
+    pub lines: Vec<String>,
+    /// Whether the agent warns that the lines are old.
+    pub stale: bool,
+}
+
+/// The account an agent attached to its update (`_meta.hermes.accountUsage`), or `None` when it
+/// attached nothing, said nothing, or is not an agent that speaks of accounts at all.
+pub fn account_usage_of(message: &serde_json::Value) -> Option<AccountUsage> {
+    let block = message.get("_meta")?.get("hermes")?.get("accountUsage")?;
+    let lines: Vec<String> = block
+        .get("lines")?
+        .as_array()?
+        .iter()
+        .filter_map(|line| line.as_str())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(AccountUsage {
+        provider: block
+            .get("provider")
+            .and_then(|provider| provider.as_str())
+            .map(str::to_owned),
+        lines,
+        stale: block
+            .get("stale")
+            .and_then(|stale| stale.as_bool())
+            .unwrap_or(false),
+    })
 }
 /// The state of a conversation the agent described when it opened it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -475,6 +527,39 @@ fn choice_options_of(property: &Value) -> Option<Vec<ChoiceOption>> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod account_usage_tests {
+    use super::*;
+
+    #[test]
+    fn an_account_the_agent_attaches_is_read_in_its_providers_own_words() {
+        // What Hermes sends on a usage update: `_meta.hermes.accountUsage`, the lines `/usage` prints.
+        let update = serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 527478,
+            "size": 1000000,
+            "_meta": {"hermes": {"accountUsage": {
+                "provider": "nous",
+                "lines": ["Nous credits", "Provider: nous", "Top-up credits: $14.06"],
+                "stale": false
+            }}}
+        });
+        let account = account_usage_of(&update).expect("the account was attached and not read");
+        assert_eq!(account.provider.as_deref(), Some("nous"));
+        assert_eq!(account.lines[2], "Top-up credits: $14.06");
+        assert!(!account.stale);
+    }
+
+    #[test]
+    fn an_update_without_an_account_says_nothing_of_one() {
+        let plain = serde_json::json!({"sessionUpdate": "usage_update", "used": 1, "size": 2});
+        assert_eq!(account_usage_of(&plain), None);
+        // Attached and empty is the same as not attached: nothing is not zero.
+        let empty = serde_json::json!({"_meta": {"hermes": {"accountUsage": {"lines": []}}}});
+        assert_eq!(account_usage_of(&empty), None);
+    }
 }
 
 #[cfg(test)]

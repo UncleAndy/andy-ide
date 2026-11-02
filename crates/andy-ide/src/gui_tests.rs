@@ -176,10 +176,11 @@ fn the_status_bar_says_what_is_being_waited_for_and_stops_when_the_server_answer
 }
 
 #[test]
-fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
+fn the_status_line_shows_what_the_agents_account_says_next_to_the_context() {
     // Andy asked for the `Top-up credits` figure of `/usage` on the agent status line, right of
-    // `ctx ...`, following every request to the agent. ACP carries no money at all, so the panel asks
-    // the agent itself; this holds the line to what it does with the answer it gets.
+    // `ctx ...`, following every request. ACP has no field for money, so the agent attaches its
+    // account's own lines to the update that carries the context figure; this holds the line to what
+    // it does with them.
     let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
     let path = gui
         .app_mut()
@@ -190,7 +191,8 @@ fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
     gui.settle();
 
     let spots = |gui: &mut Gui, text: &str| gui.harness.query_all_by_label_contains(text).count();
-    gui.app_mut().state.agent.credits_arrived(None);
+
+    gui.app_mut().state.agent.took_account(None);
     gui.settle();
     assert_eq!(
         spots(&mut gui, "$14.06"),
@@ -201,37 +203,31 @@ fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
     gui.app_mut()
         .state
         .agent
-        .credits_arrived(Some("$14.06".to_owned()));
+        .took_account(Some(ide_agents::AccountUsage {
+            provider: Some("nous".to_owned()),
+            lines: vec![
+                "\u{1f4c8} Nous credits".to_owned(),
+                "Subscription credits: $0.00".to_owned(),
+                "Top-up credits: $14.06".to_owned(),
+                "Total usable: $14.06".to_owned(),
+            ],
+            stale: false,
+        }));
     gui.settle();
     assert!(
         spots(&mut gui, "$14.06") >= 1,
-        "the balance is not on the status line"
-    );
-
-    // Asked, and the agent had nothing to say: the line says so, because a figure that is absent
-    // cannot be told from one that failed to arrive.
-    gui.app_mut().state.agent.credits = None;
-    gui.app_mut().state.agent.credits_asked = Some(std::time::Instant::now());
-    gui.settle();
-    assert_eq!(
-        spots(&mut gui, "$9.01"),
-        0,
-        "a balance is shown that the agent did not report"
-    );
-    assert!(
-        spots(&mut gui, "$\u{2014}") >= 1,
-        "the line says nothing at all about an account that was asked and did not answer"
+        "the balance the agent reported is not on the status line"
     );
 
     // A later answer replaces it: an account moves, and a figure that cannot fall is not a balance.
     gui.app_mut()
         .state
         .agent
-        .credits_arrived(Some("$9.01".to_owned()));
-    gui.app_mut()
-        .state
-        .agent
-        .credits_arrived(Some("$9.01".to_owned()));
+        .took_account(Some(ide_agents::AccountUsage {
+            provider: Some("nous".to_owned()),
+            lines: vec!["Top-up credits: $9.01".to_owned()],
+            stale: false,
+        }));
     gui.settle();
     assert_eq!(
         spots(&mut gui, "$14.06"),
@@ -241,6 +237,20 @@ fn the_status_line_shows_what_is_left_on_the_account_next_to_the_context() {
     assert!(
         spots(&mut gui, "$9.01") >= 1,
         "the new balance is not on the line"
+    );
+
+    // An agent that speaks of the session and says nothing of an account is not an agent with no
+    // money: the line says the account is unknown rather than nothing at all.
+    gui.app_mut().state.agent.credits = None;
+    gui.app_mut().state.agent.usage = Some(ide_agents::Usage {
+        used: 42_000,
+        window: Some(100_000),
+        account: None,
+    });
+    gui.settle();
+    assert!(
+        spots(&mut gui, "$\u{2014}") >= 1,
+        "the line says nothing about an account it could not read"
     );
 }
 
@@ -10091,6 +10101,7 @@ mod the_agent_panel {
         gui.app_mut().state.agent.usage = Some(ide_agents::Usage {
             used: 42_000,
             window: Some(100_000),
+            account: None,
         });
         gui.settle();
         let row = gui
@@ -10135,6 +10146,7 @@ mod the_agent_panel {
         gui.app_mut().state.agent.usage = Some(ide_agents::Usage {
             used: 42_000,
             window: Some(100_000),
+            account: None,
         });
 
         // A conversation long enough that the transcript takes what is left rather than what it
