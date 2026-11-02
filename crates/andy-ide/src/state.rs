@@ -1561,7 +1561,6 @@ impl AppState {
     }
 
     /// Takes a navigation request left by a Ctrl+Click in the editor.
-
     pub fn poll_navigation(&mut self) {
         let Some(buffer_id) = self
             .tabs
