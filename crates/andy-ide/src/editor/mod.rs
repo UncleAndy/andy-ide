@@ -669,16 +669,19 @@ impl EditorBuffer {
         true
     }
 
-    /// Writes a word over the one being written under the caret, and leaves the caret after it.
+    /// Writes the word the completion list offered, where it belongs, and leaves the caret after it.
     ///
-    /// What the completion list needs: the person typed `alp`, the server offered `alpha`, and the
-    /// word has to be replaced rather than appended to. Answers `false` when the caret is not in a
-    /// word at all — a word taken after the word it was about has gone.
+    /// A half-written word is replaced rather than appended to: the person typed `alp`, the server offered
+    /// `alpha`. With no word there at all — the caret just after a `.` or `::`, where a person is choosing a
+    /// name rather than finishing one — the name goes in at the caret. That is what a method list after a dot
+    /// needs: the list has been asked for after a dot from the start (`completion::worth_asking`), but taking
+    /// a word from it wrote nothing, because there was no word to write over.
     pub fn complete_with(&mut self, word: &str) -> bool {
         let Some((start, existing)) =
             crate::ui::completion::word_under_caret(&self.text, self.caret_byte())
         else {
-            return false;
+            self.insert_text(word);
+            return true;
         };
         let from = self.byte_to_char(start);
         self.doc
@@ -1067,6 +1070,41 @@ mod indent_tests {
         buf.set_caret(1);
         buf.outdent();
         assert_eq!(buf.text(), "x\n");
+    }
+}
+
+#[cfg(test)]
+mod complete_with_tests {
+    use super::*;
+
+    fn buffer(text: &str) -> EditorBuffer {
+        EditorBuffer::from_text(PathBuf::from("a.rs"), text.to_owned())
+    }
+
+    #[test]
+    fn a_chosen_name_goes_in_at_the_caret_when_no_word_is_there() {
+        // Andy: "возможно ли сделать автодополнение для методов? … после набора точки". After a dot there is no
+        // word to write over, so the chosen name is written at the caret.
+        let mut buf = buffer("value.");
+        buf.set_caret(buf.text().len());
+        assert!(
+            buf.complete_with("len"),
+            "the list refused to write after a dot"
+        );
+        assert_eq!(buf.text(), "value.len");
+        assert_eq!(buf.caret(), buf.text().chars().count());
+    }
+
+    #[test]
+    fn a_chosen_name_still_replaces_the_word_being_written() {
+        let mut buf = buffer("value.le");
+        buf.set_caret(buf.text().len());
+        assert!(buf.complete_with("len"));
+        assert_eq!(
+            buf.text(),
+            "value.len",
+            "the half-written word stayed behind"
+        );
     }
 }
 
