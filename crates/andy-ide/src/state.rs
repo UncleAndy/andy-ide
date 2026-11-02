@@ -124,6 +124,11 @@ pub struct AppState {
     pub fullscreen_asked: bool,
     /// The list of words the server offers for the word under the caret.
     pub completion: crate::ui::completion::Completion,
+    /// Whether the completion list took this frame's keys.
+    ///
+    /// Read at the start of the frame — before the editor, which takes the arrows for itself — and
+    /// answered at the window's own key table further down, so one key is answered once.
+    pub completion_took_the_keys: bool,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
     /// The panels the person has put away, in the order they were put away. What is not here is
@@ -224,6 +229,7 @@ impl AppState {
             fonts_set: false,
             fullscreen_asked: false,
             completion: crate::ui::completion::Completion::new(),
+            completion_took_the_keys: false,
             recent,
             project: None,
             tabs: Tabs::new(),
