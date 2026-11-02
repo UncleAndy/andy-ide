@@ -34,20 +34,24 @@ layout, the caret of every open file, and the switches of the View menu — atom
 filesystem watching, Markdown preview, dark and light themes.
 Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
-Milestone M2 (navigation through a language server) is under way: the LSP client in
-`ide-lsp` speaks the protocol to a real child process, `F12` and `Ctrl+Click` go to the
-definition, `Shift+F12` lists the places a symbol is used, `Ctrl+F12` shows the structure
-of the file and `Ctrl+Alt+Shift+N` searches the symbols of the project. Resting the
-pointer on a symbol shows its signature, and the other uses of the symbol under the
+Milestone M2 (navigation through a language server) is done, except for completion: the
+LSP client in `ide-lsp` speaks the protocol to a real child process, and everything it can
+answer is reachable from one door — the editor's context menu. `F12` and `Ctrl+Click` go
+to the definition, `Ctrl+Alt+B` lists the implementations of a trait, `Shift+F12` lists
+the places a symbol is used, `Ctrl+Alt+H` the places that call it, `Ctrl+F12` shows the
+structure of the file and `Ctrl+Alt+Shift+N` searches the symbols of the project. Resting
+the pointer on a symbol shows its signature, and the other uses of the symbol under the
 caret are dimmed behind the text. `Shift+F6` renames the symbol under the caret: the
 server's answer is shown as a list of the places it would change, and nothing is written
 until Enter is pressed on that list. The problems panel shows what the server published.
-What is not there yet: the list of the implementations of a trait, the hierarchy of
-incoming calls, and completion. The client today asks a server for a definition, the
-places a symbol is used, the symbols of a file and of the project, a hover, the other
-uses under the caret and a rename, and for nothing else.
+Every item of that menu names its key beside it, and the ones that need a symbol under the
+caret are greyed out when the caret stands on no name. What is not there yet: completion.
+The client today asks a server for a definition, the implementations of a trait, the places
+a symbol is used, the places that call it, the symbols of a file and of the project, a
+hover, the other uses under the caret and a rename, and for nothing else.
+Acceptance report: [`docs/M2_acceptance.md`](docs/M2_acceptance.md).
 Plan and state:
-[`.hermes/plans/2026-10-28_andy-ide-m2.md`](.hermes/plans/2026-10-28_andy-ide-m2.md).
+[`.hermes/plans/2026-11-02_andy-ide-m2-navigation.md`](.hermes/plans/2026-11-02_andy-ide-m2-navigation.md).
 
 Milestone M3 (terminal) is done: `ide-term` runs a shell on a real pseudo-terminal
 (`portable-pty`) and emulates the screen (`vt100`, 2000 lines of scrollback); the bottom
