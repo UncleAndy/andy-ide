@@ -469,6 +469,52 @@ impl LspSession {
         Ok(serde_json::from_value(result).unwrap_or_default())
     }
 
+    /// The places that implement the trait whose name is under the cursor.
+    ///
+    /// The protocol lets the answer be a single location, a list of them, or a list of links, and
+    /// `definition_locations` already speaks all three - implementations answer in exactly the
+    /// shapes a definition does.
+    pub fn implementations(&mut self, path: &Path, position: Position) -> Result<Vec<Location>> {
+        let result = self.positioned_request("textDocument/implementation", path, position)?;
+        Ok(definition_locations(result))
+    }
+
+    /// The places that call the function whose name is under the cursor.
+    ///
+    /// Two requests, not one: the protocol first asks for the hierarchy item of the symbol and then
+    /// for the calls arriving at it. The answer is flattened into the list of places every other
+    /// navigation command produces - one entry per call site, since a caller may call the same
+    /// function from several places in its body.
+    pub fn incoming_calls(&mut self, path: &Path, position: Position) -> Result<Vec<Location>> {
+        let answer = self.positioned_request("textDocument/prepareCallHierarchy", path, position)?;
+        let items: Vec<lsp_types::CallHierarchyItem> =
+            serde_json::from_value(answer).unwrap_or_default();
+        let mut places: Vec<Location> = Vec::new();
+        for item in items {
+            let params = json!({ "item": item });
+            let answer = self
+                .process
+                .request("callHierarchy/incomingCalls", Some(params))?;
+            let calls: Vec<lsp_types::CallHierarchyIncomingCall> =
+                serde_json::from_value(answer).unwrap_or_default();
+            for call in calls {
+                for range in call.from_ranges {
+                    let place = Location {
+                        uri: call.from.uri.clone(),
+                        range,
+                    };
+                    let known = places
+                        .iter()
+                        .any(|seen| seen.uri == place.uri && seen.range == place.range);
+                    if !known {
+                        places.push(place);
+                    }
+                }
+            }
+        }
+        Ok(places)
+    }
+
     /// The symbols of one file, for the structure panel.
     pub fn document_symbols(&mut self, path: &Path) -> Result<Vec<DocumentSymbol>> {
         let uri = self.uri(path)?;

@@ -164,6 +164,75 @@ fn main() {
                     serde_json::json!({"jsonrpc": "2.0", "id": id, "result": []}),
                 );
             }
+            "textDocument/prepareCallHierarchy" => {
+                let uri = params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                write_message(
+                    &mut out,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": [{
+                            "name": "the_fixture_symbol",
+                            "kind": 12,
+                            "uri": uri,
+                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                            "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+                        }]
+                    }),
+                );
+            }
+            "callHierarchy/incomingCalls" => {
+                // Two call sites in another file. They exist only because this second question was
+                // asked, so a client that stops after the first one sees an empty list.
+                write_message(
+                    &mut out,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": [{
+                            "from": {
+                                "name": "a_caller",
+                                "kind": 12,
+                                "uri": "file:///caller.rs",
+                                "range": {"start": {"line": 4, "character": 0}, "end": {"line": 6, "character": 1}},
+                                "selectionRange": {"start": {"line": 5, "character": 2}, "end": {"line": 5, "character": 8}}
+                            },
+                            "fromRanges": [
+                                {"start": {"line": 5, "character": 2}, "end": {"line": 5, "character": 8}},
+                                {"start": {"line": 9, "character": 2}, "end": {"line": 9, "character": 8}}
+                            ]
+                        }]
+                    }),
+                );
+            }
+            "textDocument/implementation" => {
+                // The second line, while the definition arm answers with the first: a client asking
+                // for the wrong method gets a line the test does not expect, so it cannot pass by
+                // accident.
+                let uri = params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let text = documents.get(&uri).cloned().unwrap_or_default();
+                let second = text.lines().nth(1).unwrap_or_default().to_owned();
+                write_message(
+                    &mut out,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": [{
+                            "uri": uri,
+                            "range": {
+                                "start": {"line": 1, "character": 0},
+                                "end": {"line": 1, "character": second.chars().count()}
+                            }
+                        }]
+                    }),
+                );
+            }
             "textDocument/documentHighlight" => {
                 // With `--ask` on the command line, this server behaves like one that needs a
                 // setting before it can answer: it asks the client and *waits*. A client

@@ -253,3 +253,47 @@ fn a_server_that_asks_a_question_before_answering_gets_an_answer() {
     );
     session.shutdown();
 }
+
+
+#[test]
+fn implementations_come_back_as_a_list_of_places() {
+    let dir = project();
+    let mut session = LspSession::start(&FAKE, dir.path()).unwrap();
+    let places = session
+        .implementations(
+            std::path::Path::new("lib.rs"),
+            Position {
+                line: 0,
+                character: 0,
+            },
+        )
+        .expect("implementations are answered");
+    // The fixture puts them on the second line and the definition arm on the first, so a client
+    // that asked for the wrong method is caught here rather than passing quietly.
+    assert_eq!(places.len(), 1, "one place, got {places:?}");
+    assert_eq!(places[0].range.start.line, 1, "the second line, not the first");
+    assert!(places[0].uri.as_str().ends_with("lib.rs"), "got {}", places[0].uri.as_str());
+}
+
+#[test]
+fn incoming_calls_come_back_as_the_places_that_call_it() {
+    let dir = project();
+    let mut session = LspSession::start(&FAKE, dir.path()).unwrap();
+    let places = session
+        .incoming_calls(
+            std::path::Path::new("lib.rs"),
+            Position {
+                line: 0,
+                character: 0,
+            },
+        )
+        .expect("the callers are answered");
+    // Two call sites in another file, produced by the second question alone.
+    assert_eq!(places.len(), 2, "two call sites, got {places:?}");
+    assert!(
+        places.iter().all(|place| place.uri.as_str().ends_with("caller.rs")),
+        "got {places:?}"
+    );
+    assert_eq!(places[0].range.start.line, 5);
+    assert_eq!(places[1].range.start.line, 9);
+}
