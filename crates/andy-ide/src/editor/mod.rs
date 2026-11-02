@@ -677,16 +677,26 @@ impl EditorBuffer {
     /// needs: the list has been asked for after a dot from the start (`completion::worth_asking`), but taking
     /// a word from it wrote nothing, because there was no word to write over.
     pub fn complete_with(&mut self, word: &str) -> bool {
-        let Some((start, existing)) =
-            crate::ui::completion::word_under_caret(&self.text, self.caret_byte())
-        else {
-            self.insert_text(word);
-            return true;
+        let from = match crate::ui::completion::word_under_caret(&self.text, self.caret_byte()) {
+            Some((start, existing)) => {
+                let from = self.byte_to_char(start);
+                self.doc
+                    .replace_range(from..from + existing.chars().count(), word);
+                from
+            }
+            None => {
+                let at = self.byte_to_char(self.caret_byte());
+                self.insert_text(word);
+                at
+            }
         };
-        let from = self.byte_to_char(start);
-        self.doc
-            .replace_range(from..from + existing.chars().count(), word);
-        self.cursor = Cursor::caret(from + word.chars().count());
+        // A method is taken with its brackets, and the caret goes inside them: that is where the arguments go,
+        // and a person who has just taken `unwrap()` wants to write into it, not after it.
+        let inside = word
+            .find('(')
+            .map(|at| word[..at].chars().count() + 1)
+            .filter(|_| word.ends_with(')'));
+        self.cursor = Cursor::caret(from + inside.unwrap_or_else(|| word.chars().count()));
         self.refresh();
         true
     }
@@ -1093,6 +1103,27 @@ mod complete_with_tests {
         );
         assert_eq!(buf.text(), "value.len");
         assert_eq!(buf.caret(), buf.text().chars().count());
+    }
+
+    #[test]
+    fn a_taken_method_leaves_the_caret_inside_its_brackets() {
+        // Andy: "при выборе метода хорошо бы его добавлять уже с первой скобкой и с подсказкой по параметрам".
+        let mut buf = buffer("value.le");
+        buf.set_caret(buf.text().len());
+        assert!(buf.complete_with("len()"));
+        assert_eq!(buf.text(), "value.len()");
+        assert_eq!(
+            buf.caret(),
+            "value.len(".chars().count(),
+            "the caret went after the brackets"
+        );
+
+        // After a dot the same: the name and its brackets go in at the caret, and the caret goes inside.
+        let mut buf = buffer("project.unwrap().");
+        buf.set_caret(buf.text().len());
+        assert!(buf.complete_with("unwrap()"));
+        assert_eq!(buf.text(), "project.unwrap().unwrap()");
+        assert_eq!(buf.caret(), "project.unwrap().unwrap(".chars().count());
     }
 
     #[test]

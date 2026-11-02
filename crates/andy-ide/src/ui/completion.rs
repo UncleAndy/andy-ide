@@ -95,6 +95,84 @@ fn on_a_character(text: &str, caret: usize) -> usize {
     caret
 }
 
+/// What the list writes when a word is taken: what the server said to write, with the snippet's
+/// placeholders taken out.
+///
+/// A method comes from the server with its brackets and a place for the caret (`unwrap()$0`), and a person
+/// who takes a method wants exactly that — the brackets, and the caret inside them, ready for the
+/// arguments. The bare label is what was taken before, which left the brackets to be typed by hand. Andy:
+/// "при выборе метода хорошо бы его добавлять уже с первой скобкой".
+fn written(item: &lsp_types::CompletionItem) -> String {
+    let text = item
+        .text_edit
+        .as_ref()
+        .map(|edit| match edit {
+            lsp_types::CompletionTextEdit::Edit(edit) => edit.new_text.clone(),
+            lsp_types::CompletionTextEdit::InsertAndReplace(edit) => edit.new_text.clone(),
+        })
+        .or_else(|| item.insert_text.clone())
+        .unwrap_or_else(|| item.label.clone());
+    without_placeholders(&text)
+}
+
+/// The snippet's placeholders taken out: `unwrap()$0` is written as `unwrap()`, and `${1:name}` as `name`.
+fn without_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            Some('0'..='9') => {
+                while matches!(chars.peek(), Some('0'..='9')) {
+                    chars.next();
+                }
+            }
+            Some('{') => {
+                chars.next();
+                let mut inner = String::new();
+                let mut depth = 1usize;
+                for letter in chars.by_ref() {
+                    match letter {
+                        '{' => {
+                            depth += 1;
+                            inner.push('{');
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            inner.push('}');
+                        }
+                        _ => inner.push(letter),
+                    }
+                }
+                // `${1:name}` keeps the name; `${1|one,two|}` keeps the first choice — and in that second
+                // form the number stands before the first bar, so the choices start after it.
+                let kept = if let Some((_, rest)) = inner.split_once(':') {
+                    rest.to_owned()
+                } else if let Some((_, rest)) = inner.split_once('|') {
+                    rest.split('|')
+                        .next()
+                        .unwrap_or("")
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .to_owned()
+                } else {
+                    inner.clone()
+                };
+                out.push_str(&kept);
+            }
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
 /// What the server called the kind of a word, as a word a person reads.
 fn kind_in_words(kind: Option<lsp_types::CompletionItemKind>) -> String {
     use lsp_types::CompletionItemKind as K;
@@ -327,7 +405,7 @@ impl Completion {
             .into_iter()
             .map(|item| Offer {
                 label: item.label.clone(),
-                insert: item.insert_text.unwrap_or(item.label),
+                insert: written(&item),
                 kind: kind_in_words(item.kind),
                 detail: item.detail.unwrap_or_default(),
             })
@@ -589,6 +667,37 @@ mod tests {
                 .map(|o| o.label.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_taken_method_is_written_with_its_brackets() {
+        // Andy: "при выборе метода хорошо бы его добавлять уже с первой скобкой" — the server says so in the
+        // text it wants written, and the label alone left the brackets to be typed by hand.
+        let mut called = lsp_types::CompletionItem {
+            label: "unwrap".to_owned(),
+            text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                range: lsp_types::Range::default(),
+                new_text: "unwrap()$0".to_owned(),
+            })),
+            ..Default::default()
+        };
+        assert_eq!(written(&called), "unwrap()");
+
+        // A placeholder that stands for a name keeps the name, and the first of several choices is taken.
+        called.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+            range: lsp_types::Range::default(),
+            new_text: "push(${1:value})$0".to_owned(),
+        }));
+        assert_eq!(written(&called), "push(value)");
+        called.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+            range: lsp_types::Range::default(),
+            new_text: "push(${1|one,two|})$0".to_owned(),
+        }));
+        assert_eq!(written(&called), "push(one)");
+
+        // With nothing to write given, the label stands as it always did.
+        called.text_edit = None;
+        assert_eq!(written(&called), "unwrap");
     }
 
     #[test]
