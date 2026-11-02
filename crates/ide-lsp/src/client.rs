@@ -486,7 +486,8 @@ impl LspSession {
     /// navigation command produces - one entry per call site, since a caller may call the same
     /// function from several places in its body.
     pub fn incoming_calls(&mut self, path: &Path, position: Position) -> Result<Vec<Location>> {
-        let answer = self.positioned_request("textDocument/prepareCallHierarchy", path, position)?;
+        let answer =
+            self.positioned_request("textDocument/prepareCallHierarchy", path, position)?;
         let items: Vec<lsp_types::CallHierarchyItem> =
             serde_json::from_value(answer).unwrap_or_default();
         let mut places: Vec<Location> = Vec::new();

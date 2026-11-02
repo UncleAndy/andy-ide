@@ -13,6 +13,15 @@ use ide_core::{
 use crate::editor::EditorBuffer;
 use crate::ui::Tab;
 
+/// The question a navigation command asks the server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Navigation {
+    Definition,
+    References,
+    Implementations,
+    IncomingCalls,
+}
+
 /// Font size that maps to zoom factor 1.0: the configured size scales the whole
 /// interface, so there is one number to remember instead of two.
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -1416,12 +1425,22 @@ impl AppState {
     /// or two, which is why it happens on the worker thread while the editor
     /// keeps drawing.
     pub fn goto_definition(&mut self) {
-        self.navigate(false);
+        self.navigate(Navigation::Definition);
     }
 
     /// Asks the server for every place the symbol under the caret is used.
     pub fn find_references(&mut self) {
-        self.navigate(true);
+        self.navigate(Navigation::References);
+    }
+
+    /// Asks the server for the places that implement the trait under the caret.
+    pub fn find_implementations(&mut self) {
+        self.navigate(Navigation::Implementations);
+    }
+
+    /// Asks the server for the places that call the function under the caret.
+    pub fn incoming_calls(&mut self) {
+        self.navigate(Navigation::IncomingCalls);
     }
 
     /// Shows the structure of the file in the active tab.
@@ -1501,9 +1520,9 @@ impl AppState {
 
     /// Sends a navigation request for the symbol under the caret.
     ///
-    /// `references` picks the wider question; the rest of the way is the same,
-    /// down to starting the server and announcing the open documents.
-    fn navigate(&mut self, references: bool) {
+    /// The question differs; the rest of the way is the same, down to starting
+    /// the server and announcing the open documents.
+    fn navigate(&mut self, what: Navigation) {
         let Some(buffer) = self.active_buffer() else {
             return;
         };
@@ -1514,20 +1533,35 @@ impl AppState {
             return;
         }
         if let Some(lsp) = self.lsp.as_ref() {
-            self.status = if references {
-                "looking for references...".to_owned()
-            } else {
-                "looking for the definition...".to_owned()
+            self.status = match what {
+                Navigation::Definition => "looking for the definition...".to_owned(),
+                Navigation::References => "looking for references...".to_owned(),
+                Navigation::Implementations => "looking for implementations...".to_owned(),
+                Navigation::IncomingCalls => "looking for the callers...".to_owned(),
             };
-            lsp.send(if references {
-                crate::lsp::Job::References { path, position }
-            } else {
-                crate::lsp::Job::Definition { path, position }
+            lsp.send(match what {
+                Navigation::Definition => crate::lsp::Job::Definition { path, position },
+                Navigation::References => crate::lsp::Job::References { path, position },
+                Navigation::Implementations => crate::lsp::Job::Implementations { path, position },
+                Navigation::IncomingCalls => crate::lsp::Job::IncomingCalls { path, position },
             });
         }
     }
 
+    /// Takes a choice made in the editor's context menu, if there is one.
+    ///
+    /// The active buffer only: the menu belongs to the file the person is looking at.
+    pub fn take_menu_request(&mut self) -> Option<crate::editor::Ask> {
+        let buffer_id = self
+            .tabs
+            .active()
+            .and_then(|index| self.tabs.items().get(index))
+            .map(|item| item.buffer_id)?;
+        self.buffers.get_mut(&buffer_id)?.take_menu_request()
+    }
+
     /// Takes a navigation request left by a Ctrl+Click in the editor.
+
     pub fn poll_navigation(&mut self) {
         let Some(buffer_id) = self
             .tabs
@@ -1808,6 +1842,26 @@ impl AppState {
                 if self.symbols.open {
                     self.status = format!("{count} symbols match «{query}»");
                 }
+            }
+            crate::lsp::Outcome::Implementations { from, locations } => {
+                let hits = self.hits_from(locations);
+                let count = hits.len();
+                self.results.show_hits(hits);
+                self.status = if count == 0 {
+                    format!("nothing implements the symbol in {}", display_name(&from))
+                } else {
+                    format!("{count} implementations")
+                };
+            }
+            crate::lsp::Outcome::IncomingCalls { from, locations } => {
+                let hits = self.hits_from(locations);
+                let count = hits.len();
+                self.results.show_hits(hits);
+                self.status = if count == 0 {
+                    format!("nothing calls the symbol in {}", display_name(&from))
+                } else {
+                    format!("{count} callers")
+                };
             }
             crate::lsp::Outcome::References { from, locations } => {
                 let hits = self.hits_from(locations);

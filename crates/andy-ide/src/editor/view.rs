@@ -18,6 +18,7 @@ use ide_syntax::{HighlightSpan, TokenKind};
 use super::EditorBuffer;
 use super::INDENT_WIDTH as TAB_WIDTH;
 use super::edit::Motion;
+use super::{Ask, on_a_symbol};
 
 /// Caret width in points.
 const CARET_WIDTH: f32 = 1.5;
@@ -187,6 +188,7 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         // `Ctrl+Insert` doing nothing at all in the file — which is exactly what Andy saw after the
         // menu arrived. The editor asks for the keyboard back the moment it is gone.
         let had_the_keyboard = response.has_focus();
+        let mut asked: Option<Ask> = None;
         response.context_menu(|ui| {
             if ui.button("Copy text").clicked() {
                 copy = true;
@@ -196,7 +198,43 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
                 paste = true;
                 ui.close();
             }
+            ui.separator();
+            // The navigation the window already knows from its keys, in the same door: the key is
+            // named beside the item, and an item that asks about a symbol is offered only when the
+            // caret stands on one.
+            let item = |ui: &mut egui::Ui, ask: Ask, asked: &mut Option<Ask>| {
+                let offered =
+                    !ask.needs_a_symbol() || on_a_symbol(buffer.text(), buffer.caret_byte());
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(offered, egui::Button::new(ask.title()))
+                        .clicked()
+                    {
+                        *asked = Some(ask);
+                        ui.close();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.weak(ask.hint());
+                    });
+                });
+            };
+            for ask in [
+                Ask::Definition,
+                Ask::Implementations,
+                Ask::References,
+                Ask::IncomingCalls,
+                Ask::Rename,
+            ] {
+                item(ui, ask, &mut asked);
+            }
+            ui.separator();
+            for ask in [Ask::FileSymbols, Ask::ProjectSymbols] {
+                item(ui, ask, &mut asked);
+            }
         });
+        if let Some(ask) = asked {
+            buffer.request_ask(ask);
+        }
         if copy {
             copy_to_clipboard(ui, buffer);
         }

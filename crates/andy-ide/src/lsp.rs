@@ -50,6 +50,16 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// The places that implement the trait under the caret.
+    Implementations {
+        path: PathBuf,
+        position: Position,
+    },
+    /// The places that call the function under the caret.
+    IncomingCalls {
+        path: PathBuf,
+        position: Position,
+    },
     /// What the symbol at one position is: signature and documentation.
     Hover {
         path: PathBuf,
@@ -92,6 +102,16 @@ pub enum Outcome {
     NoDefinition { from: PathBuf },
     /// Every place the symbol under the caret is used.
     References {
+        from: PathBuf,
+        locations: Vec<Location>,
+    },
+    /// Every place that implements the trait under the caret.
+    Implementations {
+        from: PathBuf,
+        locations: Vec<Location>,
+    },
+    /// Every place that calls the function under the caret.
+    IncomingCalls {
         from: PathBuf,
         locations: Vec<Location>,
     },
@@ -573,6 +593,24 @@ fn apply(
             },
             Err(error) => Outcome::Failed(format!("{error:#}")),
         }),
+        Job::Implementations { path, position } => {
+            Some(match session.implementations(&path, position) {
+                Ok(locations) => Outcome::Implementations {
+                    from: path,
+                    locations,
+                },
+                Err(error) => Outcome::Failed(format!("{error:#}")),
+            })
+        }
+        Job::IncomingCalls { path, position } => {
+            Some(match session.incoming_calls(&path, position) {
+                Ok(locations) => Outcome::IncomingCalls {
+                    from: path,
+                    locations,
+                },
+                Err(error) => Outcome::Failed(format!("{error:#}")),
+            })
+        }
         Job::Symbols { path } => {
             let mut found = session.document_symbols(&path);
             // Same cold start as a definition: an empty outline before the

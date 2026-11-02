@@ -351,6 +351,9 @@ impl App {
             self.state.pending.push(action);
         }
         self.state.poll_navigation();
+        if let Some(ask) = self.state.take_menu_request() {
+            Command::from(ask).run(&mut self.state, &mut self.dock);
+        }
         self.state.apply_pending();
 
         // The hint is asked for after the editor drew this frame, so the spot the
@@ -504,6 +507,8 @@ pub(crate) enum Command {
     FileSymbols,
     References,
     Definition,
+    Implementations,
+    IncomingCalls,
     Rename,
     Blame,
     Terminal,
@@ -561,6 +566,12 @@ impl Command {
             Command::Definition => {
                 state.goto_definition();
             }
+            Command::Implementations => {
+                state.find_implementations();
+            }
+            Command::IncomingCalls => {
+                state.incoming_calls();
+            }
             Command::Rename => {
                 state.begin_rename();
             }
@@ -602,6 +613,8 @@ impl Command {
             Command::FileSymbols => "file symbols",
             Command::References => "references",
             Command::Definition => "the definition",
+            Command::Implementations => "implementations",
+            Command::IncomingCalls => "the callers",
             Command::Rename => "rename",
             Command::Blame => "blame",
             Command::Terminal => "the terminal",
@@ -618,6 +631,20 @@ impl Command {
 /// One row per key, and the longer chord of two always first: a key with more modifiers held down
 /// must never be read as the shorter one under it. The checks drive this table itself, so a chord
 /// that a longer one would swallow fails a test rather than a person's hands.
+impl From<crate::editor::Ask> for Command {
+    fn from(ask: crate::editor::Ask) -> Self {
+        match ask {
+            crate::editor::Ask::Definition => Command::Definition,
+            crate::editor::Ask::Implementations => Command::Implementations,
+            crate::editor::Ask::References => Command::References,
+            crate::editor::Ask::IncomingCalls => Command::IncomingCalls,
+            crate::editor::Ask::Rename => Command::Rename,
+            crate::editor::Ask::FileSymbols => Command::FileSymbols,
+            crate::editor::Ask::ProjectSymbols => Command::ProjectSymbols,
+        }
+    }
+}
+
 pub(crate) const KEYS: &[(KeyboardShortcut, Command)] = &[
     // The project-symbol search and the file structure keep the keys IntelliJ gives them.
     (
@@ -690,6 +717,30 @@ pub(crate) const KEYS: &[(KeyboardShortcut, Command)] = &[
     (
         KeyboardShortcut::new(Modifiers::SHIFT, Key::F12),
         Command::References,
+    ),
+    // Ctrl+Alt+B and Ctrl+Alt+H, as IntelliJ has them: the specific questions
+    // before the general F12 family.
+    (
+        KeyboardShortcut::new(
+            Modifiers {
+                alt: true,
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            Key::B,
+        ),
+        Command::Implementations,
+    ),
+    (
+        KeyboardShortcut::new(
+            Modifiers {
+                alt: true,
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            Key::H,
+        ),
+        Command::IncomingCalls,
     ),
     (
         KeyboardShortcut::new(Modifiers::CTRL, Key::F12),
@@ -4908,5 +4959,68 @@ mod the_bottom_strip {
             Some(Tab::Problems)
         );
         assert_eq!(tidied.iter_all_tabs().count(), 6);
+    }
+}
+
+#[cfg(test)]
+mod menu_hints {
+    use super::{Command, KEYS};
+    use crate::editor::Ask;
+    use egui::{Key, KeyboardShortcut, Modifiers};
+
+    /// The key each menu item names, written out here independently: a hint that drifts from the table
+    /// would otherwise tell the person to press something that does nothing.
+    fn expected(ask: Ask) -> KeyboardShortcut {
+        match ask {
+            Ask::Definition => KeyboardShortcut::new(Modifiers::NONE, Key::F12),
+            Ask::Implementations => KeyboardShortcut::new(
+                Modifiers {
+                    alt: true,
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+                Key::B,
+            ),
+            Ask::References => KeyboardShortcut::new(Modifiers::SHIFT, Key::F12),
+            Ask::IncomingCalls => KeyboardShortcut::new(
+                Modifiers {
+                    alt: true,
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+                Key::H,
+            ),
+            Ask::Rename => KeyboardShortcut::new(Modifiers::SHIFT, Key::F6),
+            Ask::FileSymbols => KeyboardShortcut::new(Modifiers::CTRL, Key::F12),
+            Ask::ProjectSymbols => KeyboardShortcut::new(
+                Modifiers {
+                    alt: true,
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+                Key::N,
+            ),
+        }
+    }
+
+    #[test]
+    fn every_menu_item_is_backed_by_the_key_it_names() {
+        for ask in [
+            Ask::Definition,
+            Ask::Implementations,
+            Ask::References,
+            Ask::IncomingCalls,
+            Ask::Rename,
+            Ask::FileSymbols,
+            Ask::ProjectSymbols,
+        ] {
+            let command = Command::from(ask);
+            let wanted = expected(ask);
+            let found = KEYS
+                .iter()
+                .any(|(shortcut, mapped)| *mapped == command && *shortcut == wanted);
+            assert!(found, "{:?} ({}) has no such key", command, ask.hint());
+        }
     }
 }

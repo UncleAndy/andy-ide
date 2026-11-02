@@ -15,6 +15,66 @@ pub const INDENT_WIDTH: usize = 4;
 
 use self::edit::Motion;
 
+/// What the editor's context menu asks the window to do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ask {
+    Definition,
+    Implementations,
+    References,
+    IncomingCalls,
+    Rename,
+    FileSymbols,
+    ProjectSymbols,
+}
+
+impl Ask {
+    /// What the item says.
+    pub fn title(self) -> &'static str {
+        match self {
+            Ask::Definition => "Go to definition",
+            Ask::Implementations => "Implementations",
+            Ask::References => "Find usages",
+            Ask::IncomingCalls => "Incoming calls",
+            Ask::Rename => "Rename…",
+            Ask::FileSymbols => "File structure",
+            Ask::ProjectSymbols => "Project symbols",
+        }
+    }
+
+    /// The key that does the same from the keyboard, as a menu names it.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Ask::Definition => "F12",
+            Ask::Implementations => "Ctrl+Alt+B",
+            Ask::References => "Shift+F12",
+            Ask::IncomingCalls => "Ctrl+Alt+H",
+            Ask::Rename => "Shift+F6",
+            Ask::FileSymbols => "Ctrl+F12",
+            Ask::ProjectSymbols => "Ctrl+Alt+Shift+N",
+        }
+    }
+
+    /// Whether the item needs a symbol under the caret to mean anything.
+    pub fn needs_a_symbol(self) -> bool {
+        !matches!(self, Ask::FileSymbols | Ask::ProjectSymbols)
+    }
+}
+
+/// Whether the caret stands on a name. An item that asks about a symbol is offered only then.
+pub fn on_a_symbol(text: &str, caret: usize) -> bool {
+    // The caret is a byte offset into the file. Snap it to a character boundary first, so a caret
+    // that fell inside a multi-byte character — a Cyrillic letter, say — still answers.
+    let mut at = caret.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    // A digit is not a name: "go to definition" on the `1` of a literal means nothing.
+    let is_name = |ch: char| ch.is_alphabetic() || ch == '_';
+    let before = text[..at].chars().next_back();
+    let after = text[at..].chars().next();
+    after.is_some_and(is_name) || before.is_some_and(is_name)
+}
+
 /// An open document: the rope, the caret, and the highlighter.
 ///
 /// The document is the source of truth; `text` is a flat mirror of it, rebuilt
@@ -38,6 +98,8 @@ pub struct EditorBuffer {
     /// A Ctrl+Click asked for the definition of the character at this index, and
     /// the application has not answered it yet.
     nav_request: Option<usize>,
+    /// What the context menu asked for, waiting for the window to pick it up.
+    menu_request: Option<Ask>,
     /// The caret was moved by the application, not by the user, and the view has to bring it
     /// into sight even though no key was pressed.
     ///
@@ -90,6 +152,7 @@ impl EditorBuffer {
             line_ends: Vec::new(),
             max_line_chars: 0,
             nav_request: None,
+            menu_request: None,
 
             hover: None,
             occurrences: Vec::new(),
@@ -196,6 +259,16 @@ impl EditorBuffer {
     /// Takes the pending navigation request, if there is one.
     pub fn take_nav_request(&mut self) -> Option<usize> {
         self.nav_request.take()
+    }
+
+    /// Records what the person chose in the editor's context menu.
+    pub fn request_ask(&mut self, ask: Ask) {
+        self.menu_request = Some(ask);
+    }
+
+    /// Takes the pending menu choice, if there is one.
+    pub fn take_menu_request(&mut self) -> Option<Ask> {
+        self.menu_request.take()
     }
 
     /// The caret as a byte offset, for anything that speaks bytes.
@@ -1029,4 +1102,29 @@ fn common_edit(old: &str, new: &str) -> Option<(usize, usize, usize)> {
     }
 
     Some((prefix, old_bytes.len() - suffix, new_bytes.len() - suffix))
+}
+
+#[cfg(test)]
+mod menu_rule_tests {
+    use super::on_a_symbol;
+
+    #[test]
+    fn the_caret_stands_on_a_name_only_when_there_is_one() {
+        let text = "let value = 1;";
+        assert!(on_a_symbol(text, 4), "on the `v`");
+        assert!(on_a_symbol(text, 9), "after the `e`");
+        assert!(!on_a_symbol(text, 10), "on the space");
+        assert!(!on_a_symbol(text, 13), "nowhere near a word");
+        assert!(!on_a_symbol("", 0), "an empty file");
+    }
+
+    #[test]
+    fn a_cyrillic_name_counts_as_a_name() {
+        // `пусть` is five Cyrillic letters, two bytes each: `и` starts at byte 11, not 7.
+        assert!(on_a_symbol("пусть имя = 1;", 11), "on the `и`");
+        assert!(
+            on_a_symbol("пусть имя = 1;", 7),
+            "inside `т`, not on a boundary"
+        );
+    }
 }
