@@ -1253,7 +1253,14 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                         changed = true;
                     }
                     Key::Enter => {
-                        buffer.insert_text("\n");
+                        // The new line keeps the indentation of the line it leaves, and stands one
+                        // level deeper when that line opens a block: Enter after `fn a() {` writes
+                        // the body where the body goes.
+                        let indent = crate::editor::indentation_for_a_new_line(
+                            buffer.text(),
+                            buffer.caret_byte(),
+                        );
+                        buffer.insert_text(&format!("\n{indent}"));
                         changed = true;
                     }
                     // `Shift` is the editor's own (it takes an indent off); a command modifier is

@@ -312,12 +312,7 @@ impl App {
         self.state.git.follow(root);
         let config = self.state.config_dir.clone();
         self.state.agent.follow(root, &config);
-        // The keys the completion list takes while it is open — the arrows, Enter and Escape — are
-        // read before the window's own table: while a list is up, Enter takes a word rather than
-        // starting a new line.
-        if !crate::ui::completion::handle_keys(ui, &mut self.state.completion) {
-            self.handle_keys(ui);
-        }
+        self.handle_keys(ui);
         self.state.publish_completions();
         self.state.poll_fs_events();
         self.state.poll_lsp();
@@ -421,16 +416,24 @@ impl App {
 
         self.frames += 1;
         self.state.poll_index();
-        // One ask, one command. The direction comes from the window, which is the only place that
-        // knows whether it already stands in full screen; the ask is read and cleared together, so a
-        // key pressed once sends one command and not one per frame.
-        if std::mem::take(&mut self.state.fullscreen_asked) {
-            let in_full_screen = ui
-                .ctx()
-                .input(|input| input.viewport().fullscreen)
-                .unwrap_or(false);
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!in_full_screen));
+        // The keys the completion list takes while it is open — the arrows, Enter and Escape — are read
+        // here, at the very start of the frame: the editor is drawn later and takes the arrows for
+        // itself, so a list read after it never sees them. Andy: "выбор варианта автодополнения возможен
+        // только с помощью мышки" — the arrows were walking the caret, and the list closed behind it.
+        if crate::ui::completion::handle_keys(ui, &mut self.state.completion) {
+            // The list took them: nothing else in the window may.
+        } else {
+            // One ask, one command. The direction comes from the window, which is the only place that
+            // knows whether it already stands in full screen; the ask is read and cleared together, so a
+            // key pressed once sends one command and not one per frame.
+            if std::mem::take(&mut self.state.fullscreen_asked) {
+                let in_full_screen = ui
+                    .ctx()
+                    .input(|input| input.viewport().fullscreen)
+                    .unwrap_or(false);
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!in_full_screen));
+            }
         }
         let mut closing = ui.ctx().input(|input| input.viewport().close_requested());
         if self.state.quit_requested {

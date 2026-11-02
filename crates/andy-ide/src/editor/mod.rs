@@ -13,6 +13,48 @@ use ide_syntax::{Highlighter, Language};
 /// Spaces per indent level; also how wide a tab is drawn.
 pub const INDENT_WIDTH: usize = 4;
 
+/// What a new line starts with, when Enter is pressed with the caret where it stands.
+///
+/// The line the caret is on gives the indentation, because that is the line the person is writing
+/// inside — and one level more when that line opens something (`{`, `(` or `[` at its end), so that
+/// Enter after `fn a() {` writes the body where the body goes. Right in front of a lone closing
+/// bracket one level comes off, which puts the bracket at the level it closes.
+///
+/// A line holding nothing but its own indentation is looked through to the last line above that holds
+/// something: a person pressing Enter twice means "the same again", not "nothing".
+pub fn indentation_for_a_new_line(text: &str, caret: usize) -> String {
+    let head = &text[..caret.min(text.len())];
+    let mut line = head.rsplit('\n').next().unwrap_or("");
+    if line.trim().is_empty() {
+        let above = &head[..head.len() - line.len()];
+        line = above
+            .rsplit('\n')
+            .find(|candidate| !candidate.trim().is_empty())
+            .unwrap_or(line);
+    }
+    let base: String = line
+        .chars()
+        .take_while(|ch| *ch == ' ' || *ch == '\t')
+        .collect();
+    let opens = matches!(
+        line.trim_end().chars().last(),
+        Some('{') | Some('(') | Some('[')
+    );
+    let mut indent = if opens {
+        format!("{base}{}", " ".repeat(INDENT_WIDTH))
+    } else {
+        base.clone()
+    };
+    let closer = matches!(
+        text[caret.min(text.len())..].chars().next(),
+        Some('}') | Some(')') | Some(']')
+    );
+    if closer && indent.len() >= INDENT_WIDTH && indent.chars().all(|ch| ch == ' ') {
+        indent.truncate(indent.len() - INDENT_WIDTH);
+    }
+    indent
+}
+
 use self::edit::Motion;
 
 /// What the editor's context menu asks the window to do.
@@ -965,6 +1007,46 @@ mod indent_tests {
         buf.outdent();
         assert_eq!(buf.text(), "keep\n    change\n");
         assert_eq!(buf.caret(), 0);
+    }
+
+    #[test]
+    fn a_new_line_keeps_the_indentation_of_the_line_it_leaves() {
+        let text = "    let a = 1;\n";
+        assert_eq!(indentation_for_a_new_line(text, text.len()), "    ");
+        let flat = "let a = 1;\n";
+        assert_eq!(indentation_for_a_new_line(flat, flat.len()), "");
+    }
+
+    #[test]
+    fn a_new_line_stands_one_level_deeper_inside_a_block() {
+        let opened = "fn a() {\n";
+        assert_eq!(indentation_for_a_new_line(opened, opened.len()), "    ");
+        let inside = "    if x {\n";
+        assert_eq!(
+            indentation_for_a_new_line(inside, inside.len()),
+            "        ",
+            "a block inside a block is one level deeper than the line that opened it"
+        );
+    }
+
+    #[test]
+    fn a_new_line_before_a_closing_brace_stands_at_the_braces_own_level() {
+        let text = "fn a() {\n    }";
+        assert_eq!(
+            indentation_for_a_new_line(text, text.len() - 1),
+            "",
+            "the closing brace must come back to the level it closes"
+        );
+    }
+
+    #[test]
+    fn a_fresh_line_looks_through_to_the_line_above() {
+        let text = "    if x {\n        \n";
+        assert_eq!(
+            indentation_for_a_new_line(text, text.len()),
+            "        ",
+            "Enter twice means the same again, not nothing"
+        );
     }
 
     #[test]
