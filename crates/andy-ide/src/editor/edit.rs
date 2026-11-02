@@ -44,12 +44,38 @@ pub fn apply(
         Motion::Down => vertical(doc, line, col, goal, 1),
         Motion::WordLeft => (word_left(doc, caret), None),
         Motion::WordRight => (word_right(doc, caret), None),
-        Motion::Home => (doc.line_col_to_char(line, 0), None),
+        Motion::Home => (home_stop(doc, line, col), None),
         Motion::End => (doc.line_col_to_char(line, line_len(doc, line)), None),
         Motion::DocStart => (0, None),
         Motion::DocEnd => (len, None),
         Motion::PageUp(rows) => vertical(doc, line, col, goal, -(rows as isize)),
         Motion::PageDown(rows) => vertical(doc, line, col, goal, rows as isize),
+    }
+}
+
+/// Where the Home key stops on this line.
+///
+/// The three stops every editor has: the first letter of the line, the line's own edge, and the start of the
+/// text. Andy: "при нажатии на клавишу Home, если текстовый курсор находится дальше начала текста в строке, он
+/// должен перемещаться на начало текста; если он находится в начале текста или левее — в начало строки; если
+/// находится в начале строки — на начало текста".
+fn home_stop(doc: &Document, line: usize, col: usize) -> usize {
+    let Some(text) = doc.line(line) else {
+        return doc.line_col_to_char(line, 0);
+    };
+    // The first letter: the first column that is neither a space nor a tab. A line of nothing but spaces has
+    // no first letter of its own, and its only stop is its edge.
+    let first = text
+        .chars()
+        .position(|ch| ch != ' ' && ch != '\t')
+        .unwrap_or(0)
+        .min(line_len(doc, line));
+    if col > first {
+        doc.line_col_to_char(line, first)
+    } else if col > 0 {
+        doc.line_col_to_char(line, 0)
+    } else {
+        0
     }
 }
 
@@ -145,6 +171,34 @@ fn word_right(doc: &Document, caret: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_home_key_stops_three_times() {
+        let d = Document::new("    let x = 1;\nnext\n");
+        // Past the first letter: to the first letter of the line.
+        assert_eq!(
+            apply(&d, d.line_col_to_char(0, 10), None, Motion::Home).0,
+            d.line_col_to_char(0, 4)
+        );
+        // At the first letter: to the line's edge.
+        assert_eq!(apply(&d, d.line_col_to_char(0, 4), None, Motion::Home).0, 0);
+        // Left of it, inside the indent: to the line's edge as well.
+        assert_eq!(apply(&d, d.line_col_to_char(0, 2), None, Motion::Home).0, 0);
+        // At the edge: to the start of the text.
+        assert_eq!(apply(&d, 0, None, Motion::Home).0, 0);
+        // On a later line the line has no indent of its own, so the second step is its edge and the third is
+        // the start of the text.
+        assert_eq!(
+            apply(&d, d.line_col_to_char(1, 2), None, Motion::Home).0,
+            d.line_col_to_char(1, 0),
+            "a line whose first letter is its edge stopped at that edge"
+        );
+        assert_eq!(
+            apply(&d, d.line_col_to_char(1, 0), None, Motion::Home).0,
+            0,
+            "at the edge of a later line the caret did not go to the start of the text"
+        );
+    }
+
     use super::*;
 
     fn doc(text: &str) -> Document {
