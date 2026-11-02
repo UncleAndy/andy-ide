@@ -400,7 +400,17 @@ impl Hover {
                         .max_height(room)
                         .show(ui, |ui| {
                             if let Some(signature) = &signature {
-                                ui.label(egui::RichText::new(signature).monospace());
+                                // The key words of a hint: the name and the shape it is written in are what a
+                                // person looks for, and the prose below is what they read afterwards. So the
+                                // signature is drawn in the theme's own bright colour, and the description is
+                                // left as it was. Andy: "во всех всплывающих подсказках по методам или
+                                // переменным ключевые слова надо подсвечивать ярче, а описание можно и так как
+                                // сейчас".
+                                ui.label(
+                                    egui::RichText::new(signature)
+                                        .monospace()
+                                        .color(ui.visuals().strong_text_color()),
+                                );
                             }
                             if !prose.is_empty() {
                                 if signature.is_some() {
