@@ -221,7 +221,10 @@ impl Completion {
             self.selected = 0;
             // A word the person is writing is worth asking about; one the caret only arrived at is not.
             self.arming = typing;
-            if !typing {
+            // And a word that is gone — the last letter deleted — has nothing left to offer: a list still
+            // standing over it belongs to letters that are no longer there. Andy: "после удаления
+            // последнего символа окно подсказки должно скрыться, а оно всё равно висит".
+            if !typing || self.word.is_none() {
                 self.offers.clear();
             }
         }
@@ -283,6 +286,11 @@ impl Completion {
     pub fn answer(&mut self, place: Place, items: Vec<lsp_types::CompletionItem>) {
         let current = self.place.as_ref().is_some_and(|here| here == &place);
         if !current {
+            return;
+        }
+        // An answer arriving after the word has been deleted has no letters to belong to, whatever place
+        // it names.
+        if self.word.is_none() {
             return;
         }
         let prefix = self
@@ -485,6 +493,43 @@ mod tests {
         assert!(
             !worth_asking("let self . thing", 4),
             "a dot elsewhere in the line is not a place"
+        );
+    }
+
+    #[test]
+    fn a_word_deleted_to_nothing_takes_the_list_with_it() {
+        let item = |label: &str| lsp_types::CompletionItem {
+            label: label.to_owned(),
+            ..Default::default()
+        };
+        let mut list = Completion::new();
+        list.look_at("let par", 7, place(), 0.0, 1);
+        list.answer(place(), vec![item("part")]);
+        assert!(list.is_open(), "the list did not open over a written word");
+
+        // Letters go one at a time: while any is left the list stays, and the last one takes it away.
+        list.look_at("let pa", 6, place(), 0.1, 2);
+        list.answer(place(), vec![item("part")]);
+        assert!(
+            list.is_open(),
+            "the list closed while letters were still there"
+        );
+        list.look_at("let p", 5, place(), 0.2, 3);
+        list.answer(place(), vec![item("part")]);
+        assert!(
+            list.is_open(),
+            "the list closed while letters were still there"
+        );
+        list.look_at("let ", 4, place(), 0.3, 4);
+        assert!(
+            !list.is_open(),
+            "the list stayed over a word that had been deleted to nothing"
+        );
+        // And an answer that arrives after that is not shown either.
+        list.answer(place(), vec![item("part")]);
+        assert!(
+            !list.is_open(),
+            "an answer arriving after the deletion put the list back"
         );
     }
 
