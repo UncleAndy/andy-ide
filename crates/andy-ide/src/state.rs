@@ -605,7 +605,8 @@ impl AppState {
         };
         let text = buffer.text().to_owned();
         let caret = buffer.caret_byte();
-        self.completion.look_at(&text, caret, place, now);
+        let typing = buffer.typed;
+        self.completion.look_at(&text, caret, place, now, typing);
         let Some(place) = self.completion.due(now) else {
             return self.completion.wait(now);
         };

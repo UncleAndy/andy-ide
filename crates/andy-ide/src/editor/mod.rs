@@ -162,6 +162,11 @@ pub struct EditorBuffer {
     pub menu_open: bool,
     /// What the completion list looks like this frame, when there is one.
     pub completions: Option<crate::ui::completion::View>,
+    /// Whether a key wrote text into this file on the frame being drawn.
+    ///
+    /// The completion list is for writing: a word the caret was merely moved into is not being written,
+    /// and asking the server about it is what put a list under every identifier Andy crossed.
+    pub typed: bool,
     /// Byte ranges of every use of the symbol under the caret, in this file.
     /// Emptied by every edit: the offsets stop meaning anything.
     pub occurrences: Vec<(usize, usize)>,
@@ -208,6 +213,7 @@ impl EditorBuffer {
             hover: None,
             menu_open: false,
             completions: None,
+            typed: false,
             occurrences: Vec::new(),
             reveal_caret: false,
             needle: None,

@@ -313,7 +313,6 @@ impl App {
         let config = self.state.config_dir.clone();
         self.state.agent.follow(root, &config);
         self.handle_keys(ui);
-        self.state.publish_completions();
         self.state.poll_fs_events();
         self.state.poll_lsp();
         // Only documents with unsaved edits need telling, and not on every
@@ -416,6 +415,10 @@ impl App {
 
         self.frames += 1;
         self.state.poll_index();
+        // The list is handed to the editor *before* anything draws: the editor reads it while it draws,
+        // and writes back the key the list wants. Publishing after the draw is what lost every key —
+        // the editor never saw the list, and the state read a view that had just been overwritten.
+        self.state.publish_completions();
         // One ask, one command. The direction comes from the window, which is the only place that
         // knows whether it already stands in full screen; the ask is read and cleared together, so a
         // key pressed once sends one command and not one per frame.
