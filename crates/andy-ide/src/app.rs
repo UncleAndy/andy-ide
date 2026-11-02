@@ -3345,9 +3345,9 @@ mod server_warming_tests {
 
     #[test]
     fn a_project_a_server_has_nothing_to_do_with_is_left_alone() {
-        // The server is warmed when the editor shows a file it understands, but only where it has something
-        // to work with: a directory of loose files is not a crate, and a rust-analyzer warmed there would
-        // index what it does not answer about.
+        // The server is warmed when a file is loaded and its language is known, but only where it has
+        // something to work with: a directory of loose files is not a crate, and a rust-analyzer warmed there
+        // would index what it does not answer about.
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("a.rs"), "fn main() {}\n").unwrap();
@@ -3357,7 +3357,6 @@ mod server_warming_tests {
             None,
         );
         app.state.open_file(std::path::Path::new("a.rs"));
-        app.state.warm_the_server();
         assert!(
             app.state.lsp.is_none(),
             "a server was warmed for a project without a marker: {}",
@@ -3371,11 +3370,11 @@ mod server_warming_tests {
     }
 
     #[test]
-    fn the_editor_warms_the_server_before_anything_is_asked() {
-        // A person's first hover after coming back to the editor used to pay the whole cold start of
-        // rust-analyzer, in silence: the server was started by the first question, not by the file being on
-        // screen. That is the wait Andy reported — the one that went with how long ago he had switched to
-        // the editor.
+    fn loading_a_file_warms_its_server_and_the_status_line_then_goes_quiet() {
+        // The server is warmed the moment the file is loaded and its language is recognized — not when the
+        // page is drawn and not at the first question: the waiting belongs behind the reading. And once the
+        // handshake is done the status line stops saying that something is being waited for, because a line
+        // that goes on saying "starting" while the hints already answer is a line that lies.
         let _alone = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
@@ -3396,16 +3395,28 @@ mod server_warming_tests {
             None,
         );
         app.state.open_file(std::path::Path::new("src/main.rs"));
-        app.state.warm_the_server();
-
         assert!(
             app.state.lsp.is_some(),
-            "the file on screen did not warm the server: {}",
+            "loading the file did not warm the server: {}",
             app.state.lsp_status
         );
-        assert_eq!(
-            app.state.status, app.state.lsp_status,
-            "the status line did not say what was being waited for"
+        assert!(
+            app.state.lsp_status.starts_with(server.name),
+            "the loader did not say what is being waited for: {:?}",
+            app.state.lsp_status
+        );
+
+        // Ask it something, so that there is an answer to be the first one.
+        app.state.file_symbols();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !app.state.lsp_status.is_empty() && std::time::Instant::now() < deadline {
+            app.state.poll_lsp();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            app.state.lsp_status.is_empty(),
+            "the status line went on saying {:?} after the server was up",
+            app.state.lsp_status
         );
     }
 }

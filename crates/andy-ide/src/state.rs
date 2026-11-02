@@ -1278,6 +1278,10 @@ impl AppState {
                 self.buffers.insert(buffer_id, buffer);
                 let index = self.tabs.open(rel.to_path_buf(), buffer_id);
                 self.focus_tab(index);
+                // The server is warmed as soon as the file is loaded and its language is known — not when the
+                // page is drawn, and not at the first question: by the time a person has come to the editor the
+                // waiting is behind them, not in front.
+                self.warm_the_server();
                 self.status = display_name(rel);
                 // The project watch does not reach outside the root, so a file from
                 // another crate gets its own directory watched; otherwise the editor
@@ -1724,6 +1728,13 @@ impl AppState {
 
     pub(crate) fn apply_outcome(&mut self, outcome: crate::lsp::Outcome) {
         match outcome {
+            crate::lsp::Outcome::Ready => {
+                // The server is up. Whatever the status line was waiting for is waited for no longer.
+                let said = std::mem::take(&mut self.lsp_status);
+                if self.status == said {
+                    self.status.clear();
+                }
+            }
             crate::lsp::Outcome::Failed(message) => {
                 self.status = message;
                 // A failed request leaves the field open with no answer coming:

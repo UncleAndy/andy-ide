@@ -79,6 +79,9 @@ pub enum Job {
 /// What came back.
 #[derive(Debug, Clone)]
 pub enum Outcome {
+    /// The server has answered its first question: from here on a hint is something it can answer, so
+    /// nothing is being waited for any more.
+    Ready,
     /// A definition request that found something, with the name of the file it
     /// was asked about for the status line.
     Definitions {
@@ -387,10 +390,18 @@ fn work(
         }
         match jobs.recv_timeout(Duration::from_millis(200)) {
             Ok(job) => {
-                if let Some(outcome) = apply(&mut session, job, &mut warm, &stopping)
-                    && outcomes.send(outcome).is_err()
-                {
-                    break;
+                let was_warm = warm;
+                if let Some(outcome) = apply(&mut session, job, &mut warm, &stopping) {
+                    // The first answer is what "warm" means: the handshake alone is no promise — rust-analyzer
+                    // answers `initialize` in milliseconds and then indexes for ten seconds, during which it
+                    // has nothing to say. Said here, the panel stops claiming it is waiting exactly when the
+                    // hints begin to answer, and not a moment before.
+                    if !was_warm && warm {
+                        let _ = outcomes.send(Outcome::Ready);
+                    }
+                    if outcomes.send(outcome).is_err() {
+                        break;
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -1004,6 +1015,11 @@ mod leaving {
     /// The real thing: a rename that keeps retrying, and a window closing on it.
     #[test]
     fn a_busy_worker_does_not_hold_the_window_shut() {
+        // This one starts a server on the whole repository — the most expensive of any check here — and its
+        // rename spends half a minute retrying. It must take the one-at-a-time slot as well, or it starves
+        // the other real-server checks: they share one `CARGO_TARGET_DIR`, and a server indexing a workspace
+        // this size holds the lock they are waiting on.
+        let _alone = crate::test_serial::one_server();
         let _queue = crate::app::REAL_SERVER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
