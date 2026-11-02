@@ -125,11 +125,11 @@ Plan and state:
 
 Milestone M5 (agents) is under way: the panel holds a conversation with an agent, a
 permission is asked before the agent is allowed to do anything, and a second agent is a
-table in `agents.toml`. One thing of the milestone is not there: the context of the open file does not travel with
-a request — `prompt_params` carries the text alone, and a prompt is that one block. An edit is
-the agent's own business, done through the terminal it was configured with: this window neither
-reads nor writes files for it, asks for no confirmation of an edit, and leaves the review of
-what changed to the person.
+table in `agents.toml`. What travels with a request is the person's words: the project root reaches the agent as the
+session's `cwd`, and whatever else it needs it reads itself, through the terminal it was
+configured with. An edit is likewise the agent's own business: this window neither reads nor
+writes files for it, asks for no confirmation of an edit, and leaves the review of what changed
+to the person.
 
 `ide-agents` speaks the Agent Client Protocol over a child process's standard input and
 output — one JSON-RPC message per line, a deadline on every wait, two threads per agent so
