@@ -489,9 +489,9 @@ impl Completion {
         format!(
             "word {} | from {} | armed {} typed {} | open {} ({} of {}) | asked {} | place {}",
             self.word().unwrap_or("-"),
-            self.word_start,
-            self.arming,
-            self.was_typed,
+            self.word_start(),
+            self.arming(),
+            self.was_typed(),
             self.offers.len(),
             self.selected + 1,
             self.offers.len(),
