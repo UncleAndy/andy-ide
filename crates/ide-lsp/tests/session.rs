@@ -17,6 +17,7 @@ static FAKE: ServerConfig = ServerConfig {
     args: &[],
     language_id: "rust",
     extensions: &["rs"],
+    markers: &[],
 };
 
 fn project() -> tempfile::TempDir {
@@ -153,6 +154,7 @@ fn a_server_that_is_not_there_is_an_error_not_a_panic() {
         args: &[],
         language_id: "rust",
         extensions: &["rs"],
+        markers: &[],
     };
     let dir = project();
     let error = match LspSession::start(&MISSING, dir.path()) {
@@ -222,6 +224,7 @@ fn a_server_that_asks_a_question_before_answering_gets_an_answer() {
         args: &["--ask"],
         language_id: "rust",
         extensions: &["rs"],
+        markers: &[],
     };
     let dir = project();
     let mut session = LspSession::start(&ASKING, dir.path()).unwrap();

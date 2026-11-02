@@ -1296,12 +1296,14 @@ impl AppState {
 
     /// Starts the language server of the project once, if there is one installed.
     ///
-    /// Called when a file is opened: a project of text files never pays for a
-    /// server, and the handshake happens on the worker thread anyway.
+    /// Called by the first question about a file, and by the editor warming the server the moment it shows
+    /// one; a file no known server handles is left alone, and the handshake happens on the worker thread.
     fn ensure_lsp(&mut self, rel: &Path) {
-        if self.lsp.is_some() || !self.lsp_status.is_empty() {
+        if self.lsp.is_some() {
             return;
         }
+        // The status line is a record of what was said, not a latch: a note in the project having been
+        // found serverless once must not keep the server from starting for the Rust file opened after it.
         let Some(server) = ide_lsp::server_for(rel) else {
             self.lsp_status = format!("no language server for {}", display_name(rel));
             return;
@@ -1319,6 +1321,47 @@ impl AppState {
         }
         self.lsp_status = format!("{} starting", server.name);
         self.lsp = Some(crate::lsp::LanguageService::start(server, &root));
+    }
+
+    /// Starts the language server for the file in front, the moment the file is on screen.
+    ///
+    /// The server used to be started by the first question — a hint or a jump — so a person's first hover
+    /// after coming back to the editor paid the whole cold start of rust-analyzer in silence, and the wait
+    /// went with how long ago they had switched to the editor rather than with how long the window had been
+    /// up (Andy's report). Warming it here puts that wait behind the reading instead of in front of the
+    /// question.
+    pub fn warm_the_server(&mut self) {
+        if self.lsp.is_some() {
+            return;
+        }
+        let Some(path) = self.active_buffer().map(|buffer| buffer.path.clone()) else {
+            return;
+        };
+        let Some(server) = ide_lsp::server_for(&path) else {
+            return;
+        };
+        // Only where the server has something to work with. A directory of files is not a project, and a
+        // server warmed there spends its start-up indexing what it does not answer about.
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        if !ide_lsp::works_in(server, &root) {
+            return;
+        }
+        // Asked once for this server: the attempt is already written in the status line, and a check of
+        // whether it is installed would otherwise be a walk of `PATH` on every frame.
+        if self.lsp_status.starts_with(server.name) {
+            return;
+        }
+        self.ensure_lsp(&path);
+        if self.lsp.is_some() {
+            self.replay_documents();
+            self.status = self.lsp_status.clone();
+        }
     }
 
     /// Sends the current text of every open document that has unsaved edits.

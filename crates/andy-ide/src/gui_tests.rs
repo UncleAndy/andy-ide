@@ -330,6 +330,37 @@ fn click_at(harness: &mut Harness<'static, App>, pos: egui::Pos2) {
 }
 
 #[test]
+fn the_editor_warms_the_server_as_soon_as_a_file_is_on_screen() {
+    // The server is warmed by the file being on screen, not by the first question: a person coming back to
+    // the editor used to pay the whole cold start of rust-analyzer on their first hover, in silence.
+    let Some(server) = ide_lsp::server_for(Path::new("main.rs")) else {
+        println!("no server is known for Rust: the check was skipped");
+        return;
+    };
+    if !ide_lsp::is_installed(server) {
+        println!("{} is not installed: the check was skipped", server.name);
+        return;
+    }
+    let _alone = crate::test_serial::one_server();
+    let mut gui = Gui::new(
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("main.rs", "fn main() {}\n"),
+        ],
+        Some("main.rs"),
+    );
+    gui.settle();
+    assert!(
+        gui.app().state.lsp.is_some(),
+        "the file on screen did not warm the server: {}",
+        gui.app().state.lsp_status
+    );
+}
+
+#[test]
 fn typing_changes_the_buffer_and_marks_it_modified() {
     let mut gui = Gui::new(&[("a.rs", "one\ntwo\n")], Some("a.rs"));
     // (310, 100) is on the first line of this window: the rows above the text

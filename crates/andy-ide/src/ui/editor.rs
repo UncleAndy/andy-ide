@@ -15,6 +15,9 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // no text under the pointer to ask about, and a spot left over from an earlier frame
     // would follow the pointer into whichever panel the person is actually using.
     state.editor_drawn = true;
+    // The language server is warmed now, not at the first question: a cold rust-analyzer takes ten seconds
+    // or so, and a person who has to wait that out on their first hint has waited for nothing.
+    state.warm_the_server();
     tabs::strip(ui, state);
     ui.separator();
 

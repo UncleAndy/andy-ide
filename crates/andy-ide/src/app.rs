@@ -3326,6 +3326,91 @@ const LSP_ANSWER: std::time::Duration = std::time::Duration::from_secs(300);
 /// without the server the check says so and passes, because the editor must not
 /// depend on one.
 #[cfg(test)]
+mod server_warming_tests {
+    use super::*;
+
+    /// A crate just big enough for rust-analyzer to have something to name.
+    fn crate_with_source(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), source).unwrap();
+        (project, config)
+    }
+
+    #[test]
+    fn a_project_a_server_has_nothing_to_do_with_is_left_alone() {
+        // The server is warmed when the editor shows a file it understands, but only where it has something
+        // to work with: a directory of loose files is not a crate, and a rust-analyzer warmed there would
+        // index what it does not answer about.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "fn main() {}\n").unwrap();
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("a.rs"));
+        app.state.warm_the_server();
+        assert!(
+            app.state.lsp.is_none(),
+            "a server was warmed for a project without a marker: {}",
+            app.state.lsp_status
+        );
+        assert!(
+            app.state.lsp_status.is_empty(),
+            "the status line said {:?} for a project no server is for",
+            app.state.lsp_status
+        );
+    }
+
+    #[test]
+    fn the_editor_warms_the_server_before_anything_is_asked() {
+        // A person's first hover after coming back to the editor used to pay the whole cold start of
+        // rust-analyzer, in silence: the server was started by the first question, not by the file being on
+        // screen. That is the wait Andy reported — the one that went with how long ago he had switched to
+        // the editor.
+        let _alone = crate::test_serial::one_server();
+        let _queue = crate::app::REAL_SERVER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(server) = ide_lsp::server_for(std::path::Path::new("src/main.rs")) else {
+            println!("no server is known for Rust: the check was skipped");
+            return;
+        };
+        if !ide_lsp::is_installed(server) {
+            println!("{} is not installed: the check was skipped", server.name);
+            return;
+        }
+
+        let (project, config) = crate_with_source("fn main() {}\n");
+        let mut app = App::with_config_dir(
+            config.path().to_path_buf(),
+            Some(project.path().to_path_buf()),
+            None,
+        );
+        app.state.open_file(std::path::Path::new("src/main.rs"));
+        app.state.warm_the_server();
+
+        assert!(
+            app.state.lsp.is_some(),
+            "the file on screen did not warm the server: {}",
+            app.state.lsp_status
+        );
+        assert_eq!(
+            app.state.status, app.state.lsp_status,
+            "the status line did not say what was being waited for"
+        );
+    }
+}
+
+#[cfg(test)]
 mod real_navigation_tests {
     use super::*;
 

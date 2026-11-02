@@ -17,7 +17,7 @@ pub mod uri;
 
 pub use client::{INITIALIZE_TIMEOUT, LspSession, REQUEST_TIMEOUT, ServerProcess};
 pub use position::{byte_to_position, position_to_byte};
-pub use registry::{SERVERS, ServerConfig, is_installed, server_for};
+pub use registry::{SERVERS, ServerConfig, is_installed, server_for, works_in};
 pub use uri::{path_to_uri, uri_to_path};
 
 /// Version of the crate, taken from its manifest.

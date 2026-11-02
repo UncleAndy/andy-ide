@@ -18,6 +18,9 @@ pub struct ServerConfig {
     pub language_id: &'static str,
     /// Extensions this server handles, without the dot.
     pub extensions: &'static [&'static str],
+    /// Files whose presence in the project's root say the server has something to work with there: a
+    /// cargo manifest, a `go.mod`, a `package.json`.
+    pub markers: &'static [&'static str],
 }
 
 /// The servers this build knows about.
@@ -28,6 +31,7 @@ pub const SERVERS: &[ServerConfig] = &[
         args: &[],
         language_id: "rust",
         extensions: &["rs"],
+        markers: &["Cargo.toml"],
     },
     ServerConfig {
         name: "pyright",
@@ -35,6 +39,12 @@ pub const SERVERS: &[ServerConfig] = &[
         args: &["--stdio"],
         language_id: "python",
         extensions: &["py"],
+        markers: &[
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+        ],
     },
     ServerConfig {
         name: "typescript-language-server",
@@ -42,6 +52,7 @@ pub const SERVERS: &[ServerConfig] = &[
         args: &["--stdio"],
         language_id: "typescript",
         extensions: &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
+        markers: &["package.json", "tsconfig.json", "jsconfig.json"],
     },
     ServerConfig {
         name: "gopls",
@@ -49,6 +60,7 @@ pub const SERVERS: &[ServerConfig] = &[
         args: &[],
         language_id: "go",
         extensions: &["go"],
+        markers: &["go.mod"],
     },
     ServerConfig {
         name: "clangd",
@@ -56,8 +68,19 @@ pub const SERVERS: &[ServerConfig] = &[
         args: &[],
         language_id: "c",
         extensions: &["c", "h", "cc", "cpp", "cxx", "hpp"],
+        markers: &["compile_commands.json", "CMakeLists.txt", "Makefile"],
     },
 ];
+
+/// Whether the project at `root` is one this server has something to work with: it keeps a marker of its
+/// own there. A server warmed where it has none spends its start-up on indexing a directory it does not
+/// answer about.
+pub fn works_in(server: &ServerConfig, root: &Path) -> bool {
+    server
+        .markers
+        .iter()
+        .any(|marker| root.join(marker).exists())
+}
 
 /// The server for a path, if the extension is one we know.
 pub fn server_for(path: &Path) -> Option<&'static ServerConfig> {
@@ -84,6 +107,28 @@ pub fn is_installed(server: &ServerConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_knows_the_project_it_is_for() {
+        // A server warmed where it has nothing to work with spends its start-up on indexing a directory it
+        // does not answer about, so the marker is what says whether the project is its.
+        let project = tempfile::tempdir().unwrap();
+        let server = server_for(Path::new("src/main.rs")).expect("a server for Rust");
+        assert!(
+            !works_in(server, project.path()),
+            "a directory with nothing in it was taken for a crate"
+        );
+        std::fs::write(project.path().join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(
+            works_in(server, project.path()),
+            "a cargo manifest was not taken for the crate's marker"
+        );
+        let other = server_for(Path::new("main.go")).expect("a server for Go");
+        assert!(
+            !works_in(other, project.path()),
+            "a crate was taken for a Go module"
+        );
+    }
 
     #[test]
     fn rust_files_get_rust_analyzer() {

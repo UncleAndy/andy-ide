@@ -17,6 +17,7 @@ static RUST_ANALYZER: ServerConfig = ServerConfig {
     args: &[],
     language_id: "rust",
     extensions: &["rs"],
+    markers: &[],
 };
 
 const SOURCE: &str = "fn helper() -> u8 {\n    7\n}\n\nfn main() {\n    let value = helper();\n    println!(\"{value}\");\n}\n";
