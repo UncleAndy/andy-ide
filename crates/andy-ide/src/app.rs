@@ -4378,6 +4378,19 @@ mod highlight_tests {
         let (_project, _config, mut app) = app_with_text();
         let caret = TEXT.rfind("make").unwrap();
         app.state.active_buffer_mut().unwrap().set_caret_byte(caret);
+        // The request writes down the text length and the word it is about, and the answer is taken only
+        // if it is about that same text. This check drives the answer alone, so it writes that down here.
+        let (length, word) = {
+            let buffer = app.state.active_buffer().unwrap();
+            let text = buffer.text().to_owned();
+            (
+                text.len(),
+                crate::rename::word_at(&text, buffer.caret_byte())
+                    .map(|(start, end)| text[start..end].to_owned())
+                    .unwrap_or_default(),
+            )
+        };
+        app.state.highlight_asked_word = Some((length, word));
         app.state.apply_outcome(Outcome::Highlights {
             path: std::path::PathBuf::from("a.rs"),
             line: 3,

@@ -176,7 +176,7 @@ pub struct AppState {
     /// — "набираю `pro`, выбираю `project`, удаляю, набираю `pro` снова, и `pro` с параметром `project`
     /// помечаются как одинаковые" — was a text that changed between question and answer, so the old
     /// columns pointed into the new text and one symbol's places were painted over another's.
-    highlight_asked_word: Option<(usize, String)>,
+    pub(crate) highlight_asked_word: Option<(usize, String)>,
     highlight_since: f64,
     /// A question about this caret came back without an answer, and when it was noticed. The
     /// question is put again, but only after a pause: a retry that follows the failure as fast
