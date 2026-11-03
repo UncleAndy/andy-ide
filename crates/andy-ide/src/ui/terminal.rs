@@ -342,7 +342,7 @@ impl Terminal {
         let mut open = false;
         ui.horizontal(|ui| {
             for (index, pane) in self.panes.iter().enumerate() {
-                let title = egui::RichText::new(&pane.title).monospace();
+                let title = egui::RichText::new(tab_label(&pane.title, pane.view)).monospace();
                 let title = if index == self.active {
                     title.strong()
                 } else {
@@ -548,7 +548,12 @@ impl Terminal {
             // The cursor is drawn last so that a block under a glyph is visible. Filled and blinking
             // it says the keys go here; hollow and still it says the terminal is there with the
             // keyboard somewhere else — the one thing a person has to be able to tell at a glance.
-            if !screen.hide_cursor() {
+            // The cursor stands on the living line at the bottom of the session. With the view
+            // raised it is not on screen at all, and a block drawn over history would say the keys
+            // go somewhere they do not. It comes back when the view returns to the bottom — which
+            // any typing does, by jumping there. Andy: «если в нижней строке при прокрутке не
+            // показана именно рабочая строка ввода, нужно ещё и скрывать текстовый курсор».
+            if cursor_is_drawn(screen.hide_cursor(), pane.view) {
                 let (row, col) = screen.cursor_position();
                 let position =
                     rect.left_top() + egui::vec2(col as f32 * cell_width, row as f32 * cell_height);
@@ -1072,6 +1077,33 @@ mod scrollback_tests {
     use super::*;
 
     #[test]
+    fn a_raised_view_says_so_in_its_tab_and_loses_its_cursor() {
+        assert_eq!(
+            tab_label("Terminal 1", 0),
+            "Terminal 1",
+            "at the bottom, the name alone"
+        );
+        assert_eq!(
+            tab_label("Terminal 1", 42),
+            "Terminal 1 (scrolled)",
+            "raised: the sign says the screen is not the end of the session"
+        );
+
+        assert!(
+            cursor_is_drawn(false, 0),
+            "at the bottom the cursor is drawn"
+        );
+        assert!(
+            !cursor_is_drawn(false, 1),
+            "one line up, and the living line is off screen: no cursor over history"
+        );
+        assert!(
+            !cursor_is_drawn(true, 0),
+            "a program that hides it is obeyed as before"
+        );
+    }
+
+    #[test]
     fn a_page_key_with_shift_is_the_terminals_own_and_without_it_is_typed() {
         assert!(walks_the_scrollback(Key::PageUp, Modifiers::SHIFT));
         assert!(walks_the_scrollback(Key::PageDown, Modifiers::SHIFT));
@@ -1206,6 +1238,27 @@ pub fn control_letter(key: Key, modifiers: Modifiers) -> Option<u8> {
         _ => return None,
     };
     Some(letter as u8 - b'a' + 1)
+}
+
+/// What a session's tab says: its own name, and — when its view is raised — that what is on screen
+/// is not the living end of the session.
+///
+/// A word rather than an arrow: the arrow a person would expect here is not in the fonts the window
+/// carries, and a square where a sign should be is worse than no sign at all.
+fn tab_label(title: &str, view: usize) -> String {
+    if view == 0 {
+        title.to_owned()
+    } else {
+        format!("{title} (scrolled)")
+    }
+}
+
+/// Whether the terminal's cursor belongs on screen.
+///
+/// The program may hide its own cursor; and with the view raised the cursor — which stands on the
+/// living line at the bottom — is not among the rows on screen at all.
+fn cursor_is_drawn(screen_hides_it: bool, view: usize) -> bool {
+    !screen_hides_it && view == 0
 }
 
 #[cfg(test)]
