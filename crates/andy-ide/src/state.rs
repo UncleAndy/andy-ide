@@ -731,10 +731,11 @@ impl AppState {
         if waved_away {
             self.signature.wave_away(now.clone());
         }
+        let being_written = now.as_ref().map(|call| call.argument).unwrap_or_default();
         let view = self
             .signature
             .showing(&now)
-            .and_then(crate::ui::signature::view_of);
+            .and_then(|help| crate::ui::signature::view_of(help, being_written));
         if let Some(buffer) = self.active_buffer_mut() {
             buffer.wave_signature = false;
             buffer.signature = view;

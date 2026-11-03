@@ -85,16 +85,18 @@ pub struct View {
 ///
 /// Only the active signature is drawn: a person writing one call needs the one being matched, and
 /// choosing among overloads is a different thing the editor does not offer yet.
-pub fn view_of(help: &lsp_types::SignatureHelp) -> Option<View> {
+pub fn view_of(help: &lsp_types::SignatureHelp, being_written: usize) -> Option<View> {
     let active = help.active_signature.unwrap_or(0) as usize;
     let signature = help
         .signatures
         .get(active)
         .or_else(|| help.signatures.first())?;
-    let active_parameter = signature
-        .active_parameter
-        .or(help.active_parameter)
-        .map(|one| one as usize);
+    // Which parameter is being written is counted from the text — by the same rule that decides
+    // that there is a call at all — rather than taken from the answer. The answer was given for the
+    // place it was asked about, and a moment later that place holds a different parameter: with the
+    // count from the text the highlight moves on the comma itself, without waiting for a new answer.
+    // The protocol allows this: `activeParameter` may be derived by the client.
+    let active_parameter = Some(being_written);
     let parameters = signature.parameters.as_ref();
     // A parameter named by a range is marked inside the signature: this is the highlight Andy asked
     // for — «подсвечивать тот параметр, который сейчас будет вводиться». rust-analyzer names them
@@ -260,6 +262,18 @@ impl Help {
     ) {
         if help.is_none() {
             self.asked = None;
+            // An empty answer for the *same* place does not take away what is already shown: the
+            // signature of the call is the same one, only the parameter being written has moved on,
+            // and that is counted here anyway (`inside_a_call`). Wiping it made the popup vanish the
+            // moment a comma was typed — Andy: «после ввода запятой подсказка просто исчезла». An
+            // empty answer about *another* place clears it, as it always did.
+            if self
+                .answer
+                .as_ref()
+                .is_some_and(|(shown, shown_line, _)| shown == &path && *shown_line == line)
+            {
+                return;
+            }
         }
         self.answer = help.map(|help| (path, line, help));
     }
@@ -501,7 +515,7 @@ mod signature_tests {
         // in this label that is still one unit per letter, but the start is counted from the whole
         // prefix, so a wrong count would cut the text in the middle.
         let help = an_answer("fn f(имя: u32)", Some([5, 13]));
-        let view = view_of(&help).expect("a view comes out");
+        let view = view_of(&help, 0).expect("a view comes out");
         let text: String = view.pieces.iter().map(|(text, _)| text.as_str()).collect();
         assert_eq!(
             text, "fn f(имя: u32)",
@@ -530,7 +544,7 @@ mod signature_tests {
     #[test]
     fn a_parameter_named_by_its_own_text_is_written_under_the_signature() {
         let help = an_answer("fn f(a: u32)", None);
-        let view = view_of(&help).expect("a view comes out");
+        let view = view_of(&help, 0).expect("a view comes out");
         assert_eq!(view.pieces.len(), 1, "nothing to mark inside the signature");
         assert_eq!(
             view.parameters.len(),
@@ -548,7 +562,61 @@ mod signature_tests {
     fn an_answer_with_no_signature_draws_nothing() {
         let mut help = an_answer("fn f(a: u32)", None);
         help.signatures.clear();
-        assert_eq!(view_of(&help), None, "nothing to draw");
+        assert_eq!(view_of(&help, 0), None, "nothing to draw");
+    }
+
+    #[test]
+    fn the_parameter_being_written_comes_from_the_text_and_not_from_the_answer() {
+        // The answer carries two parameters named by their own text, and says the *first* is being
+        // written — because that is where the question was asked. The text says the second: a comma
+        // has been typed since. The count from the text must win, or the highlight would sit one
+        // parameter behind for as long as no new answer arrives.
+        let parameter = |text: &str| lsp_types::ParameterInformation {
+            label: lsp_types::ParameterLabel::Simple(text.to_owned()),
+            documentation: None,
+        };
+        let help = lsp_types::SignatureHelp {
+            signatures: vec![lsp_types::SignatureInformation {
+                label: "fn f(первый: u32, второй: u32)".to_owned(),
+                documentation: None,
+                parameters: Some(vec![parameter("первый: u32"), parameter("второй: u32")]),
+                active_parameter: Some(0),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(0),
+        };
+        let view = view_of(&help, 1).expect("a view comes out");
+        assert_eq!(view.parameters.len(), 2, "both parameters are written out");
+        assert!(
+            !view.parameters[0].1,
+            "the answer's own idea of the parameter is not used"
+        );
+        assert!(
+            view.parameters[1].1,
+            "the count from the text decides: the second"
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_about_the_same_place_keeps_what_is_shown() {
+        let mut help = Help::default();
+        let call = a_call("a.rs", 3, "push(first, ", 12).expect("inside");
+        help.answer(std::path::PathBuf::from("a.rs"), 3, Some(some_answer()));
+        assert!(help.showing(&Some(call.clone())).is_some(), "shown");
+
+        help.answer(std::path::PathBuf::from("a.rs"), 3, None);
+        assert!(
+            help.showing(&Some(call.clone())).is_some(),
+            "an empty answer about the same line leaves the signature on screen"
+        );
+
+        // An empty answer about another place still clears it.
+        help.answer(std::path::PathBuf::from("a.rs"), 9, None);
+        let here = a_call("a.rs", 3, "push(first, ", 12);
+        assert!(
+            help.showing(&here).is_none(),
+            "…and another place clears it"
+        );
     }
 
     #[test]
