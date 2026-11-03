@@ -54,7 +54,7 @@ with its brackets and a place for the caret, and the caret goes inside them — 
 when the method takes no arguments.
 The client today asks a server for a definition, the implementations of a trait, the places
 a symbol is used, the places that call it, the symbols of a file and of the project, a
-hover, the other uses under the caret, a rename and a completion, and for nothing else.
+hover, the other uses under the caret, a rename, a completion and the parameters of the call being written, and for nothing else.
 Acceptance report: [`docs/M2_acceptance.md`](docs/M2_acceptance.md).
 Plan and state:
 [`.hermes/plans/2026-11-02_andy-ide-m2-navigation.md`](.hermes/plans/2026-11-02_andy-ide-m2-navigation.md).
