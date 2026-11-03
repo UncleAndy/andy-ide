@@ -68,6 +68,12 @@ pub struct CommitFile {
     pub text: String,
 }
 
+/// One side of a tree change: the bytes of a file, or nothing when the entry is not a file at all.
+type Content = Option<Vec<u8>>;
+
+/// A tree change as this reader sees it: the path it touched and its two sides.
+type Sides = (PathBuf, Content, Content);
+
 /// How many lines a unified diff adds and removes: the hunk lines, not the `+++`/`---` headings.
 fn count_lines(diff: &str) -> (usize, usize) {
     let mut added = 0;
@@ -206,6 +212,12 @@ impl Repo {
                 gix::object::tree::diff::ChangeDetached::Rewrite { .. } => Kind::Renamed,
             };
             let (path, old, new) = self.sides_of(&change)?;
+            let (Some(old), Some(new)) = (old, new) else {
+                // A path that turned into a directory arrives as its tree, and a tree has no lines to
+                // read: the files inside it are entries of the diff already, and a row of two headers
+                // with nothing under them says less than no row at all.
+                continue;
+            };
             let text = crate::diff::unified(&old, &new, &path);
             let (added, removed) = count_lines(&text);
             files.push(CommitFile {
@@ -222,11 +234,8 @@ impl Repo {
         Ok(files)
     }
 
-    /// The two sides of one tree change, as bytes.
-    fn sides_of(
-        &self,
-        change: &gix::object::tree::diff::ChangeDetached,
-    ) -> Result<(PathBuf, Vec<u8>, Vec<u8>)> {
+    /// The two sides of one tree change, as bytes — `None` for a side that is not a file at all.
+    fn sides_of(&self, change: &gix::object::tree::diff::ChangeDetached) -> Result<Sides> {
         use gix::object::tree::diff::ChangeDetached as Changed;
         let (path, old_id, new_id) = match change {
             Changed::Addition { id, location, .. } => (location, None, Some(*id)),
@@ -240,15 +249,25 @@ impl Repo {
             Changed::Rewrite { id, location, .. } => (location, None, Some(*id)),
         };
         let path = PathBuf::from(String::from_utf8_lossy(path.as_ref()).into_owned());
-        Ok((path, self.blob(old_id)?, self.blob(new_id)?))
+        Ok((path, self.content(old_id)?, self.content(new_id)?))
     }
 
-    /// The bytes of a blob, or nothing when it is not there.
-    fn blob(&self, id: Option<gix::ObjectId>) -> Result<Vec<u8>> {
+    /// The content of one side of a change: the bytes of a file, `None` when the entry is not a file.
+    ///
+    /// A tree diff reports entries that are not files at all. A submodule is a commit and reads the way
+    /// `git diff` writes it (`Subproject commit <id>`); a path that turned from a file into a directory
+    /// arrives as a tree, which has no lines of its own. Reading either through `into_blob` panics —
+    /// "Object must be a blob: Tree(…)" — which is what pressing Enter on such a commit used to do.
+    fn content(&self, id: Option<gix::ObjectId>) -> Result<Content> {
         let Some(id) = id else {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         };
-        Ok(self.inner().find_object(id)?.into_blob().data.to_vec())
+        let object = self.inner().find_object(id)?;
+        Ok(match object.kind {
+            gix::object::Kind::Blob => Some(object.into_blob().data.to_vec()),
+            gix::object::Kind::Commit => Some(format!("Subproject commit {id}\n").into_bytes()),
+            _ => None,
+        })
     }
 }
 
@@ -376,6 +395,91 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, Kind::Added);
         assert_eq!((files[0].added, files[0].removed), (1, 0));
+    }
+
+    #[test]
+    fn a_commit_that_turns_a_file_into_a_directory_is_read_without_a_panic() {
+        // The tree diff reports the path that became a directory as its tree, and reading a tree
+        // through `into_blob` panics ("Object must be a blob: Tree(…)") — which is what pressing
+        // Enter on such a commit did. The tree has no lines of its own; the files inside it do.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("x"), "one\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "a file"]);
+        std::fs::remove_file(root.join("x")).unwrap();
+        std::fs::create_dir(root.join("x")).unwrap();
+        std::fs::write(root.join("x/y"), "two\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "a directory"]);
+
+        let repo = Repo::discover(&root).expect("the repository");
+        let head = repo.log(1).expect("a history")[0].id.clone();
+        let files = repo.commit_files(&head).expect("the files of a commit");
+        let seen: Vec<(String, Kind)> = files
+            .iter()
+            .map(|file| (file.path.display().to_string(), file.kind))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("x".to_owned(), Kind::Deleted),
+                ("x/y".to_owned(), Kind::Added),
+            ],
+            "the change reads as something other than the file going and the file arriving"
+        );
+        assert!(
+            files[0].text.contains("-one"),
+            "the file that went away left no lines: {}",
+            files[0].text
+        );
+    }
+
+    #[test]
+    fn a_submodule_reads_as_the_commit_it_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let first = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .expect("git ran")
+                .stdout,
+        )
+        .trim()
+        .to_owned();
+        // A gitlink entry: what a submodule is in the tree, and an object that is not a blob.
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{first},sub"),
+            ],
+        );
+        git(&root, &["commit", "-q", "-m", "a submodule"]);
+
+        let repo = Repo::discover(&root).expect("the repository");
+        let head = repo.log(1).expect("a history")[0].id.clone();
+        let files = repo.commit_files(&head).expect("the files of a commit");
+        assert_eq!(files.len(), 1, "the submodule is not the one file changed");
+        assert_eq!(files[0].path, PathBuf::from("sub"));
+        assert!(
+            files[0].text.contains("Subproject commit "),
+            "the submodule does not read as its commit: {}",
+            files[0].text
+        );
     }
 
     #[test]

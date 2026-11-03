@@ -143,12 +143,18 @@ impl Repo {
         }
     }
 
+    /// The bytes of an entry, for the diff — a submodule is written as its commit, a directory as
+    /// nothing, because the tree diff reports both and neither is a blob to read.
     fn bytes_of(&self, id: Option<gix::ObjectId>) -> Result<Option<Vec<u8>>> {
         let Some(id) = id else {
             return Ok(None);
         };
         let object = self.inner().find_object(id)?;
-        Ok(Some(object.into_blob().data.to_vec()))
+        Ok(Some(match object.kind {
+            gix::object::Kind::Blob => object.into_blob().data.to_vec(),
+            gix::object::Kind::Commit => format!("Subproject commit {id}\n").into_bytes(),
+            _ => Vec::new(),
+        }))
     }
 }
 
@@ -285,6 +291,39 @@ mod tests {
         assert_eq!(
             changed(&diff),
             vec!["-one".to_owned(), "-two".to_owned(), "-three".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_staged_submodule_is_read_as_the_commit_it_points_at() {
+        // A submodule is a gitlink entry, and its object is a commit: reading it as a blob panics.
+        let (_dir, root) = scratch();
+        let first = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .expect("git ran")
+                .stdout,
+        )
+        .trim()
+        .to_owned();
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{first},sub"),
+            ],
+        );
+
+        let repo = Repo::discover(&root).expect("the repository");
+        let diff = repo.diff(Path::new("sub"), Side::Staged).expect("a diff");
+        assert!(
+            diff.unified.contains("Subproject commit "),
+            "the submodule does not read as its commit: {}",
+            diff.unified
         );
     }
 
