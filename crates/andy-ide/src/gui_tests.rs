@@ -5633,6 +5633,93 @@ mod the_git_panel {
     }
 
     #[test]
+    fn a_double_click_on_a_commit_opens_what_it_changed() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(gui._project.path(), "second");
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        let hash = gui.app().state.git.commits[0].short.clone();
+        gui.harness.get_by_label(&hash).click();
+        gui.settle();
+        gui.harness.get_by_label(&hash).click();
+        gui.settle();
+        gui.settle();
+
+        let opened = gui
+            .app()
+            .state
+            .git
+            .diff
+            .clone()
+            .expect("a double click did not read the commit");
+        assert!(
+            !opened.files.is_empty(),
+            "the commit opened without the files it changed"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("+two").is_some(),
+            "the diff of the commit is not on screen"
+        );
+    }
+
+    #[test]
+    fn the_line_between_the_files_and_the_diff_can_be_moved() {
+        let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("b.txt"), "one\nthree\n").unwrap();
+        commit_all(&root, "second");
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+
+        let line = gui
+            .harness
+            .ctx
+            .read_response(crate::ui::diff::split_id())
+            .expect("there is no line between the list and the diff")
+            .rect;
+        let start = line.center();
+        gui.harness.drag_at(start);
+        gui.harness
+            .event(egui::Event::PointerMoved(start - egui::vec2(70.0, 0.0)));
+        gui.settle();
+        gui.harness.drop_at(start - egui::vec2(70.0, 0.0));
+        gui.settle();
+
+        assert!(
+            gui.app().state.git.diff_split.is_some(),
+            "the drag left no width behind"
+        );
+        let moved = gui
+            .harness
+            .ctx
+            .read_response(crate::ui::diff::split_id())
+            .expect("the line is gone after the drag")
+            .rect
+            .center()
+            .x;
+        assert!(
+            moved < start.x - 40.0,
+            "the line did not follow the hand: {start:?} → {moved}"
+        );
+    }
+
+    #[test]
     fn a_change_is_listed_by_the_whole_path_git_prints() {
         let mut gui = managed(&[("src/deep/a.txt", "one\n")], Some("src/deep/a.txt"));
         std::fs::write(gui._project.path().join("src/deep/a.txt"), "one\ntwo\n").unwrap();

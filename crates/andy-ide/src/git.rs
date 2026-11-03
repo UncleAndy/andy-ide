@@ -70,6 +70,15 @@ pub struct GitState {
     /// Whether the panel shows the history instead of the changes. One tab, two windows onto the
     /// same repository.
     pub history: bool,
+    /// The width the list of a commit's files was dragged to, in points: a deep path wants a wide
+    /// list and a diff wants the room, and only the person knows which they are reading.
+    pub diff_split: Option<f32>,
+    /// The last click on a commit: which one, and when.
+    ///
+    /// A second click on the same row inside the window is a double click, and it is counted here
+    /// because egui counts clicks per widget id: a row that is rebuilt every frame is not the same
+    /// widget to it, so `response.double_clicked()` never fired on the history list.
+    last_click: Option<(String, f64)>,
     /// What went wrong on the last read, if anything.
     pub error: Option<String>,
     /// The message being written for the next commit.
@@ -167,6 +176,24 @@ impl GitState {
             }
             Err(error) => self.error = Some(format!("{error}")),
         }
+    }
+
+    /// Whether a click on the commit with this id is the second of a double click.
+    ///
+    /// The window is the one the desktop uses; a third click starts counting again, so a triple click
+    /// is one double click and one single, not two doubles.
+    pub fn clicked_twice(&mut self, id: &str, now: f64) -> bool {
+        const WINDOW: f64 = 0.4;
+        let twice = self
+            .last_click
+            .as_ref()
+            .is_some_and(|(last, at)| last == id && now - at <= WINDOW);
+        self.last_click = if twice {
+            None
+        } else {
+            Some((id.to_owned(), now))
+        };
+        twice
     }
 
     /// The staged half of the list.

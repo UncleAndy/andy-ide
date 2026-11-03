@@ -106,6 +106,11 @@ pub fn body(ui: &mut Ui, state: &mut AppState) {
                 if response.clicked() {
                     clicked = Some(index);
                 }
+                // A double click is the same wish as `Enter`, and a mouse should not have to reach
+                // for the keyboard to open what it already pointed at.
+                // The double click is counted after the list is drawn (see `clicked_twice`): a row
+                // that is rebuilt every frame is not one widget to egui, so `double_clicked` stays
+                // false however fast the two clicks come.
                 if walked && Some(index) == selected {
                     // A selection the keys walked to has to be on screen: a row that is selected
                     // out of sight is a list that answers a question nobody can see.
@@ -115,6 +120,11 @@ pub fn body(ui: &mut Ui, state: &mut AppState) {
         });
     if let Some(index) = clicked {
         state.git.commit_selected = Some(index);
+        let id = state.git.commits[index].id.clone();
+        let now = ui.input(|input| input.time);
+        if state.git.clicked_twice(&id, now) {
+            state.git.open_selected_commit();
+        }
     }
 }
 
@@ -126,8 +136,16 @@ pub fn body(ui: &mut Ui, state: &mut AppState) {
 /// list can be found without making every row wider.
 fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
     let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-    let (rect, response) = ui.allocate_exact_size(
+    let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    // The row keeps its identity from frame to frame: a double click is counted per widget, and an
+    // automatic id that shifts with the frame count makes two clicks on one row two clicks on two
+    // different widgets — which is exactly why a double click on a commit opened nothing.
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("commit_row", &commit.id)),
         egui::Sense::click(),
     );
     if selected {
@@ -174,7 +192,7 @@ fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
     );
 
     response.on_hover_text(format!(
-        "{} · {} · {}\nArrow keys walk the list, Enter shows what it changed",
+        "{} · {} · {}\nArrow keys walk the list, Enter or a double click shows what it changed",
         commit.id,
         commit.author,
         when(commit.when)

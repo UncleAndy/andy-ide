@@ -16,10 +16,20 @@ const REMOVED: Color32 = Color32::from_rgb(196, 84, 84);
 const HEADER: Color32 = Color32::from_rgb(120, 160, 210);
 
 /// How much of the pane the list of a commit's files takes: about a third, kept between two bounds
-/// so that a deep path is readable and the diff beside it still has room.
+/// so that a deep path is readable and the diff beside it still has room. Once a person drags the
+/// line, what they chose is what the list gets.
 const FILES_SHARE: f32 = 0.36;
 const FILES_LEAST: f32 = 190.0;
-const FILES_MOST: f32 = 460.0;
+/// The strip a hand takes hold of between the list and the diff, and the room the diff keeps
+/// whatever the list is dragged to.
+const HANDLE: f32 = 7.0;
+const DIFF_LEAST: f32 = 200.0;
+
+/// The identity of the line between the list and the diff: a drag needs one, and a check needs a way
+/// to find it.
+pub(crate) fn split_id() -> egui::Id {
+    egui::Id::new("git_diff_split")
+}
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     if let Some(error) = &state.git.diff_error {
@@ -47,11 +57,19 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
                 lines(ui, &diff.text, "diff_lines");
             }
         } else {
-            // The files the commit touched on one side, the diff of the one in front on the other.
+            // The files the commit touched on one side, the diff of the one in front on the other,
+            // and a line between them that a hand can move: a deep path wants a wide list, and the
+            // lines of a diff want the room.
             let room = ui.available_width();
             let height = ui.available_height();
-            let list = (room * FILES_SHARE).clamp(FILES_LEAST, FILES_MOST);
+            let most = (room - HANDLE - DIFF_LEAST).max(FILES_LEAST);
+            let list = state
+                .git
+                .diff_split
+                .unwrap_or(room * FILES_SHARE)
+                .clamp(FILES_LEAST.min(most), most);
             let shown = diff.shown.min(diff.files.len() - 1);
+            let mut width = None;
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
                     egui::vec2(list, height),
@@ -69,13 +87,29 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
                             });
                     },
                 );
-                ui.separator();
+                let (strip, _) =
+                    ui.allocate_exact_size(egui::vec2(HANDLE, height), egui::Sense::hover());
+                let handle = ui.interact(strip, split_id(), egui::Sense::click_and_drag());
+                let stroke = if handle.hovered() || handle.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.visuals().widgets.hovered.bg_stroke
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke
+                };
+                ui.painter()
+                    .vline(strip.center().x, strip.y_range(), stroke);
+                if handle.dragged() {
+                    width = Some(list + handle.drag_delta().x);
+                }
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| lines(ui, &diff.files[shown].text, "diff_lines"),
                 );
             });
+            if let Some(width) = width {
+                state.git.diff_split = Some(width);
+            }
         }
     } else {
         ui.add_space(6.0);
