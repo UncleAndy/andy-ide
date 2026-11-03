@@ -5178,7 +5178,11 @@ mod the_git_panel {
             "the checked-out branch is not in the panel"
         );
 
-        gui.harness.get_by_label("Branches").click();
+        assert!(
+            gui.harness.query_by_label("Branches").is_none(),
+            "the panel still has a button of its own for the branches"
+        );
+        gui.harness.get_by_label("main").click();
         gui.settle();
         gui.harness.get_by_label("feature").click();
         gui.settle();
@@ -5212,7 +5216,7 @@ mod the_git_panel {
 
         gui.app_mut().state.git.branch_name = "topic".to_owned();
         gui.settle();
-        gui.harness.get_by_label("Branches").click();
+        gui.harness.get_by_label("main").click();
         gui.settle();
         gui.harness.get_by_label("New branch").click();
         gui.settle();
@@ -5242,7 +5246,7 @@ mod the_git_panel {
         std::fs::write(&file, "one\nwork in progress\n").unwrap();
         show_panel(&mut gui);
 
-        gui.harness.get_by_label("Branches").click();
+        gui.harness.get_by_label("main").click();
         gui.settle();
         gui.harness.get_by_label("feature").click();
         gui.settle();
@@ -5338,13 +5342,10 @@ mod the_git_panel {
             .iter()
             .position(|commit| commit.summary == "second")
             .expect("the commit");
-        let label = format!(
-            "{}  {}  ({})",
-            gui.app().state.git.commits[row].short,
-            "second",
-            "Test"
-        );
-        gui.harness.get_by_label(&label).click();
+        // A row is read as the hash, the names that point at it and the message under them; the
+        // click goes to the hash, which is the one part of it that is different on every row.
+        let hash = gui.app().state.git.commits[row].short.clone();
+        gui.harness.get_by_label(&hash).click();
         gui.settle();
         gui.harness.key_press(egui::Key::Enter);
         gui.settle();
@@ -5369,6 +5370,137 @@ mod the_git_panel {
         assert!(
             gui.app().dock.find_tab(&Tab::History).is_none(),
             "reading a commit opened a tab of its own"
+        );
+    }
+
+    #[test]
+    fn the_history_names_the_pointers_and_is_walked_with_the_keys() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(&root, "second");
+        // What a clone leaves behind: the remote branch, and the symbolic name that says which of
+        // the remote branches is its default. Both point at the newest commit, which is where a
+        // fetched clone has them.
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        // The refs are files the panel reads on its own clock: asking it to look again is what a
+        // fetch does, and it is the difference between a list of names and a stale one.
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        let names: Vec<String> = gui.app().state.git.commits[0]
+            .refs
+            .iter()
+            .map(|mark| mark.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["HEAD", "main", "origin/HEAD", "origin/main"],
+            "the pointers of the newest commit are wrong or out of order"
+        );
+        let hash = gui.app().state.git.commits[0].short.clone();
+        assert!(
+            gui.harness.query_by_label(&hash).is_some(),
+            "the short hash is not drawn beside the commit"
+        );
+        for name in ["HEAD", "origin/main", "origin/HEAD"] {
+            assert!(
+                gui.harness.query_by_label(name).is_some(),
+                "the pointer {name} is not drawn beside the commit"
+            );
+        }
+
+        // The list is walked with the keys, and Enter asks about the row in front.
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.settle();
+        assert_eq!(
+            gui.app().state.git.commit_selected,
+            Some(0),
+            "the first press did not take the first row"
+        );
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.settle();
+        assert_eq!(gui.app().state.git.commit_selected, Some(1));
+        gui.harness.key_press(egui::Key::ArrowUp);
+        gui.settle();
+        assert_eq!(
+            gui.app().state.git.commit_selected,
+            Some(0),
+            "the walk does not go back"
+        );
+        gui.harness.key_press(egui::Key::End);
+        gui.settle();
+        assert_eq!(
+            gui.app().state.git.commit_selected,
+            Some(1),
+            "End does not reach the oldest row"
+        );
+
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+        let diff = gui
+            .app()
+            .state
+            .git
+            .diff
+            .clone()
+            .expect("Enter did not read the commit in front");
+        assert!(
+            diff.text.contains("+one"),
+            "the diff is of another commit: {}",
+            diff.text
+        );
+    }
+
+    #[test]
+    fn a_commit_is_a_hash_with_its_message_under_it() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        // Two lines of one row: the hash on top, the message beneath it and lined up with it.
+        // A row that wrapped its parts into one line would push the names of the pointers out of
+        // the panel, and a message beside the hash would leave no room for either.
+        let hash = gui
+            .harness
+            .get_by_label(&gui.app().state.git.commits[0].short)
+            .rect();
+        let summary = gui.harness.get_by_label("first").rect();
+        assert!(
+            summary.top() > hash.bottom(),
+            "the message is not under the hash: {hash:?} against {summary:?}"
+        );
+        assert!(
+            (summary.left() - hash.left()).abs() < 1.5,
+            "the message is not lined up with the hash: {hash:?} against {summary:?}"
+        );
+    }
+
+    #[test]
+    fn a_change_is_listed_by_the_whole_path_git_prints() {
+        let mut gui = managed(&[("src/deep/a.txt", "one\n")], Some("src/deep/a.txt"));
+        std::fs::write(gui._project.path().join("src/deep/a.txt"), "one\ntwo\n").unwrap();
+        show_panel(&mut gui);
+
+        assert!(
+            gui.harness.query_by_label("M  src/deep/a.txt").is_some(),
+            "the change is not named by the path git prints"
         );
     }
 

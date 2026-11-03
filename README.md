@@ -104,21 +104,30 @@ bit and the list of changes, with `git status`'s two halves kept apart (in the i
 against `HEAD`, on disk against the index), so a file staged and then edited shows
 twice. The `Git` panel sits beside `Problems` and `Terminal` in the bottom strip
 (`Alt+9`), names the branch, groups the changes under the two headings and opens a
-file when its line is clicked; a project that is not a repository says so instead of
-showing an empty list. A single click selects a change, a double click opens the file,
-and `Enter` shows its diff under the list, in the panel itself — both sides read where they
-live, `HEAD`'s tree and the index as objects, the work tree as a file, so looking at a
-diff cannot disturb the work in progress. `Stage`, `Unstage` and `Stage all` move
-changes into the index and `Commit` writes them with the message in the field. Reading
-is native; writing is the real `git`, so hooks, signing and commit templates behave
-exactly as they do on the command line, and a hook's refusal is shown in its own
-words. `History` is the panel's other window — a choice inside the tab, not a tab of its
-own: it lists the last two hundred commits newest first, and `Enter` on one shows what it
-changed in the same pane under the list. A panel that opened another panel would take the
-person away from the list they were reading, and the list is where they were. The
-`Branches` menu switches
-`HEAD` and starts new ones — through the real `git switch`, so a dirty tree that would
-lose work is refused by `git` itself instead of by a guess. In the editor, the margin of
+file when its row is clicked; a project that is not a repository says so instead of
+showing an empty list. A row is the letter `git status` prints, in the colour of what
+happened to the file, then the whole repository-relative path with its directories
+dimmed — the folder above a name is what tells two `mod.rs` apart — and the row itself
+is the click, the whole width of it, so a list is not something a person has to aim at.
+A single click selects a change, a double click opens the file, and `Enter` shows its
+diff under the list, in the panel itself — both sides read where they live, `HEAD`'s
+tree and the index as objects, the work tree as a file, so looking at a diff cannot
+disturb the work in progress. `Stage`, `Unstage` and `Stage all` move changes into the
+index and `Commit` writes them with the message in the field. Reading is native; writing
+is the real `git`, so hooks, signing and commit templates behave exactly as they do on
+the command line, and a hook's refusal is shown in its own words. `History` is the
+panel's other window — a choice inside the tab, not a tab of its own: it lists the last
+two hundred commits newest first, each row the short hash, the names that point at it —
+`HEAD`, `main`, `origin/main`, the symbolic `origin/HEAD`, a tag — and the message under
+them. The arrow keys, `PageUp`/`PageDown` and `Home`/`End` walk the list, the row in
+front is marked and scrolled into sight, and `Enter` on it shows what that commit
+changed in the same pane under the list. A panel that opened another panel would take
+the person away from the list they were reading, and the list is where they were. The
+branch named at the left of the row is itself the menu that switches `HEAD` and starts
+new ones — through the real `git switch`, so a dirty tree that would lose work is
+refused by `git` itself instead of by a guess — and the commands that talk to a remote
+stand behind a line of their own in the corner of the row, because a `Fetch` beside a
+switch reads like one more way to look at the list. In the editor, the margin of
 every open file carries a three-pixel stripe beside each line that the index does not
 have yet — green for a line the file added, blue for one it changed, red where a line
 went away — and staging a file takes the stripes away. A repository with a remote gains

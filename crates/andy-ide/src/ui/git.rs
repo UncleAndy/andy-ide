@@ -4,12 +4,20 @@
 //! Staging and committing are buttons on purpose: they change the repository, and a
 //! gesture that changes something should be one the user can see and aim at.
 
-use egui::Ui;
-use ide_git::{Area, Branch, Change};
+use egui::{Color32, RichText, Ui};
+use ide_git::{Area, Branch, Change, Kind};
 
 use crate::state::{Action, AppState};
 
 use super::{diff, history};
+
+/// The letters `git status` prints, in colours that read on both themes.
+const ADDED: Color32 = Color32::from_rgb(78, 154, 92);
+const MODIFIED: Color32 = Color32::from_rgb(206, 168, 78);
+const DELETED: Color32 = Color32::from_rgb(196, 84, 84);
+const RENAMED: Color32 = Color32::from_rgb(120, 160, 210);
+const CONFLICTED: Color32 = Color32::from_rgb(224, 108, 117);
+const UNTRACKED: Color32 = Color32::from_rgb(150, 152, 156);
 
 /// What the panel was asked to do this frame, applied after the list is drawn.
 enum Asked {
@@ -27,21 +35,13 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
 
     let mut asked = None;
     ui.horizontal(|ui| {
-        match state.git.branch() {
-            Some(branch) => {
-                ui.strong(branch);
-                let total = state.git.changes.len();
-                ui.separator();
-                ui.weak(format!(
-                    "{total} {}",
-                    if total == 1 { "change" } else { "changes" }
-                ));
-            }
-            None => {
-                ui.strong("Git");
-            }
-        }
+        branch_menu(ui, state, &mut asked);
         ui.separator();
+        let total = state.git.changes.len();
+        ui.weak(format!(
+            "{total} {}",
+            if total == 1 { "change" } else { "changes" }
+        ));
         // The two windows this panel has onto the repository, as a choice inside the tab and not
         // as tabs of their own. A panel that opened another panel would take the person away
         // from the list they were reading — and the list is where they were.
@@ -59,8 +59,15 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         {
             state.git.history = true;
         }
-        branches_menu(ui, state, &mut asked);
-        remote_buttons(ui, state);
+        // The commands that change the repository stand apart from the ones that only change what
+        // is on screen: a line between them, and the corner of the row, where an action is looked
+        // for. Side by side with the switches, a `Fetch` read like one more way to look at the list.
+        if state.git.has_remote {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                remote_buttons(ui, state);
+                ui.separator();
+            });
+        }
     });
     ui.separator();
 
@@ -208,26 +215,13 @@ fn changes(ui: &mut Ui, state: &mut AppState) {
                 if changes.is_empty() {
                     continue;
                 }
-                ui.add_space(4.0);
-                ui.weak(title);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.strong(title);
+                    ui.weak(changes.len().to_string());
+                });
                 for change in changes {
-                    // The whole repository-relative path: in a repository the
-                    // directory is the half of the answer that tells two `mod.rs`
-                    // apart, and `git status` prints it for the same reason.
-                    let text = format!("{}  {}", change.kind.letter(), change.path.display());
-                    let response = ui.add(
-                        egui::Label::new(text)
-                            .truncate()
-                            .sense(egui::Sense::click()),
-                    );
-                    if Some(index) == selected {
-                        ui.painter().rect_stroke(
-                            response.rect.expand(2.0),
-                            2.0,
-                            ui.visuals().selection.stroke,
-                            egui::StrokeKind::Inside,
-                        );
-                    }
+                    let response = change_row(ui, Some(index) == selected, change);
                     if response.clicked() {
                         clicked = Some(index);
                     }
@@ -258,6 +252,98 @@ fn changes(ui: &mut Ui, state: &mut AppState) {
     apply(state, asked);
 }
 
+/// One row of the list: the letter `git status` prints, in the colour of what happened, then the
+/// path — the directories dimmed, the name of the file plain.
+///
+/// The whole row is the click, not just the letters: a list where only the text answers is a list
+/// a person misses. The row is one row by construction, so a path too long for the panel is cut
+/// where it ends instead of pushing the next change down while the list is being read.
+fn change_row(ui: &mut Ui, selected: bool, change: &Change) -> egui::Response {
+    let height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if selected {
+        ui.painter().rect_filled(
+            rect,
+            2.0,
+            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
+        );
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+
+    let room = rect.shrink2(egui::vec2(6.0, 0.0));
+    let mut job = change_text(change, ui.style());
+    job.wrap = egui::text::TextWrapping {
+        max_width: room.width(),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(room)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            // Not selectable: a label that takes the pointer for text selection would
+            // swallow the click the row is for.
+            ui.add(egui::Label::new(job).selectable(false));
+        },
+    );
+    response
+}
+
+/// The text of a row, in three parts that read as one: the letter, then the path with its
+/// directories dimmed.
+///
+/// The repository-relative path is whole, because in a repository the directory is the half of the
+/// answer that tells two `mod.rs` apart, and `git status` prints it for the same reason.
+fn change_text(change: &Change, style: &egui::Style) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &format!("{}  ", change.kind.letter()),
+        0.0,
+        egui::TextFormat {
+            font_id: egui::TextStyle::Monospace.resolve(style),
+            color: letter_colour(change.kind),
+            ..Default::default()
+        },
+    );
+    let path = change.path.display().to_string();
+    let plain = egui::TextFormat {
+        font_id: egui::TextStyle::Body.resolve(style),
+        color: style.visuals.strong_text_color(),
+        ..Default::default()
+    };
+    let dimmed = egui::TextFormat {
+        color: style.visuals.weak_text_color(),
+        ..plain.clone()
+    };
+    match path.rfind('/') {
+        Some(at) => {
+            job.append(&path[..=at], 0.0, dimmed);
+            job.append(&path[at + 1..], 0.0, plain);
+        }
+        None => job.append(&path, 0.0, plain),
+    }
+    job
+}
+
+/// The colour of a letter, by what happened to the file.
+fn letter_colour(kind: Kind) -> Color32 {
+    match kind {
+        Kind::Added => ADDED,
+        Kind::Modified | Kind::TypeChanged => MODIFIED,
+        Kind::Deleted => DELETED,
+        Kind::Renamed => RENAMED,
+        Kind::Conflicted => CONFLICTED,
+        Kind::Untracked => UNTRACKED,
+    }
+}
+
 /// Carries out what the buttons were asked to do, once the list has been drawn.
 fn apply(state: &mut AppState, asked: Option<Asked>) {
     match asked {
@@ -272,18 +358,27 @@ fn apply(state: &mut AppState, asked: Option<Asked>) {
     }
 }
 
-/// The branches, and the field that starts a new one.
+/// The branch in front, and the menu that changes it: the branches with the current one marked,
+/// and the field that starts a new one.
 ///
-/// Switching is a menu rather than a keystroke: it moves `HEAD`, and a list with the
-/// current branch marked is the state of the world the choice is made against.
-fn branches_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
+/// The indicator is the door, and there is no second button for the same thing: switching is a
+/// choice made against the state of the world, and the state of the world is the name that is
+/// already on screen.
+fn branch_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
+    let Some(head) = state.git.branch() else {
+        ui.strong("Git");
+        return;
+    };
     // The menu reads the list while the field is edited, so the field is taken out
     // for the duration and put back after: two mutable borrows of the same state
     // would not compile, and one of them being a text buffer is no reason to clone.
     let branches: Vec<Branch> = state.git.branches.clone();
     let mut name = std::mem::take(&mut state.git.branch_name);
+    let mut chosen = None;
+    let mut create = false;
 
-    ui.menu_button("Branches", |ui| {
+    let menu = ui.menu_button(RichText::new(&head).strong(), |ui| {
+        ui.set_min_width(170.0);
         for branch in &branches {
             let label = if branch.is_head {
                 format!("• {}", branch.name)
@@ -291,7 +386,7 @@ fn branches_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
                 branch.name.clone()
             };
             if ui.button(label).clicked() {
-                *asked = Some(Asked::Switch(branch.name.clone()));
+                chosen = Some(branch.name.clone());
                 ui.close();
             }
         }
@@ -302,43 +397,54 @@ fn branches_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
             ui.add(
                 egui::TextEdit::singleline(&mut name)
                     .hint_text("new branch")
-                    .desired_width(140.0),
+                    .desired_width(110.0),
             );
             if ui.button("New branch").clicked() {
-                *asked = Some(Asked::CreateBranch);
+                create = true;
                 ui.close();
             }
         });
     });
+    menu.response
+        .on_hover_text("Switch to another branch, or start a new one");
 
     state.git.branch_name = name;
+    if let Some(chosen) = chosen {
+        *asked = Some(Asked::Switch(chosen));
+    }
+    if create {
+        *asked = Some(Asked::CreateBranch);
+    }
 }
 
 /// Fetch, pull and push — the commands that talk to a remote.
 ///
 /// They run on their own thread, so the whole row is disabled while one is in flight
 /// and the panel says which: a second `fetch` on top of the first would ask the same
-/// question twice and race for the answer.
+/// question twice and race for the answer. Added right to left, because the caller puts them in
+/// the corner of the row: the first one added is the one on the right, and the row still reads
+/// `Fetch Pull Push` from the left.
 fn remote_buttons(ui: &mut Ui, state: &mut AppState) {
-    if !state.git.has_remote {
-        return;
-    }
     let busy = state.git.network_busy;
-    ui.horizontal(|ui| {
-        let fetch = ui.add_enabled(busy.is_none(), egui::Button::new("Fetch"));
-        if fetch.clicked() {
-            state.git.fetch();
-        }
-        let pull = ui.add_enabled(busy.is_none(), egui::Button::new("Pull"));
-        if pull.clicked() {
-            state.git.pull();
-        }
-        let push = ui.add_enabled(busy.is_none(), egui::Button::new("Push"));
-        if push.clicked() {
-            state.git.push();
-        }
-        if let Some(doing) = busy {
-            ui.weak(format!("{doing}…"));
-        }
-    });
+    if ui
+        .add_enabled(busy.is_none(), egui::Button::new("Push"))
+        .clicked()
+    {
+        state.git.push();
+    }
+    if ui
+        .add_enabled(busy.is_none(), egui::Button::new("Pull"))
+        .clicked()
+    {
+        state.git.pull();
+    }
+    if ui
+        .add_enabled(busy.is_none(), egui::Button::new("Fetch"))
+        .clicked()
+    {
+        state.git.fetch();
+    }
+    if let Some(doing) = busy {
+        ui.weak(format!("{doing}…"));
+    }
 }

@@ -4,12 +4,37 @@
 //! points at — the same reader that answers for the work tree, so a commit and a
 //! working change are described in the same words.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 
 use crate::Repo;
+
+/// Which kind of name points at a commit.
+///
+/// The order is the order the panel shows the names in: `HEAD` first, because it is where the
+/// person is, then the branches of this repository, then the remote ones, then the tags.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum RefKind {
+    /// `HEAD` itself.
+    Head,
+    /// A branch of this repository.
+    Local,
+    /// A branch of a remote: `origin/main`.
+    Remote,
+    /// A tag.
+    Tag,
+}
+
+/// One name that points at a commit: `HEAD`, `main`, `origin/main`, `tag: v1.0`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RefMark {
+    /// The name as `git log --decorate` prints it.
+    pub name: String,
+    pub kind: RefKind,
+}
 
 /// One commit, as the history panel shows it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -24,6 +49,8 @@ pub struct Commit {
     pub author: String,
     /// When, in seconds since the epoch.
     pub when: i64,
+    /// The names that point at this commit, in the order they are shown.
+    pub refs: Vec<RefMark>,
 }
 
 impl Repo {
@@ -34,6 +61,9 @@ impl Repo {
             // An unborn `HEAD` has no history yet; that is a state, not a failure.
             Err(_) => return Ok(Vec::new()),
         };
+        // Where the names point is asked once for the whole walk: a ref is a file, and reading
+        // them per commit would read the same handful of files two hundred times.
+        let marks = self.marks()?;
 
         let mut commits = Vec::new();
         for info in head.ancestors().all()?.take(limit) {
@@ -41,15 +71,63 @@ impl Repo {
             let commit = info.object()?;
             let author = commit.author()?;
             let summary = commit.message()?.summary().to_string();
+            let id = info.id();
             commits.push(Commit {
-                id: info.id().to_string(),
-                short: info.id().shorten()?.to_string(),
+                id: id.to_string(),
+                short: id.shorten()?.to_string(),
                 summary,
                 author: String::from_utf8_lossy(author.name.trim()).into_owned(),
                 when: author.time().unwrap_or_default().seconds,
+                refs: marks.get(&id.detach()).cloned().unwrap_or_default(),
             });
         }
         Ok(commits)
+    }
+
+    /// Every name that points at a commit, by commit.
+    ///
+    /// The names a person sees in `git log --decorate`: `HEAD`, the branches, the remote branches
+    /// and the tags. A symbolic reference has no commit of its own — `origin/HEAD` is one — so it
+    /// is peeled to the commit it names and stands beside the name it points at.
+    fn marks(&self) -> Result<HashMap<gix::ObjectId, Vec<RefMark>>> {
+        let mut marks: HashMap<gix::ObjectId, Vec<RefMark>> = HashMap::new();
+        if let Ok(head) = self.inner().head_commit() {
+            marks.entry(head.id().detach()).or_default().push(RefMark {
+                name: "HEAD".to_owned(),
+                kind: RefKind::Head,
+            });
+        }
+
+        for reference in self.inner().references()?.all()? {
+            let mut reference = reference?;
+            let kind = match reference.name().category() {
+                Some(gix::reference::Category::LocalBranch) => RefKind::Local,
+                Some(gix::reference::Category::RemoteBranch) => RefKind::Remote,
+                Some(gix::reference::Category::Tag) => RefKind::Tag,
+                // Notes, the stash and the pseudo-refs of a worktree are not names a person
+                // reads beside a commit.
+                _ => continue,
+            };
+            let short = reference.name().shorten().to_string();
+            let Ok(id) = reference.peel_to_id() else {
+                // A broken reference is the repository's problem, not the panel's: the rest of
+                // the history is still worth showing.
+                continue;
+            };
+            marks.entry(id.detach()).or_default().push(RefMark {
+                name: if kind == RefKind::Tag {
+                    format!("tag: {short}")
+                } else {
+                    short
+                },
+                kind,
+            });
+        }
+
+        for names in marks.values_mut() {
+            names.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+        }
+        Ok(marks)
     }
 
     /// The diff a commit introduced, against its first parent.
@@ -164,6 +242,43 @@ mod tests {
         let (_dir, root) = scratch();
         let repo = Repo::discover(&root).expect("the repository");
         assert_eq!(repo.log(1).expect("a history").len(), 1);
+    }
+
+    #[test]
+    fn the_names_of_the_repository_stand_beside_the_commits_they_point_at() {
+        let (_dir, root) = scratch();
+        // What a clone leaves behind: a remote branch, and the symbolic `origin/HEAD` that names
+        // the remote's default branch. A local branch of the person's own is there too.
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(&root, &["branch", "feature"]);
+        let repo = Repo::discover(&root).expect("the repository");
+
+        let log = repo.log(10).expect("a history");
+        let names = |commit: &Commit| -> Vec<String> {
+            commit
+                .refs
+                .iter()
+                .map(|mark| mark.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&log[0]),
+            vec!["HEAD", "feature", "main", "origin/HEAD", "origin/main"],
+            "the names of the newest commit are wrong or out of order"
+        );
+        assert!(
+            log[1].refs.is_empty(),
+            "a name was hung on a commit it does not point at: {:?}",
+            log[1].refs
+        );
     }
 
     #[test]
