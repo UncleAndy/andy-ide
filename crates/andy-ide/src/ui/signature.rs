@@ -71,9 +71,13 @@ pub fn inside_a_call(text: &str, caret: usize) -> Option<Inside> {
 /// What the editor draws for one answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
-    /// The whole signature of the call, as the server wrote it.
-    pub label: String,
-    /// Each parameter's own text, and whether it is the one being written.
+    /// The signature cut into pieces, with the parameter being written standing out: the piece
+    /// marked `true` is drawn brighter. Every editor marks the parameter *inside* the signature,
+    /// and the protocol gives the range for exactly that.
+    pub pieces: Vec<(String, bool)>,
+    /// The parameters written out one under another, when the server named them by their own text
+    /// rather than by a range — there is then nothing to mark inside the signature, and the
+    /// parameter being written is the only thing that can stand out.
     pub parameters: Vec<(String, bool)>,
 }
 
@@ -91,25 +95,64 @@ pub fn view_of(help: &lsp_types::SignatureHelp) -> Option<View> {
         .active_parameter
         .or(help.active_parameter)
         .map(|one| one as usize);
-    let parameters = signature
-        .parameters
-        .as_ref()
-        .map(|list| {
-            list.iter()
-                .enumerate()
-                .map(|(index, one)| {
-                    (
-                        label_of(one, &signature.label),
-                        Some(index) == active_parameter,
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(View {
-        label: signature.label.clone(),
-        parameters,
-    })
+    let parameters = signature.parameters.as_ref();
+    // A parameter named by a range is marked inside the signature: this is the highlight Andy asked
+    // for — «подсвечивать тот параметр, который сейчас будет вводиться». rust-analyzer names them
+    // this way, and the range counts UTF-16 units, not what Rust counts.
+    let marked = active_parameter.and_then(|active| {
+        let parameter = parameters?.get(active)?;
+        match &parameter.label {
+            lsp_types::ParameterLabel::Simple(_) => None,
+            lsp_types::ParameterLabel::LabelOffsets([start, end]) => {
+                Some(slice_by_units(&signature.label, *start, *end))
+            }
+        }
+    });
+    let pieces = match marked {
+        Some((from, to)) => vec![
+            (signature.label[..from].to_owned(), false),
+            (signature.label[from..to].to_owned(), true),
+            (signature.label[to..].to_owned(), false),
+        ],
+        None => vec![(signature.label.clone(), false)],
+    };
+    let parameters = if pieces.len() > 1 {
+        // Nothing left to add: the parameter is already marked where it stands.
+        Vec::new()
+    } else {
+        parameters
+            .map(|list| {
+                list.iter()
+                    .enumerate()
+                    .map(|(index, one)| {
+                        (
+                            label_of(one, &signature.label),
+                            Some(index) == active_parameter,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(View { pieces, parameters })
+}
+
+/// The byte range of a stretch of the label given in UTF-16 units, as the protocol counts them.
+fn slice_by_units(label: &str, start: u32, end: u32) -> (usize, usize) {
+    let mut units = 0u32;
+    let mut from = 0usize;
+    let mut seen_from = false;
+    for (byte, letter) in label.char_indices() {
+        if units == start && !seen_from {
+            from = byte;
+            seen_from = true;
+        }
+        if units == end {
+            return (from, byte);
+        }
+        units += letter.len_utf16() as u32;
+    }
+    (from, label.len())
 }
 
 /// The text of a parameter's label.
@@ -459,23 +502,46 @@ mod signature_tests {
         // prefix, so a wrong count would cut the text in the middle.
         let help = an_answer("fn f(имя: u32)", Some([5, 13]));
         let view = view_of(&help).expect("a view comes out");
-        assert_eq!(view.label, "fn f(имя: u32)");
-        assert_eq!(view.parameters.len(), 1, "one parameter is drawn");
+        let text: String = view.pieces.iter().map(|(text, _)| text.as_str()).collect();
         assert_eq!(
-            view.parameters[0].0, "имя: u32",
-            "cut out of the signature by the range"
+            text, "fn f(имя: u32)",
+            "the pieces put the signature back together"
         );
-        assert!(view.parameters[0].1, "it is the one being written");
+        assert_eq!(
+            view.pieces
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fn f(", "имя: u32", ")"],
+            "cut into three pieces, at the parameter"
+        );
+        assert_eq!(
+            view.pieces.iter().filter(|(_, active)| *active).count(),
+            1,
+            "exactly one piece is the one being written"
+        );
+        assert!(view.pieces[1].1, "…and it is the middle one");
+        assert!(
+            view.parameters.is_empty(),
+            "with the parameter marked inside, nothing is written under the signature"
+        );
     }
 
     #[test]
-    fn a_parameter_given_as_text_is_taken_as_it_is() {
+    fn a_parameter_named_by_its_own_text_is_written_under_the_signature() {
         let help = an_answer("fn f(a: u32)", None);
         let view = view_of(&help).expect("a view comes out");
+        assert_eq!(view.pieces.len(), 1, "nothing to mark inside the signature");
+        assert_eq!(
+            view.parameters.len(),
+            1,
+            "so the parameters are written under it"
+        );
         assert_eq!(
             view.parameters[0].0, "текст",
             "the text form goes through untouched"
         );
+        assert!(view.parameters[0].1, "and the one being written stands out");
     }
 
     #[test]

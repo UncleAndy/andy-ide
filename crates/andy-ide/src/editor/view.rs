@@ -943,7 +943,19 @@ fn draw_signature_help(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(WIDTH);
                 ui.set_max_width(WIDTH);
-                ui.label(egui::RichText::new(&view.label).color(ui.visuals().strong_text_color()));
+                // The parameter being written stands out inside the signature itself, as every editor
+                // does it: the rest of the signature is quieter than the parameter.
+                ui.horizontal_wrapped(|ui| {
+                    for (text, active) in &view.pieces {
+                        if *active {
+                            ui.label(
+                                egui::RichText::new(text).color(ui.visuals().strong_text_color()),
+                            );
+                        } else {
+                            ui.label(egui::RichText::new(text).weak());
+                        }
+                    }
+                });
                 for (text, active) in &view.parameters {
                     if *active {
                         ui.label(egui::RichText::new(text).color(ui.visuals().strong_text_color()));
