@@ -1043,10 +1043,11 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // What is left on the agent's account, in its provider's own words: the figure here, the
             // whole block on hover. The agent attaches it to the same update that carries the context
             // figure, so it follows every turn without a process of ours.
-            let credits = state.agent.credits.clone();
+            let credits = state.agent.credits_of_the_model();
             let spoke = state.agent.usage.is_some();
+            let elsewhere = state.agent.account_elsewhere();
             let said = credits.clone().unwrap_or_else(|| "$\u{2014}".to_owned());
-            if credits.is_some() || spoke {
+            if credits.is_some() || elsewhere || spoke {
                 ui.separator();
                 if !room_for(ui, &said) {
                     dropped = true;
@@ -1055,6 +1056,11 @@ fn status(ui: &mut Ui, state: &mut AppState) {
                 match &credits {
                     Some(credits) => {
                         ui.label(credits).on_hover_text(account_tip(state));
+                    }
+                    // The agent handed over the accounting of another provider: the figure is not
+                    // the money of this model, and the lines on hover say whose it is.
+                    None if elsewhere => {
+                        ui.weak(&said).on_hover_text(elsewhere_tip(state));
                     }
                     // The agent spoke of the session and said nothing about its account: said in a
                     // word, because a figure that is absent cannot be told from one on its way.
@@ -1087,6 +1093,21 @@ fn account_tip(state: &AppState) -> String {
     if state.agent.credits_stale {
         tip.push_str("\n(the agent says these may be out of date)");
     }
+    tip
+}
+
+/// What the account tooltip says when the block belongs to another provider: whose money the lines
+/// are, and then the lines themselves — the figure is not shown, and nothing the agent said is lost.
+fn elsewhere_tip(state: &AppState) -> String {
+    let owner = crate::credits::named_provider(&state.agent.credits_lines)
+        .or(state.agent.credits_provider.as_deref())
+        .unwrap_or("another provider");
+    let mut tip = format!(
+        "The account: not this model — the agent sent the accounting of {owner}, and the provider of \
+         this model has said nothing about its balance."
+    );
+    tip.push_str("\n\n");
+    tip.push_str(&account_tip(state));
     tip
 }
 

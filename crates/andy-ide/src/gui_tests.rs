@@ -255,6 +255,55 @@ fn the_status_line_shows_what_the_agents_account_says_next_to_the_context() {
 }
 
 #[test]
+fn an_account_of_another_provider_is_not_the_balance_of_this_model() {
+    // Andy works on one provider for days, and the agent keeps its own last accounting, whoever made
+    // it: a turn on another provider can carry the numbers of the one that answered before. A figure
+    // that is not the money of the model in front must not stand in its place — the line shows a dash
+    // and keeps the block on hover, because nothing the agent said is thrown away.
+    let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
+    let path = gui
+        .app_mut()
+        .dock
+        .find_tab(&crate::ui::Tab::Agent)
+        .expect("the agent tab is in the layout");
+    gui.app_mut().dock.set_active_tab(path).unwrap();
+    gui.settle();
+
+    let nous = || ide_agents::AccountUsage {
+        // The agent named the block after the model in front; the block itself says otherwise.
+        provider: Some("opencode-go".to_owned()),
+        lines: vec![
+            "\u{1f4c8} Nous credits".to_owned(),
+            "Provider: nous".to_owned(),
+            "Top-up credits: $3.56".to_owned(),
+        ],
+        stale: false,
+    };
+    let spots = |gui: &mut Gui, text: &str| gui.harness.query_all_by_label_contains(text).count();
+
+    gui.app_mut().state.agent.current_model = Some("opencode-go:deepseek-v4.1-flash".to_owned());
+    gui.app_mut().state.agent.took_account(Some(nous()));
+    gui.settle();
+    assert_eq!(
+        spots(&mut gui, "$3.56"),
+        0,
+        "the balance of another provider is on the line of this model"
+    );
+    assert!(
+        spots(&mut gui, "$\u{2014}") >= 1,
+        "the line says nothing about an account that is not this model"
+    );
+
+    // The same block on the model whose provider it is: shown, as before.
+    gui.app_mut().state.agent.current_model = Some("nous:deepseek/deepseek-v4.1-flash".to_owned());
+    gui.settle();
+    assert!(
+        spots(&mut gui, "$3.56") >= 1,
+        "the balance of this very provider is not shown"
+    );
+}
+
+#[test]
 fn clicking_a_file_in_the_tree_opens_its_tab() {
     let mut gui = Gui::new(&[("a.rs", "fn a() {}\n"), ("notes.txt", "text\n")], None);
     assert_eq!(gui.app().state.tabs.len(), 0, "nothing is open yet");

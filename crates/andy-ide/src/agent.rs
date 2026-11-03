@@ -390,6 +390,10 @@ pub struct AgentState {
     pub credits_lines: Vec<String>,
     /// Whether the agent warns that its lines are out of date.
     pub credits_stale: bool,
+    /// The provider the agent named beside those lines, as it named it. Checked against the model in
+    /// front before the figure is shown: an agent keeps its own last accounting, and a turn on one
+    /// provider can carry the numbers of the provider that answered before it.
+    pub credits_provider: Option<String>,
     /// The conversations the agent keeps for this project, as it last listed them.
     pub sessions: Vec<SessionInfo>,
     /// The names a person gave the conversations, by session id: what the list shows instead of
@@ -525,6 +529,7 @@ impl Default for AgentState {
             credits: None,
             credits_lines: Vec::new(),
             credits_stale: false,
+            credits_provider: None,
             contexts: std::collections::BTreeMap::new(),
             sessions: Vec::new(),
             session_names: std::collections::BTreeMap::new(),
@@ -1431,7 +1436,39 @@ impl AgentState {
         };
         self.credits_stale = account.stale;
         self.credits = crate::credits::balance(&account.lines).map(|(_, amount)| amount);
+        self.credits_provider = account.provider;
         self.credits_lines = account.lines;
+    }
+
+    /// The balance to show for the model in front.
+    ///
+    /// A figure belongs to the provider that reported it, and the model in front is the one whose
+    /// provider would spend it. A block that arrived from another provider — the agent keeps the
+    /// accounting of the last turn, whoever made it — is not the balance of this model, and a
+    /// provider that reports nothing about its balance must not wear the money of somebody else.
+    pub fn credits_of_the_model(&self) -> Option<String> {
+        let Some(provider) = self
+            .current_model
+            .as_deref()
+            .and_then(crate::credits::provider_of)
+        else {
+            // Nothing to check the block against: an agent that names no model is taken at its word.
+            return self.credits.clone();
+        };
+        if !crate::credits::belongs(
+            &self.credits_lines,
+            self.credits_provider.as_deref(),
+            provider,
+        ) {
+            return None;
+        }
+        self.credits.clone()
+    }
+
+    /// Whether the agent has spoken of an account that belongs to a provider other than the one the
+    /// model in front is from: the lines are still worth reading on hover, the figure is not.
+    pub fn account_elsewhere(&self) -> bool {
+        self.credits.is_some() && self.credits_of_the_model().is_none()
     }
 
     /// Whether an agent is running.
