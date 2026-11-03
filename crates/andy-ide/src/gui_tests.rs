@@ -304,10 +304,10 @@ fn an_account_of_another_provider_is_not_the_balance_of_this_model() {
 }
 
 #[test]
-fn a_subscription_that_reports_limits_shows_the_window_that_runs_out_first() {
+fn a_subscription_that_reports_limits_puts_them_in_one_figure() {
     // A provider with no balance reports windows instead - OpenCode Go answers /zen/go/v1/usage with a
-    // rolling, a weekly and a monthly one. The row holds the window a person would hit first, and the
-    // whole block stays on hover, where the resets are.
+    // rolling, a weekly and a monthly one. The row holds all three in one figure, in the order the
+    // provider sent them, and the whole block stays on hover, where the resets are.
     let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
     let path = gui
         .app_mut()
@@ -336,8 +336,8 @@ fn a_subscription_that_reports_limits_shows_the_window_that_runs_out_first() {
     gui.settle();
 
     assert!(
-        spots(&mut gui, "Weekly 40%") >= 1,
-        "the window closest to running out is not on the line"
+        spots(&mut gui, "Limits: R99 W40 M100 (%)") >= 1,
+        "the windows the provider reported are not on the line"
     );
     assert_eq!(
         spots(&mut gui, "$\u{2014}"),

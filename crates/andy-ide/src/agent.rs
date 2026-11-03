@@ -1452,12 +1452,15 @@ impl AgentState {
             .flatten()
     }
 
-    /// The limit of the account that runs out first, when the provider reports windows instead of
-    /// money: a subscription says nothing about a balance and everything about what is left of it.
-    pub fn limits_of_the_model(&self) -> Option<crate::credits::Limit> {
-        self.account_is_the_models()
-            .then(|| crate::credits::tightest(&self.credits_lines))
-            .flatten()
+    /// The limits of the account the agent sent, when that account is the one of the model in front:
+    /// every window the provider reports, in its own order. A subscription says nothing about a
+    /// balance and everything about what is left of it.
+    pub fn limits_of_the_model(&self) -> Vec<crate::credits::Limit> {
+        if self.account_is_the_models() {
+            crate::credits::limits(&self.credits_lines)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Whether the account the agent sent is the one of the model in front. Nothing to check the block

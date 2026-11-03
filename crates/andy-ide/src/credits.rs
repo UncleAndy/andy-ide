@@ -50,10 +50,13 @@ pub struct Limit {
 }
 
 impl Limit {
-    /// The one figure a row can hold: the window first word and what is left of it — `Rolling 42%`.
-    pub fn figure(&self) -> String {
-        let word = self.label.split_whitespace().next().unwrap_or(&self.label);
-        format!("{word} {}%", self.left)
+    /// The window in one letter: `Rolling window` is `R`, `Weekly` is `W`.
+    pub fn initial(&self) -> char {
+        self.label
+            .chars()
+            .next()
+            .map(|letter| letter.to_ascii_uppercase())
+            .unwrap_or('?')
     }
 }
 
@@ -78,9 +81,18 @@ pub fn limits(lines: &[String]) -> Vec<Limit> {
         .collect()
 }
 
-/// The limit that runs out first: the window a person would hit before the others.
-pub fn tightest(lines: &[String]) -> Option<Limit> {
-    limits(lines).into_iter().min_by_key(|limit| limit.left)
+/// The windows as the row shows them: `Limits: R99 W99 M100 (%)` — every window by its letter and what
+/// is left of it, in the order the provider sent them, and the unit once at the end. A row is one row:
+/// three shares with a percent sign each would be half again as wide for the same three numbers.
+pub fn limits_figure(limits: &[Limit]) -> Option<String> {
+    if limits.is_empty() {
+        return None;
+    }
+    let windows: Vec<String> = limits
+        .iter()
+        .map(|limit| format!("{}{}", limit.initial(), limit.left))
+        .collect();
+    Some(format!("Limits: {} (%)", windows.join(" ")))
 }
 
 /// How much of a window is left, read from the words of the provider: `99% remaining`, `42% left`,
@@ -251,8 +263,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            tightest(&go).map(|limit| limit.figure()),
-            Some("Rolling 99%".to_owned())
+            limits_figure(&limits(&go)),
+            Some("Limits: R99 W99 M100 (%)".to_owned())
         );
     }
 
@@ -267,16 +279,19 @@ mod tests {
     }
 
     #[test]
-    fn the_window_closest_to_running_out_is_the_one_the_row_shows() {
+    fn every_window_is_in_the_row_in_the_order_the_provider_sent_them() {
         let block = lines(&[
             "Weekly: 40% remaining",
             "Monthly: 5% remaining",
-            "Rolling: 80% remaining",
+            "Rolling window: 80% remaining",
         ]);
+        // One letter per window, the shares as they came, the unit once: the order is the provider
+        // order, because a row that reorders its own facts reads as a different set of them.
         assert_eq!(
-            tightest(&block).map(|limit| limit.figure()),
-            Some("Monthly 5%".to_owned())
+            limits_figure(&limits(&block)),
+            Some("Limits: W40 M5 R80 (%)".to_owned())
         );
+        assert_eq!(limits_figure(&[]), None);
     }
 
     #[test]

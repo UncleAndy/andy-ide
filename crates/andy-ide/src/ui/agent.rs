@@ -1044,14 +1044,14 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // whole block on hover. The agent attaches it to the same update that carries the context
             // figure, so it follows every turn without a process of ours.
             let credits = state.agent.credits_of_the_model();
-            let limit = state.agent.limits_of_the_model();
+            let limits = state.agent.limits_of_the_model();
             let spoke = state.agent.usage.is_some();
             let elsewhere = state.agent.account_elsewhere();
             // What is left on the account: the money a provider reports, or — a subscription reports
-            // windows instead of a balance — the window that runs out first, the rest on hover.
+            // windows instead of a balance — every window in one figure, the rest on hover.
             let figure = credits
                 .clone()
-                .or_else(|| limit.as_ref().map(crate::credits::Limit::figure));
+                .or_else(|| crate::credits::limits_figure(&limits));
             let said = figure.clone().unwrap_or_else(|| "$\u{2014}".to_owned());
             if figure.is_some() || elsewhere || spoke {
                 ui.separator();
