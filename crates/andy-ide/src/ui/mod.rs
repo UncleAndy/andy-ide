@@ -20,6 +20,7 @@ pub mod status;
 pub mod symbols;
 pub mod tabs;
 pub mod terminal;
+pub mod theme;
 pub mod tree;
 
 use egui::{Id, Ui, WidgetText};

@@ -9110,6 +9110,78 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_light_theme_layers_the_window_instead_of_painting_it_white() {
+        // White everywhere is not a light theme: the panels, the page a person writes on and the
+        // window behind them have to read as three surfaces, or the window is one blank sheet.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.rs", "fn main() {}\n")],
+                Some("a.rs"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.app_mut().state.config.theme = ide_core::Theme::Light;
+        gui.settle();
+        gui.settle();
+
+        // Every large surface painted, by colour: the window, the panels, the page.
+        let mut surfaces: Vec<egui::Color32> = Vec::new();
+        for clipped in &gui.harness.output().shapes {
+            if let egui::Shape::Rect(rect) = &clipped.shape {
+                if rect.fill == egui::Color32::TRANSPARENT
+                    || rect.rect.width() < 150.0
+                    || rect.rect.height() < 100.0
+                {
+                    continue;
+                }
+                if !surfaces.contains(&rect.fill) {
+                    surfaces.push(rect.fill);
+                }
+            }
+        }
+        let paper = crate::ui::theme::visuals(ide_core::Theme::Light).extreme_bg_color;
+        assert!(
+            surfaces.contains(&paper),
+            "the page a person writes on was not painted: {surfaces:?}"
+        );
+        // Three surfaces at the least — the window, a panel, the page — and the page is the
+        // brightest of them, because it is what is read.
+        assert!(
+            surfaces.len() >= 3,
+            "the window is made of {} surfaces: {surfaces:?}",
+            surfaces.len()
+        );
+        let brightest = surfaces
+            .iter()
+            .copied()
+            .max_by(|a, b| luma(*a).partial_cmp(&luma(*b)).expect("a colour"))
+            .expect("a surface");
+        assert_eq!(
+            brightest, paper,
+            "the page is not the brightest surface: {surfaces:?}"
+        );
+        let apart = |a: egui::Color32, b: egui::Color32| {
+            let gap = |x: u8, y: u8| (x as f32 - y as f32).abs();
+            gap(a.r(), b.r())
+                .max(gap(a.g(), b.g()))
+                .max(gap(a.b(), b.b()))
+        };
+        let away = surfaces
+            .iter()
+            .filter(|colour| apart(**colour, paper) >= 10.0)
+            .count();
+        assert!(
+            away >= 2,
+            "only {away} of the surfaces stand clear of the page: {surfaces:?}"
+        );
+    }
+
+    #[test]
     fn the_words_of_the_person_are_readable_in_both_themes() {
         // A request is a block with words on it, and the two colours must not be the same: drawn
         // in a fixed shade of grey, the block was dark on dark the moment the theme was light.
@@ -9172,20 +9244,14 @@ mod the_agent_panel {
             });
             // A colour of their own, not the window's ordinary text: picking a request out of a
             // conversation is something done by looking.
-            let plain = match theme {
-                ide_core::Theme::Dark => egui::Visuals::dark().strong_text_color(),
-                ide_core::Theme::Light => egui::Visuals::light().strong_text_color(),
-            };
+            let plain = crate::ui::theme::visuals(theme).strong_text_color();
             assert_ne!(
                 colour, plain,
                 "in the {theme:?} theme the words of the person are painted like every other word"
             );
             // What the colours really look like: the block's fill is drawn half-transparent over
             // the window, and the words may be drawn over the block in turn.
-            let window = match theme {
-                ide_core::Theme::Dark => egui::Visuals::dark().panel_fill,
-                ide_core::Theme::Light => egui::Visuals::light().panel_fill,
-            };
+            let window = crate::ui::theme::visuals(theme).panel_fill;
             let background = over(background, window);
             let colour = over(colour, background);
             let contrast = (luma(colour) - luma(background)).abs();

@@ -76,8 +76,8 @@ impl Palette {
         search: Color32::from_rgba_premultiplied(255, 232, 150, 160),
         search_current: Color32::from_rgba_premultiplied(255, 196, 60, 220),
         caret: Color32::from_rgb(20, 20, 20),
-        gutter_bg: Color32::from_rgb(240, 240, 240),
-        gutter_fg: Color32::from_rgb(140, 140, 140),
+        gutter_bg: Color32::from_rgb(242, 244, 247),
+        gutter_fg: Color32::from_rgb(138, 145, 154),
         gutter_fg_active: Color32::from_rgb(40, 40, 40),
         mark_added: Color32::from_rgb(40, 130, 60),
         mark_modified: Color32::from_rgb(40, 90, 170),
@@ -169,6 +169,10 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
             ),
             Sense::click_and_drag(),
         );
+        // The paper the file is read on. A panel is a tool's surface and stands a step off the
+        // window; the text is the page, and it is the brightest thing on screen.
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, ui.visuals().extreme_bg_color);
         let origin = rect.min;
         let digits = ((line_count as f32).log10().floor() as usize + 1).max(2);
         let gutter_width = digits as f32 * char_w + 8.0;

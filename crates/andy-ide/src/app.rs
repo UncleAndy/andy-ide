@@ -258,11 +258,11 @@ impl App {
             crate::ui::status::bar(ui, &self.state);
         });
 
-        // The theme reaches both the widgets and the text area.
-        ui.ctx().set_visuals(match self.state.config.theme {
-            ide_core::Theme::Dark => egui::Visuals::dark(),
-            ide_core::Theme::Light => egui::Visuals::light(),
-        });
+        // The theme reaches both the widgets and the text area. The light theme is not egui's own:
+        // its window, its panels and its editor would all be white, and a person cannot see where one
+        // ends and the next begins (see `ui::theme`).
+        ui.ctx()
+            .set_visuals(crate::ui::theme::visuals(self.state.config.theme));
 
         // Around the whole dock the central panel keeps eight points of margin on every side; four is
         // enough to hold it off the window's edge without the band of empty space a person reads as the
