@@ -5565,6 +5565,74 @@ mod the_git_panel {
     }
 
     #[test]
+    fn a_commit_shows_the_files_it_changed_and_the_diff_of_the_one_picked() {
+        let mut gui = managed(&[("a.txt", "one\n"), ("b.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("b.txt"), "one\nthree\n").unwrap();
+        commit_all(&root, "second");
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+        gui.harness.key_press(egui::Key::ArrowDown);
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+
+        let files = gui
+            .app()
+            .state
+            .git
+            .diff
+            .as_ref()
+            .expect("Enter did not read the commit")
+            .files
+            .clone();
+        let paths: Vec<String> = files
+            .iter()
+            .map(|file| file.path.display().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["a.txt".to_owned(), "b.txt".to_owned()],
+            "the files of the commit are wrong"
+        );
+        assert_eq!(
+            (files[0].added, files[0].removed),
+            (1, 0),
+            "the counts of the first file are wrong: {:?}",
+            files[0]
+        );
+        assert!(
+            gui.harness.query_by_label_contains("+two").is_some(),
+            "the diff of the file in front is not on screen"
+        );
+
+        // The second file of the list: a click shows its diff and puts the other one away.
+        let row = "M  b.txt  +1 \u{2212}0";
+        gui.harness.get_by_label(row).click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.git.diff.as_ref().map(|diff| diff.shown),
+            Some(1),
+            "the file that was clicked is not the one in front"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("+three").is_some(),
+            "the diff of the clicked file is not on screen"
+        );
+        assert!(
+            gui.harness.query_by_label_contains("+two").is_none(),
+            "the diff of the file that was put away is still on screen"
+        );
+    }
+
+    #[test]
     fn a_change_is_listed_by_the_whole_path_git_prints() {
         let mut gui = managed(&[("src/deep/a.txt", "one\n")], Some("src/deep/a.txt"));
         std::fs::write(gui._project.path().join("src/deep/a.txt"), "one\ntwo\n").unwrap();

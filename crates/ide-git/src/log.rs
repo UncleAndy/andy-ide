@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 
-use crate::Repo;
+use crate::{Kind, Repo};
 
 /// Which kind of name points at a commit.
 ///
@@ -51,6 +51,38 @@ pub struct Commit {
     pub when: i64,
     /// The names that point at this commit, in the order they are shown.
     pub refs: Vec<RefMark>,
+}
+
+/// One file a commit touched, and what the commit did to it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CommitFile {
+    /// Repository-relative path.
+    pub path: PathBuf,
+    /// What happened to it.
+    pub kind: Kind,
+    /// How many lines the commit added.
+    pub added: usize,
+    /// How many it removed.
+    pub removed: usize,
+    /// The unified diff of this file alone.
+    pub text: String,
+}
+
+/// How many lines a unified diff adds and removes: the hunk lines, not the `+++`/`---` headings.
+fn count_lines(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 impl Repo {
@@ -133,8 +165,21 @@ impl Repo {
     /// The diff a commit introduced, against its first parent.
     ///
     /// A root commit is compared against the empty tree, which is what `git show`
-    /// does: everything it contains reads as added.
+    /// does: everything it contains reads as added. The whole is the parts of `commit_files`
+    /// joined, so the whole and its parts cannot tell different stories.
     pub fn commit_diff(&self, rev: &str) -> Result<String> {
+        Ok(self
+            .commit_files(rev)?
+            .into_iter()
+            .map(|file| file.text)
+            .collect())
+    }
+
+    /// The files a commit touched, each with its own diff and the lines it added and removed.
+    ///
+    /// One walk of the tree diff against the first parent: the list, the counts and the diffs come
+    /// from the same comparison, and a commit is read by walking what it changed.
+    pub fn commit_files(&self, rev: &str) -> Result<Vec<CommitFile>> {
         let commit = self
             .inner()
             .rev_parse_single(rev)
@@ -152,12 +197,29 @@ impl Repo {
             .inner()
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)?;
 
-        let mut out = String::new();
+        let mut files = Vec::new();
         for change in changes {
+            let kind = match &change {
+                gix::object::tree::diff::ChangeDetached::Addition { .. } => Kind::Added,
+                gix::object::tree::diff::ChangeDetached::Deletion { .. } => Kind::Deleted,
+                gix::object::tree::diff::ChangeDetached::Modification { .. } => Kind::Modified,
+                gix::object::tree::diff::ChangeDetached::Rewrite { .. } => Kind::Renamed,
+            };
             let (path, old, new) = self.sides_of(&change)?;
-            out.push_str(&crate::diff::unified(&old, &new, &path));
+            let text = crate::diff::unified(&old, &new, &path);
+            let (added, removed) = count_lines(&text);
+            files.push(CommitFile {
+                path,
+                kind,
+                added,
+                removed,
+                text,
+            });
         }
-        Ok(out)
+        // The order `git show --stat` prints: by path, so two commits that touch the same files
+        // read the same way.
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
     }
 
     /// The two sides of one tree change, as bytes.
@@ -279,6 +341,41 @@ mod tests {
             "a name was hung on a commit it does not point at: {:?}",
             log[1].refs
         );
+    }
+
+    #[test]
+    fn a_commit_is_listed_by_the_files_it_touched_with_what_it_did_to_them() {
+        let (_dir, root) = scratch();
+        let repo = Repo::discover(&root).expect("the repository");
+        let head = repo.log(1).expect("a history")[0].id.clone();
+
+        let files = repo.commit_files(&head).expect("the files of a commit");
+        assert_eq!(files.len(), 1, "the commit touched {} files", files.len());
+        assert_eq!(files[0].path, PathBuf::from("a.txt"));
+        assert_eq!(files[0].kind, Kind::Modified);
+        assert_eq!(
+            (files[0].added, files[0].removed),
+            (1, 0),
+            "the counts of the change are wrong: {:?}",
+            files[0]
+        );
+        assert!(
+            files[0].text.contains("+two"),
+            "the diff of the file is missing: {}",
+            files[0].text
+        );
+    }
+
+    #[test]
+    fn a_file_a_commit_created_reads_as_added() {
+        let (_dir, root) = scratch();
+        let repo = Repo::discover(&root).expect("the repository");
+        let first = repo.log(10).expect("a history")[1].id.clone();
+
+        let files = repo.commit_files(&first).expect("the files of a commit");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].kind, Kind::Added);
+        assert_eq!((files[0].added, files[0].removed), (1, 0));
     }
 
     #[test]

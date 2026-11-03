@@ -19,7 +19,7 @@ pub mod ops;
 pub use blame::BlameLine;
 pub use diff::{FileDiff, LineMark, MarkKind, Side};
 use gix_status::index_as_worktree::{Change as WorktreeChange, EntryStatus};
-pub use log::{Commit, RefKind, RefMark};
+pub use log::{Commit, CommitFile, RefKind, RefMark};
 pub use ops::init;
 
 /// Version of the crate, taken from its manifest.

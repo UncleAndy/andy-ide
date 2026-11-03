@@ -354,7 +354,9 @@ fn change_text(change: &Change, style: &egui::Style) -> egui::text::LayoutJob {
 }
 
 /// The colour of a letter, by what happened to the file.
-fn letter_colour(kind: Kind) -> Color32 {
+///
+/// The diff pane names the files of a commit with the same letters, so it reads this too.
+pub(super) fn letter_colour(kind: Kind) -> Color32 {
     match kind {
         Kind::Added => ADDED,
         Kind::Modified | Kind::TypeChanged => MODIFIED,

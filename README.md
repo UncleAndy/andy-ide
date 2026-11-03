@@ -125,14 +125,17 @@ two hundred commits newest first, each row the short hash, the names that point 
 `HEAD`, `main`, `origin/main`, the symbolic `origin/HEAD`, a tag — the message beside
 them and the day at the right edge of the row. The arrow keys, `PageUp`/`PageDown` and
 `Home`/`End` walk the list, the row in front is marked and scrolled into sight, and
-`Enter` on it shows what that commit changed in the same pane under the list. A panel
-that opened another panel would take the person away from the list they were reading,
-and the list is where they were. The branch named at the left of the row, with a `▾`
-beside it, is itself the menu that switches `HEAD` and starts new ones — through the
-real `git switch`, so a dirty tree that would lose work is refused by `git` itself
-instead of by a guess — and the commands that talk to a remote stand in the corner of
-the row, away from the switches, because a `Fetch` beside a `Changes` reads like one
-more way to look at the list.
+`Enter` on it opens the commit in the same pane under the list: on the left the files it
+changed, each with the letter `git status` would print and the lines it added and
+removed, and beside them the diff of the file in front — a click picks another file,
+because a commit is read by walking what it changed, and six file headers in one string
+are not a list. A panel that opened another panel would take the person away from the
+list they were reading, and the list is where they were. The branch named at the left of
+the row, with a `▾` beside it, is itself the menu that switches `HEAD` and starts new
+ones — through the real `git switch`, so a dirty tree that would lose work is refused by
+`git` itself instead of by a guess — and the commands that talk to a remote stand in the
+corner of the row, away from the switches, because a `Fetch` beside a `Changes` reads
+like one more way to look at the list.
 In the editor, the margin of
 every open file carries a three-pixel stripe beside each line that the index does not
 have yet — green for a line the file added, blue for one it changed, red where a line

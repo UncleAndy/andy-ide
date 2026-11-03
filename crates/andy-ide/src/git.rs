@@ -35,8 +35,12 @@ pub struct DiffView {
     pub title: String,
     /// What it is compared against.
     pub note: String,
-    /// The unified diff.
+    /// The unified diff, whole.
     pub text: String,
+    /// The files of a commit, each with its own diff; empty for a working change.
+    pub files: Vec<ide_git::CommitFile>,
+    /// Which of `files` is on screen.
+    pub shown: usize,
 }
 
 /// The repository behind the current project, and what it last said.
@@ -225,6 +229,8 @@ impl GitState {
                         ide_git::Side::Worktree => "against the index".to_owned(),
                     },
                     text: file.unified,
+                    files: Vec::new(),
+                    shown: 0,
                 });
                 self.diff_error = None;
                 self.diff_open = true;
@@ -236,7 +242,7 @@ impl GitState {
         }
     }
 
-    /// Reads the diff of the selected commit into `diff`.
+    /// Reads the files of the selected commit, each with its own diff, into `diff`.
     pub fn open_selected_commit(&mut self) {
         let Some(commit) = self
             .commit_selected
@@ -248,12 +254,17 @@ impl GitState {
         let Some(repo) = &self.repo else {
             return;
         };
-        match repo.commit_diff(&commit.id) {
-            Ok(text) => {
+        match repo.commit_files(&commit.id) {
+            Ok(files) => {
+                // The whole is kept beside the parts: the pane shows one file's lines, and
+                // anything that asks the commit for its diff as one string still has it.
+                let text: String = files.iter().map(|file| file.text.as_str()).collect();
                 self.diff = Some(DiffView {
                     title: format!("{} {}", commit.short, commit.summary),
                     note: commit.author,
                     text,
+                    files,
+                    shown: 0,
                 });
                 self.diff_error = None;
                 self.diff_open = true;
