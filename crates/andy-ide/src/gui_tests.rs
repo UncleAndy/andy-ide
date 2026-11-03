@@ -304,6 +304,49 @@ fn an_account_of_another_provider_is_not_the_balance_of_this_model() {
 }
 
 #[test]
+fn a_subscription_that_reports_limits_shows_the_window_that_runs_out_first() {
+    // A provider with no balance reports windows instead - OpenCode Go answers /zen/go/v1/usage with a
+    // rolling, a weekly and a monthly one. The row holds the window a person would hit first, and the
+    // whole block stays on hover, where the resets are.
+    let mut gui = Gui::new(&[("a.rs", "fn main() {}\n")], Some("a.rs"));
+    let path = gui
+        .app_mut()
+        .dock
+        .find_tab(&crate::ui::Tab::Agent)
+        .expect("the agent tab is in the layout");
+    gui.app_mut().dock.set_active_tab(path).unwrap();
+    gui.settle();
+
+    let spots = |gui: &mut Gui, text: &str| gui.harness.query_all_by_label_contains(text).count();
+    gui.app_mut().state.agent.current_model = Some("opencode-go:deepseek-v4.1-flash".to_owned());
+    gui.app_mut()
+        .state
+        .agent
+        .took_account(Some(ide_agents::AccountUsage {
+            provider: Some("opencode-go".to_owned()),
+            lines: vec![
+                "\u{1f4c8} Account limits".to_owned(),
+                "Provider: opencode-go".to_owned(),
+                "Rolling window: 99% remaining (1% used) • resets in 3h 10m".to_owned(),
+                "Weekly: 40% remaining (60% used) • resets in 5d 7h".to_owned(),
+                "Monthly: 100% remaining (0% used) • resets in 28d 20h".to_owned(),
+            ],
+            stale: false,
+        }));
+    gui.settle();
+
+    assert!(
+        spots(&mut gui, "Weekly 40%") >= 1,
+        "the window closest to running out is not on the line"
+    );
+    assert_eq!(
+        spots(&mut gui, "$\u{2014}"),
+        0,
+        "the line calls the account unknown while the provider reports limits"
+    );
+}
+
+#[test]
 fn clicking_a_file_in_the_tree_opens_its_tab() {
     let mut gui = Gui::new(&[("a.rs", "fn a() {}\n"), ("notes.txt", "text\n")], None);
     assert_eq!(gui.app().state.tabs.len(), 0, "nothing is open yet");

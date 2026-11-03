@@ -1044,18 +1044,24 @@ fn status(ui: &mut Ui, state: &mut AppState) {
             // whole block on hover. The agent attaches it to the same update that carries the context
             // figure, so it follows every turn without a process of ours.
             let credits = state.agent.credits_of_the_model();
+            let limit = state.agent.limits_of_the_model();
             let spoke = state.agent.usage.is_some();
             let elsewhere = state.agent.account_elsewhere();
-            let said = credits.clone().unwrap_or_else(|| "$\u{2014}".to_owned());
-            if credits.is_some() || elsewhere || spoke {
+            // What is left on the account: the money a provider reports, or — a subscription reports
+            // windows instead of a balance — the window that runs out first, the rest on hover.
+            let figure = credits
+                .clone()
+                .or_else(|| limit.as_ref().map(crate::credits::Limit::figure));
+            let said = figure.clone().unwrap_or_else(|| "$\u{2014}".to_owned());
+            if figure.is_some() || elsewhere || spoke {
                 ui.separator();
                 if !room_for(ui, &said) {
                     dropped = true;
                     break 'facts;
                 }
-                match &credits {
-                    Some(credits) => {
-                        ui.label(credits).on_hover_text(account_tip(state));
+                match &figure {
+                    Some(figure) => {
+                        ui.label(figure).on_hover_text(account_tip(state));
                     }
                     // The agent handed over the accounting of another provider: the figure is not
                     // the money of this model, and the lines on hover say whose it is.

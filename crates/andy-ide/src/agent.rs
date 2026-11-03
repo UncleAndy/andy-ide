@@ -1447,22 +1447,34 @@ impl AgentState {
     /// accounting of the last turn, whoever made it — is not the balance of this model, and a
     /// provider that reports nothing about its balance must not wear the money of somebody else.
     pub fn credits_of_the_model(&self) -> Option<String> {
+        self.account_is_the_models()
+            .then(|| self.credits.clone())
+            .flatten()
+    }
+
+    /// The limit of the account that runs out first, when the provider reports windows instead of
+    /// money: a subscription says nothing about a balance and everything about what is left of it.
+    pub fn limits_of_the_model(&self) -> Option<crate::credits::Limit> {
+        self.account_is_the_models()
+            .then(|| crate::credits::tightest(&self.credits_lines))
+            .flatten()
+    }
+
+    /// Whether the account the agent sent is the one of the model in front. Nothing to check the block
+    /// against — an agent that names no model — is taken at its word.
+    fn account_is_the_models(&self) -> bool {
         let Some(provider) = self
             .current_model
             .as_deref()
             .and_then(crate::credits::provider_of)
         else {
-            // Nothing to check the block against: an agent that names no model is taken at its word.
-            return self.credits.clone();
+            return true;
         };
-        if !crate::credits::belongs(
+        crate::credits::belongs(
             &self.credits_lines,
             self.credits_provider.as_deref(),
             provider,
-        ) {
-            return None;
-        }
-        self.credits.clone()
+        )
     }
 
     /// Whether the agent has spoken of an account that belongs to a provider other than the one the

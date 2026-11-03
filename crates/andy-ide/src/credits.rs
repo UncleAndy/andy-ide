@@ -22,8 +22,12 @@ pub fn balance(lines: &[String]) -> Option<(String, String)> {
     let split = |line: &str| -> Option<(String, String)> {
         let (label, amount) = line.split_once(':')?;
         let (label, amount) = (label.trim(), amount.trim());
-        (!label.is_empty() && amount.chars().any(|c| c.is_ascii_digit()))
-            .then(|| (label.to_owned(), amount.to_owned()))
+        // A window of a limit is not money: `Weekly: 99% remaining (1% used)` is what is left of a
+        // plan, and the row shows it as a limit rather than as a balance.
+        (!label.is_empty()
+            && amount.chars().any(|c| c.is_ascii_digit())
+            && percent_left(amount).is_none())
+        .then(|| (label.to_owned(), amount.to_owned()))
     };
     for wanted in WANTED {
         let found = lines.iter().find_map(|line| {
@@ -34,6 +38,76 @@ pub fn balance(lines: &[String]) -> Option<(String, String)> {
         }
     }
     lines.iter().find_map(|line| split(line))
+}
+
+/// A limit a provider reports: the window it belongs to, and how much of it is still there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Limit {
+    /// The window in the provider own words: `Rolling window`, `Weekly`, `Monthly`.
+    pub label: String,
+    /// What is left of it, in percent.
+    pub left: u8,
+}
+
+impl Limit {
+    /// The one figure a row can hold: the window first word and what is left of it — `Rolling 42%`.
+    pub fn figure(&self) -> String {
+        let word = self.label.split_whitespace().next().unwrap_or(&self.label);
+        format!("{word} {}%", self.left)
+    }
+}
+
+/// The limits in a block of account lines: `Weekly: 99% remaining (1% used) • resets in 5d 7h`.
+///
+/// A subscription reports no balance and does report windows, and each window is a labelled line like
+/// any other fact. The share is read from the words the provider itself uses — `N% remaining`, or
+/// `N% used` turned around — so a window that prints only what was spent still lands right. A line
+/// whose figure is money (`Top-up credits: $14.06`) is not a limit and is left to `balance`.
+pub fn limits(lines: &[String]) -> Vec<Limit> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let (label, value) = line.split_once(':')?;
+            let (label, value) = (label.trim(), value.trim());
+            let left = percent_left(value)?;
+            (!label.is_empty()).then(|| Limit {
+                label: label.to_owned(),
+                left,
+            })
+        })
+        .collect()
+}
+
+/// The limit that runs out first: the window a person would hit before the others.
+pub fn tightest(lines: &[String]) -> Option<Limit> {
+    limits(lines).into_iter().min_by_key(|limit| limit.left)
+}
+
+/// How much of a window is left, read from the words of the provider: `99% remaining`, `42% left`,
+/// or `57% used` turned around. `None` when the line says nothing about a share of a window.
+fn percent_left(value: &str) -> Option<u8> {
+    let lowered = value.to_lowercase();
+    let mut rest = lowered.as_str();
+    while let Some(at) = rest.find('%') {
+        let head = &rest[..at];
+        let number = head
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("");
+        let tail = &rest[at + 1..];
+        if let Ok(percent) = number.parse::<u8>() {
+            let percent = percent.min(100);
+            let after: String = tail.trim_start().chars().take(9).collect();
+            if after.starts_with("remaining") || after.starts_with("left") {
+                return Some(percent);
+            }
+            if after.starts_with("used") || after.starts_with("spent") {
+                return Some(100 - percent);
+            }
+        }
+        rest = tail;
+    }
+    None
 }
 
 /// The provider a model id belongs to: `nous:anthropic/claude` and `opencode-go:deepseek` both carry
@@ -146,6 +220,63 @@ mod tests {
     fn nothing_to_report_is_not_a_balance_of_zero() {
         assert_eq!(balance(&[]), None);
         assert_eq!(balance(&lines(&["Provider: nous", "Nous credits"])), None);
+    }
+
+    #[test]
+    fn a_window_of_a_limit_is_a_limit_and_not_a_balance() {
+        // What OpenCode Go answers on /zen/go/v1/usage, as the agent renders it for the status line.
+        let go = lines(&[
+            "\u{1f4c8} Account limits",
+            "Provider: opencode-go",
+            "Rolling window: 99% remaining (1% used) • resets in 3h 10m (2026-11-03 19:40 UTC)",
+            "Weekly: 99% remaining (1% used) • resets in 5d 7h (2026-11-09 00:00 UTC)",
+            "Monthly: 100% remaining (0% used) • resets in 28d 20h (2026-12-02 12:31 UTC)",
+        ]);
+        assert_eq!(balance(&go), None, "a window was read as money");
+        assert_eq!(
+            limits(&go),
+            vec![
+                Limit {
+                    label: "Rolling window".to_owned(),
+                    left: 99
+                },
+                Limit {
+                    label: "Weekly".to_owned(),
+                    left: 99
+                },
+                Limit {
+                    label: "Monthly".to_owned(),
+                    left: 100
+                },
+            ]
+        );
+        assert_eq!(
+            tightest(&go).map(|limit| limit.figure()),
+            Some("Rolling 99%".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_window_that_says_what_was_spent_is_turned_around() {
+        assert_eq!(percent_left("57% used"), Some(43));
+        assert_eq!(percent_left("57% spent of 100"), Some(43));
+        assert_eq!(percent_left("43% left"), Some(43));
+        assert_eq!(percent_left("unavailable"), None);
+        // Money is not a share of a window.
+        assert_eq!(percent_left("$14.06"), None);
+    }
+
+    #[test]
+    fn the_window_closest_to_running_out_is_the_one_the_row_shows() {
+        let block = lines(&[
+            "Weekly: 40% remaining",
+            "Monthly: 5% remaining",
+            "Rolling: 80% remaining",
+        ]);
+        assert_eq!(
+            tightest(&block).map(|limit| limit.figure()),
+            Some("Monthly 5%".to_owned())
+        );
     }
 
     #[test]
