@@ -118,17 +118,16 @@ pub fn body(ui: &mut Ui, state: &mut AppState) {
     }
 }
 
-/// One commit: the short hash, the names that point at it, when it was written — and the message
-/// under them, because a commit is read by its first line and found by its hash.
+/// One commit, in one line: the short hash, the names that point at it, the message, and the day
+/// at the right edge.
 ///
-/// The row is the click, so the whole width of it selects; the rest of what is known about the
+/// A row is the click, so the whole width of it selects; the rest of what is known about the
 /// commit — the full id, the author — is on hover, where a name that is not needed to read the
 /// list can be found without making every row wider.
 fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
-    let body = ui.text_style_height(&egui::TextStyle::Body);
-    let small = ui.text_style_height(&egui::TextStyle::Small);
+    let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), body + small + 10.0),
+        egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
     );
     if selected {
@@ -142,33 +141,35 @@ fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
             .rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
 
-    let room = rect.shrink2(egui::vec2(6.0, 4.0));
+    let room = rect.shrink2(egui::vec2(6.0, 0.0));
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(room)
-            .layout(Layout::top_down(Align::Min)),
+            .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.horizontal(|ui| {
+            // The day is laid out first, from the right: a message cut where the row ends must not
+            // push the day out of the panel, and a row is one line, so something has to give.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add(
-                    egui::Label::new(RichText::new(&commit.short).monospace().color(HASH))
+                    egui::Label::new(RichText::new(when(commit.when)).small().weak())
                         .selectable(false),
                 );
-                for mark in commit.refs.iter().take(CHIPS_SHOWN) {
-                    chip(ui, mark);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(when(commit.when)).small().weak())
+                        egui::Label::new(RichText::new(&commit.short).monospace().color(HASH))
                             .selectable(false),
+                    );
+                    for mark in commit.refs.iter().take(CHIPS_SHOWN) {
+                        chip(ui, mark);
+                    }
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(RichText::new(&commit.summary))
+                            .selectable(false)
+                            .truncate(),
                     );
                 });
             });
-            ui.add(
-                egui::Label::new(RichText::new(&commit.summary))
-                    .selectable(false)
-                    .truncate(),
-            );
         },
     );
 

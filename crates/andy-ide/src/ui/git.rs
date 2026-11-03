@@ -59,13 +59,12 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
         {
             state.git.history = true;
         }
-        // The commands that change the repository stand apart from the ones that only change what
-        // is on screen: a line between them, and the corner of the row, where an action is looked
-        // for. Side by side with the switches, a `Fetch` read like one more way to look at the list.
+        // The commands that change the repository stand in the corner of the row, away from the
+        // switches that only change what is shown: beside a `Changes`, a `Fetch` read like one more
+        // way to look at the list. The corner is far enough that a line between them is noise.
         if state.git.has_remote {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 remote_buttons(ui, state);
-                ui.separator();
             });
         }
     });

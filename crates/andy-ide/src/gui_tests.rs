@@ -5467,28 +5467,28 @@ mod the_git_panel {
     }
 
     #[test]
-    fn a_commit_is_a_hash_with_its_message_under_it() {
+    fn a_commit_is_one_line_of_hash_names_message_and_day() {
         let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
         show_panel(&mut gui);
         gui.harness.get_by_label("History").click();
         gui.settle();
         gui.settle();
 
-        // Two lines of one row: the hash on top, the message beneath it and lined up with it.
-        // A row that wrapped its parts into one line would push the names of the pointers out of
-        // the panel, and a message beside the hash would leave no room for either.
+        // One line: the hash, the names of the pointers, the message beside them. A row of two
+        // lines halved the number of commits a panel could show, and the message is read beside
+        // the hash rather than under it.
         let hash = gui
             .harness
             .get_by_label(&gui.app().state.git.commits[0].short)
             .rect();
         let summary = gui.harness.get_by_label("first").rect();
         assert!(
-            summary.top() > hash.bottom(),
-            "the message is not under the hash: {hash:?} against {summary:?}"
+            (summary.center().y - hash.center().y).abs() < 3.0,
+            "the message is not on the hash’s line: {hash:?} against {summary:?}"
         );
         assert!(
-            (summary.left() - hash.left()).abs() < 1.5,
-            "the message is not lined up with the hash: {hash:?} against {summary:?}"
+            summary.left() > hash.right(),
+            "the message is not beside the hash: {hash:?} against {summary:?}"
         );
     }
 
