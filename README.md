@@ -123,11 +123,12 @@ them. The arrow keys, `PageUp`/`PageDown` and `Home`/`End` walk the list, the ro
 front is marked and scrolled into sight, and `Enter` on it shows what that commit
 changed in the same pane under the list. A panel that opened another panel would take
 the person away from the list they were reading, and the list is where they were. The
-branch named at the left of the row is itself the menu that switches `HEAD` and starts
-new ones — through the real `git switch`, so a dirty tree that would lose work is
-refused by `git` itself instead of by a guess — and the commands that talk to a remote
-stand behind a line of their own in the corner of the row, because a `Fetch` beside a
-switch reads like one more way to look at the list. In the editor, the margin of
+branch named at the left of the row, with a `▾` beside it, is itself the menu that
+switches `HEAD` and starts new ones — through the real `git switch`, so a dirty tree
+that would lose work is refused by `git` itself instead of by a guess — and the commands
+that talk to a remote stand behind a line of their own in the corner of the row, because
+a `Fetch` beside a switch reads like one more way to look at the list.
+In the editor, the margin of
 every open file carries a three-pixel stripe beside each line that the index does not
 have yet — green for a line the file added, blue for one it changed, red where a line
 went away — and staging a file takes the stripes away. A repository with a remote gains

@@ -5174,7 +5174,7 @@ mod the_git_panel {
             "the panel does not know the branches"
         );
         assert!(
-            gui.harness.query_by_label("main").is_some(),
+            gui.harness.query_by_label("main ▾").is_some(),
             "the checked-out branch is not in the panel"
         );
 
@@ -5182,7 +5182,7 @@ mod the_git_panel {
             gui.harness.query_by_label("Branches").is_none(),
             "the panel still has a button of its own for the branches"
         );
-        gui.harness.get_by_label("main").click();
+        gui.harness.get_by_label("main ▾").click();
         gui.settle();
         gui.harness.get_by_label("feature").click();
         gui.settle();
@@ -5204,7 +5204,7 @@ mod the_git_panel {
             "the panel still lists the old branch first"
         );
         assert!(
-            gui.harness.query_by_label("feature").is_some(),
+            gui.harness.query_by_label("feature ▾").is_some(),
             "the new branch is not named in the panel"
         );
     }
@@ -5216,7 +5216,7 @@ mod the_git_panel {
 
         gui.app_mut().state.git.branch_name = "topic".to_owned();
         gui.settle();
-        gui.harness.get_by_label("main").click();
+        gui.harness.get_by_label("main ▾").click();
         gui.settle();
         gui.harness.get_by_label("New branch").click();
         gui.settle();
@@ -5246,7 +5246,7 @@ mod the_git_panel {
         std::fs::write(&file, "one\nwork in progress\n").unwrap();
         show_panel(&mut gui);
 
-        gui.harness.get_by_label("main").click();
+        gui.harness.get_by_label("main ▾").click();
         gui.settle();
         gui.harness.get_by_label("feature").click();
         gui.settle();

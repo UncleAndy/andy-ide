@@ -377,7 +377,9 @@ fn branch_menu(ui: &mut Ui, state: &mut AppState, asked: &mut Option<Asked>) {
     let mut chosen = None;
     let mut create = false;
 
-    let menu = ui.menu_button(RichText::new(&head).strong(), |ui| {
+    // The caret is the same `▾` the agent panel puts on its own menus: a name in a row of
+    // labels is a name, and a name with a caret is a door.
+    let menu = ui.menu_button(RichText::new(format!("{head} ▾")).strong(), |ui| {
         ui.set_min_width(170.0);
         for branch in &branches {
             let label = if branch.is_head {
