@@ -23,12 +23,15 @@ const LINE: Color32 = Color32::from_rgb(0xC3, 0xC9, 0xD2);
 /// The menu bar across the top: the band a person reaches for first, a step darker than a panel,
 /// the way a window's own menu strip is.
 const MENU: Color32 = Color32::from_rgb(0xE1, 0xE5, 0xEA);
-/// The strip the tabs stand on. Darker than a tab, so tabs read as things set on it, and darker
-/// than the page: the space beside the tabs used to be the brightest colour in the window.
-const BAR: Color32 = Color32::from_rgb(0xDC, 0xE0, 0xE6);
-/// A tab that is not in front, and the same tab under the pointer.
-const TAB: Color32 = Color32::from_rgb(0xE9, 0xEC, 0xF1);
-const TAB_HOVER: Color32 = Color32::from_rgb(0xF3, 0xF5, 0xF8);
+/// The strip the tabs stand on: the colour of the panels under it, not a band of its own. The space
+/// beside the tabs used to be the brightest colour in the window, and darkening it a step too far
+/// made the whole bar read as a separate, heavy thing.
+const BAR: Color32 = PANEL;
+/// A tab that is not in front — a shade below the strip, so it is still seen as a tab — and the same
+/// tab under the pointer, and the tab in front, which stands a shade above the strip.
+const TAB: Color32 = Color32::from_rgb(0xE7, 0xEB, 0xF0);
+const TAB_HOVER: Color32 = Color32::from_rgb(0xF4, 0xF6, 0xF9);
+const TAB_ACTIVE: Color32 = Color32::from_rgb(0xFA, 0xFB, 0xFD);
 /// What a person picked, what the pointer is on, and what is being pressed.
 const SELECTION: Color32 = Color32::from_rgb(0xC7, 0xDB, 0xF4);
 const HOVER: Color32 = Color32::from_rgb(0xDD, 0xE2, 0xE9);
@@ -98,10 +101,10 @@ pub fn dock_style(style: &egui::Style, theme: Theme) -> egui_dock::Style {
         dock.tab.inactive.bg_fill = TAB;
         dock.tab.inactive_with_kb_focus.bg_fill = TAB;
         dock.tab.hovered.bg_fill = TAB_HOVER;
-        dock.tab.active.bg_fill = PANEL;
-        dock.tab.focused.bg_fill = PANEL;
-        dock.tab.active_with_kb_focus.bg_fill = PANEL;
-        dock.tab.focused_with_kb_focus.bg_fill = PANEL;
+        dock.tab.active.bg_fill = TAB_ACTIVE;
+        dock.tab.focused.bg_fill = TAB_ACTIVE;
+        dock.tab.active_with_kb_focus.bg_fill = TAB_ACTIVE;
+        dock.tab.focused_with_kb_focus.bg_fill = TAB_ACTIVE;
         for tab in [
             &mut dock.tab.inactive,
             &mut dock.tab.inactive_with_kb_focus,
@@ -126,6 +129,11 @@ pub fn dock_style(style: &egui::Style, theme: Theme) -> egui_dock::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How bright a colour reads, the way an eye weighs the three channels.
+    fn luma(colour: Color32) -> f32 {
+        0.299 * colour.r() as f32 + 0.587 * colour.g() as f32 + 0.114 * colour.b() as f32
+    }
 
     /// How far apart two colours read, in the channel that differs most.
     fn apart(a: Color32, b: Color32) -> f32 {
@@ -215,10 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_stand_on_a_grey_strip() {
+    fn the_tabs_stand_on_the_colour_of_the_panels() {
         // egui_dock paints the tab bar in the colour of a text field, so the space beside the tabs
-        // was the brightest thing in a light window. The strip is its own grey, a tab that is not in
-        // front is lighter than the strip, the tab in front is the colour of the body under it.
+        // was the brightest thing in a light window. The strip is the colour of the panels now; a
+        // tab that is not in front sits a shade below it, the tab in front a shade above.
         let style = egui::Style::default();
         let dark = dock_style(&style, Theme::Dark);
         let stock = egui_dock::Style::from_egui(&style);
@@ -236,8 +244,21 @@ mod tests {
             apart(light.tab.inactive.bg_fill, light.tab_bar.bg_fill) >= 6.0,
             "a tab is not told apart from the strip it stands on"
         );
-        // The tab in front belongs to the body under it, not to the strip behind it.
-        assert_eq!(light.tab.active.bg_fill, light.tab.tab_body.bg_fill);
+        // The strip is the colour of the panels: not a band of its own, and not the page.
+        assert_eq!(
+            light.tab_bar.bg_fill, light.tab.tab_body.bg_fill,
+            "the strip the tabs stand on is not the colour of the panels"
+        );
+        assert_eq!(light.tab_bar.bg_fill, PANEL);
+        // The tab in front stands above the strip, the one behind below it.
+        assert!(
+            luma(light.tab.active.bg_fill) > luma(light.tab_bar.bg_fill),
+            "the tab in front does not stand above the strip"
+        );
+        assert!(
+            luma(light.tab.inactive.bg_fill) < luma(light.tab_bar.bg_fill),
+            "a tab that is not in front does not sit below the strip"
+        );
         assert!(
             apart(light.tab.tab_body.bg_fill, paper) >= 10.0,
             "the body of a panel is the colour of the page: {light:?}"

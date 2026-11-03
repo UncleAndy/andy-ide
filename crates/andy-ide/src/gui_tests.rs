@@ -9153,23 +9153,14 @@ mod the_agent_panel {
             surfaces.contains(&paper),
             "the page a person writes on was not painted: {surfaces:?}"
         );
-        // The band the menu stands on and the strip the tabs stand on: the two things that used to
-        // be the same white as the page and made the window read as one sheet.
-        for (colour, what) in [
-            (
-                crate::ui::theme::menu_fill(ide_core::Theme::Light),
-                "menu bar",
-            ),
-            (
-                crate::ui::theme::tab_bar_fill(ide_core::Theme::Light),
-                "tab bar",
-            ),
-        ] {
-            assert!(
-                surfaces.contains(&colour),
-                "the {what} was not painted in its own colour {colour:?}: {surfaces:?}"
-            );
-        }
+        // The band the menu stands on: one of the things that used to be the same white as the page
+        // and made the window read as one sheet. The strip the tabs stand on is the colour of the
+        // panels by design, so it is not looked for on its own.
+        let menu = crate::ui::theme::menu_fill(ide_core::Theme::Light);
+        assert!(
+            surfaces.contains(&menu),
+            "the menu bar was not painted in its own colour {menu:?}: {surfaces:?}"
+        );
         // Three surfaces at the least, and the page is the brightest of them, because it is what is
         // read.
         assert!(
