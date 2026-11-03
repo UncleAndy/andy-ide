@@ -1811,6 +1811,86 @@ mod keyboard_tests {
 
 #[cfg(test)]
 mod caret_and_clipboard_tests {
+    /// Hands the app the answer a server would give for the word under the caret, the way the worker does,
+    /// and publishes it the way a frame does. Everything here is the public face of the two halves.
+    fn the_server_answers(h: &mut Harness, labels: &[&str]) {
+        let (place, text, caret, keystrokes) = {
+            let buffer = h.app.state.active_buffer().unwrap();
+            let (line, character) = buffer.line_col();
+            (
+                crate::ui::completion::Place {
+                    path: buffer.path.clone(),
+                    line: line as u32,
+                    character: character as u32,
+                },
+                buffer.text().to_owned(),
+                buffer.caret_byte(),
+                buffer.typed + 1,
+            )
+        };
+        h.app
+            .state
+            .completion
+            .look_at(&text, caret, place.clone(), h.time, keystrokes);
+        h.app.state.completion.answer(
+            place,
+            labels
+                .iter()
+                .map(|label| lsp_types::CompletionItem {
+                    label: (*label).to_owned(),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        h.app.state.publish_completions();
+    }
+
+    #[test]
+    fn the_editor_hands_a_key_to_the_list_and_leaves_the_caret_alone() {
+        // This check stands on the seam between the editor and the list, and that seam is where two real
+        // defects lived, neither of them visible without a list on screen: a frame that ran nothing at all
+        // while a list was open, and an editor that never saw a list published after the draw. Both halves
+        // had checks of their own; the join had none.
+        let mut h = Harness::with_text("a.rs", "let val = 1;\n");
+        h.focus_editor();
+        let at = h.text().find("val").expect("the word is in the text") + 3;
+        h.app.state.active_buffer_mut().unwrap().set_caret_byte(at);
+        h.frame(Vec::new());
+
+        the_server_answers(&mut h, &["value", "values", "val_mut"]);
+        h.frame(Vec::new());
+        assert_eq!(
+            h.app.state.completion.offers().len(),
+            3,
+            "the list was not published with the words the server offered"
+        );
+        assert_eq!(h.app.state.completion.selected(), 0);
+        let caret = h.buffer().caret_byte();
+
+        // An arrow: the list takes it, and the caret does not move.
+        h.key(egui::Key::ArrowDown);
+        assert_eq!(
+            h.app.state.completion.selected(),
+            1,
+            "the editor did not hand the arrow to the list"
+        );
+        assert_eq!(
+            h.buffer().caret_byte(),
+            caret,
+            "the arrow walked the caret instead of the list"
+        );
+
+        // Enter: the list takes it, and the word it holds is written into the file by the editor — the two
+        // halves joined in one movement.
+        h.key(egui::Key::Enter);
+        h.frame(Vec::new());
+        assert_eq!(
+            h.text(),
+            "let values = 1;\n",
+            "the word taken from the list was not written by the editor"
+        );
+    }
+
     use super::*;
 
     struct Harness {

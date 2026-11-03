@@ -1165,6 +1165,9 @@ fn cut_to_clipboard(ui: &Ui, buffer: &mut EditorBuffer) -> bool {
 /// The editor does not answer it: it writes the key down for the list and goes on. The list is answered
 /// at the end of the frame, where the words are (`state::track_completion`).
 fn the_list_takes_this_key(buffer: &mut EditorBuffer, event: &Event) -> bool {
+    if false {
+        return false;
+    }
     let Event::Key {
         key,
         modifiers,
