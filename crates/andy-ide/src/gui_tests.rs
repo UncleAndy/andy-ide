@@ -6760,9 +6760,8 @@ mod the_agent_panel {
             Some("stand-in (2)"),
             "the list did not move to the second entry"
         );
-        gui.harness.get_by_label("Start").click();
-        gui.settle();
-
+        // The words of the first agent are gone with it, and the one just named is opened
+        // without the button: choosing an agent is asking for it.
         assert!(
             gui.app().state.agent.transcript.is_empty(),
             "the words of the first agent are still on screen: {:?}",
@@ -6771,6 +6770,13 @@ mod the_agent_panel {
         assert!(
             gui.app().state.agent.context_usage().is_none(),
             "the figure of the conversation just left is still shown"
+        );
+        wait(&mut gui, "the second agent connecting by itself", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        assert!(
+            gui.harness.query_by_label("Stop").is_some(),
+            "the second agent was not opened by the choice alone"
         );
     }
 
@@ -6836,7 +6842,6 @@ mod the_agent_panel {
         gui.settle();
         gui.harness.get_by_label("stand-in (2)").click();
         gui.settle();
-        gui.harness.get_by_label("Start").click();
         wait(
             &mut gui,
             "the second entry resuming its conversation",

@@ -1140,13 +1140,8 @@ fn header(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         if named != chosen {
-            state.agent.stop();
-            if let Some(spec) = state.agent.registry.get(&named) {
-                state.agent.command = ide_agents::quote_command(spec);
-                state.agent.name = spec.name.clone();
-            }
-            state.agent.chosen = Some(named);
-            state.agent.status = "start the agent when ready".to_owned();
+            // Another agent is another conversation, and the one chosen is opened at once.
+            state.agent.switch_agent(&named);
         }
 
         let running = state.agent.running();

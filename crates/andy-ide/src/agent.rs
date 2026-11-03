@@ -974,6 +974,28 @@ impl AgentState {
             .unwrap_or_else(|| session.to_owned())
     }
 
+    /// Moves the panel to another agent of the project.
+    ///
+    /// The agent in front is stopped and its conversation goes off the screen with it: what a
+    /// person has just chosen is another agent, and the words of the last one are not its own —
+    /// left there they read as a history the new one has never seen. The chosen agent is then
+    /// opened at once: naming it is asking for it to work, not for a button to be pressed again.
+    pub fn switch_agent(&mut self, name: &str) {
+        if self.chosen.as_deref() == Some(name) {
+            return;
+        }
+        self.stop();
+        if let Some(spec) = self.registry.get(name) {
+            self.command = ide_agents::quote_command(spec);
+            self.name = spec.name.clone();
+        }
+        self.chosen = Some(name.to_owned());
+        self.clear_panel();
+        // The figure of the conversation just left belongs to it, and it is no longer in front.
+        self.session = None;
+        self.start();
+    }
+
     /// Moves the panel to another conversation of this project.
     ///
     /// What is on screen is cleared first: the transcript is about to be replaced by another one,
