@@ -6687,6 +6687,180 @@ mod the_agent_panel {
         );
     }
 
+    /// Two entries are two processes and two conversations: moving the list to the second and
+    /// pressing Start must not leave the words of the first on screen, because the agent in front
+    /// has never seen them — and the next message would go to a stranger while the panel looked as
+    /// though it remembered. The figure of the conversation just left goes with the words.
+    #[test]
+    fn another_agent_from_the_list_does_not_inherit_the_conversation_on_screen() {
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n\n[agent.env]\nACP_TEST_USAGE = \"1000:8000\"\n\n[[agent]]\nname = \"stand-in (2)\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy(),
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the first agent starting", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+
+        // Something said, so that the panel has a conversation to carry over — and a figure of
+        // its context, which the stand-in sends at the end of a turn when it is asked to.
+        gui.app_mut().state.agent.input = "hello".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the words of the first agent", |gui| {
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .any(|line| matches!(line, crate::agent::Line::You(text) if text == "hello"))
+        });
+        wait(&mut gui, "the figure of the conversation", |gui| {
+            gui.app().state.agent.context_usage().is_some()
+        });
+
+        // The list, and the second entry started from it.
+        // The list of agents is a combo box: it carries the chosen name as its value and no
+        // label, so it is found by its role.
+        gui.harness
+            .get_by_role(egui::accesskit::Role::ComboBox)
+            .click();
+        gui.settle();
+        gui.harness.get_by_label("stand-in (2)").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.agent.chosen.as_deref(),
+            Some("stand-in (2)"),
+            "the list did not move to the second entry"
+        );
+        gui.harness.get_by_label("Start").click();
+        gui.settle();
+
+        assert!(
+            gui.app().state.agent.transcript.is_empty(),
+            "the words of the first agent are still on screen: {:?}",
+            gui.app().state.agent.transcript
+        );
+        assert!(
+            gui.app().state.agent.context_usage().is_none(),
+            "the figure of the conversation just left is still shown"
+        );
+    }
+
+    /// Two entries are two conversations, and the project keeps one per entry: coming back to an
+    /// agent asks it for the id that entry kept, not for the one the other has just opened.
+    #[test]
+    fn each_agent_of_the_list_comes_back_to_its_own_conversation() {
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let place = project.path().join(".andy-ide");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(
+            place.join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n\n[[agent]]\nname = \"stand-in (2)\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy(),
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // What the project kept for each of the two entries.
+        std::fs::write(
+            place.join("agent-session.json"),
+            "{\"sessions\": {\"stand-in\": \"kept-one\", \"stand-in (2)\": \"kept-two\"}}\n",
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.txt", "one\n")],
+                Some("a.txt"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(
+            &mut gui,
+            "the first entry resuming its conversation",
+            |gui| gui.app().state.agent.status.contains("resumed"),
+        );
+        gui.app_mut().state.agent.input = "session".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(&mut gui, "the answer about the first conversation", |gui| {
+            answer(gui).contains("loaded")
+        });
+        assert_eq!(last_answer(&gui), "kept-one loaded");
+
+        // The other entry, and the conversation of its own.
+        gui.harness
+            .get_by_role(egui::accesskit::Role::ComboBox)
+            .click();
+        gui.settle();
+        gui.harness.get_by_label("stand-in (2)").click();
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(
+            &mut gui,
+            "the second entry resuming its conversation",
+            |gui| gui.app().state.agent.status.contains("resumed"),
+        );
+        gui.app_mut().state.agent.input = "session".to_owned();
+        gui.settle();
+        gui.harness.get_by_label("Send").click();
+        wait(
+            &mut gui,
+            "the answer about the second conversation",
+            |gui| answer(gui).contains("loaded"),
+        );
+        assert_eq!(last_answer(&gui), "kept-two loaded");
+
+        // And the record still holds both, each under its own agent.
+        let kept = std::fs::read_to_string(place.join("agent-session.json"))
+            .expect("the project kept no conversation");
+        assert!(
+            kept.contains("kept-one") && kept.contains("kept-two"),
+            "one entry took the record of the other: {kept}"
+        );
+    }
+
     #[test]
     fn a_command_typed_into_the_field_is_what_runs() {
         let Some(mut gui) = with_agent() else {

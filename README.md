@@ -187,8 +187,13 @@ A conversation outlives the window. The project keeps the agent's session id in
 pick that conversation up — `session/load` when the agent says it can, a new session when
 it does not remember, and nothing said about the difference an agent's memory cannot
 account for. The id is written the moment the agent names it rather than on the way out: a
-crash is the case where a conversation is most wanted back. It is kept per agent, since an
-id offered to a different agent asks a stranger to remember somebody else's afternoon.
+crash is the case where a conversation is most wanted back. It is kept per agent — one
+row per name in `agents.toml` — because an id offered to a different agent asks a
+stranger to remember somebody else's afternoon, and a single record would be
+taken by whichever entry ran last, leaving the other one with nothing to come back to.
+A start empties the panel first: a restored conversation is replayed by the agent, and
+the words of the one before are not its own — left on screen they read as a history the
+agent in front has never seen.
 
 The foot of the panel is the field, and one row under it: the facts about the turn on the left —
 how long it is taking, which model is answering, how hard it is thinking, how much of its context

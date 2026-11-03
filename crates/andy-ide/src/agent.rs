@@ -480,6 +480,10 @@ pub struct AgentState {
     /// would be asking a stranger to remember somebody else's afternoon.
     resume: Option<String>,
     resumed_from: Option<String>,
+    /// The conversation each agent of the project kept, by the name its entry in `agents.toml`
+    /// has: one per agent, and not one for the project. A single record was overwritten by
+    /// whichever entry ran last, so a second agent left the first with nothing to come back to.
+    pub kept: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AgentState {
@@ -555,6 +559,7 @@ impl Default for AgentState {
             session: None,
             resume: None,
             resumed_from: None,
+            kept: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -634,7 +639,11 @@ impl AgentState {
         root.join(".andy-ide").join("agent-session.json")
     }
 
-    /// Reads the id the project kept, if it kept one.
+    /// Reads the ids the project kept, if it kept any.
+    ///
+    /// The file holds one conversation per agent — `{"sessions": {name: id}}` — and the shape of
+    /// the first version, `{"agent": name, "session": id}`, is read as the one entry it is: a
+    /// project written by an older build keeps its conversation instead of starting over.
     fn read_session(&mut self, root: &Path) {
         let Ok(text) = std::fs::read_to_string(Self::session_file(root)) else {
             return;
@@ -642,15 +651,30 @@ impl AgentState {
         let Ok(saved) = serde_json::from_str::<serde_json::Value>(&text) else {
             return;
         };
-        let session = saved.get("session").and_then(|id| id.as_str());
-        let agent = saved.get("agent").and_then(|name| name.as_str());
-        if let (Some(session), Some(agent)) = (session, agent) {
-            self.resume = Some(session.to_owned());
-            self.resumed_from = Some(agent.to_owned());
+        if let Some(rows) = saved.get("sessions").and_then(|rows| rows.as_object()) {
+            for (agent, session) in rows {
+                if let Some(session) = session.as_str() {
+                    self.kept.insert(agent.clone(), session.to_owned());
+                }
+            }
+        } else {
+            let session = saved.get("session").and_then(|id| id.as_str());
+            let agent = saved.get("agent").and_then(|name| name.as_str());
+            if let (Some(session), Some(agent)) = (session, agent) {
+                self.kept.insert(agent.to_owned(), session.to_owned());
+            }
+        }
+        // The agent the panel opens with, if the project kept a conversation for it.
+        if let Some(session) = self.kept.get(&self.name).cloned() {
+            self.resume = Some(session);
+            self.resumed_from = Some(self.name.clone());
         }
     }
 
-    /// Writes the id down, with the agent it belongs to.
+    /// Writes the id down, under the agent it belongs to.
+    ///
+    /// Every agent keeps its own: the record is a map by name, so opening a second agent adds a
+    /// conversation instead of taking the first one away.
     fn remember_session(&mut self, session: &str) {
         let (Some(root), Some(agent)) = (self.root.clone(), self.chosen.clone()) else {
             return;
@@ -659,7 +683,8 @@ impl AgentState {
         if let Some(parent) = file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let saved = serde_json::json!({ "agent": agent, "session": session });
+        self.kept.insert(agent.clone(), session.to_owned());
+        let saved = serde_json::json!({ "sessions": self.kept });
         let _ = std::fs::write(file, format!("{saved:#}\n"));
         self.resumed_from = Some(agent);
         self.resume = Some(session.to_owned());
@@ -707,11 +732,21 @@ impl AgentState {
         }
 
         let name = spec.name.clone();
-        // The conversation kept by the project, but only for the agent that kept it.
+        // The conversation kept by the project for this agent: the one a move to another
+        // conversation asked for, or else the one this entry kept the last time it ran.
         let resume = self
             .resume
             .clone()
-            .filter(|_| self.resumed_from.as_deref() == Some(name.as_str()));
+            .filter(|_| self.resumed_from.as_deref() == Some(name.as_str()))
+            .or_else(|| self.kept.get(name.as_str()).cloned());
+        // A start is another conversation — a new one, or one restored from its id — so nothing
+        // of the one on screen outlives it. The words of the last agent left there showed a
+        // history the agent in front had never seen, and the next message went to a stranger
+        // while the panel looked as though it remembered; a restored conversation drew every
+        // replayed line a second time over the one still on screen. The figure goes with them:
+        // it belongs to a conversation that is no longer the one in front.
+        self.clear_panel();
+        self.session = None;
         self.connecting = true;
         self.progress = Arc::new(Mutex::new("Launching\u{2026}".to_owned()));
         let progress = Arc::clone(&self.progress);
@@ -1403,14 +1438,23 @@ impl AgentState {
         self.attempts = 0;
     }
 
-    /// Forgets the conversation the project kept, so the next start is a new one.
+    /// Forgets the conversation the project kept for the agent in front, so the next start is a
+    /// new one. The conversations of the other entries stay: each agent has its own.
     ///
     /// The id is written into the project (`.andy-ide/agent-session.json`) and outlives
     /// the window. Forgetting it only in memory would bring the same conversation back
     /// on the next launch — which is not what a person asking for a new session wants.
     pub fn forget_session(&mut self) {
         if let Some(root) = self.root.clone() {
-            let _ = std::fs::remove_file(Self::session_file(&root));
+            // Only the agent in front forgets: the conversations of the other entries are theirs,
+            // and a person asking for a new session has not asked for theirs to go.
+            self.kept.remove(&self.name);
+            if self.kept.is_empty() {
+                let _ = std::fs::remove_file(Self::session_file(&root));
+            } else {
+                let saved = serde_json::json!({ "sessions": self.kept });
+                let _ = std::fs::write(Self::session_file(&root), format!("{saved:#}\n"));
+            }
         }
         self.session = None;
         self.resume = None;
