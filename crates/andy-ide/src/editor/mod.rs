@@ -162,6 +162,10 @@ pub struct EditorBuffer {
     pub menu_open: bool,
     /// What the completion list looks like this frame, when there is one.
     pub completions: Option<crate::ui::completion::View>,
+    /// What the parameters of the call being written look like this frame, when there are any.
+    pub signature: Option<crate::ui::signature::View>,
+    /// Esc closed the parameter popup: it stays closed while the caret stays in this call.
+    pub wave_signature: bool,
     /// How many keys have written text into this file since it was opened.
     ///
     /// A count and not a flag for the frame, because the completion list is for writing and a flag is
@@ -219,6 +223,8 @@ impl EditorBuffer {
             hover: None,
             menu_open: false,
             completions: None,
+            signature: None,
+            wave_signature: false,
             typed: 0,
             occurrences: Vec::new(),
             reveal_caret: false,

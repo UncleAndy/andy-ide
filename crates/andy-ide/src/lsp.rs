@@ -65,6 +65,13 @@ pub enum Job {
         path: PathBuf,
         position: Position,
     },
+    /// The parameters of the call the caret stands in, asked because `trigger` — a `(` or a `,`
+    /// — was just typed, or because the caret came into another call.
+    SignatureHelp {
+        path: PathBuf,
+        position: Position,
+        trigger: Option<char>,
+    },
     /// What the symbol at one position is: signature and documentation.
     Hover {
         path: PathBuf,
@@ -126,6 +133,13 @@ pub enum Outcome {
         line: u32,
         character: u32,
         items: Vec<lsp_types::CompletionItem>,
+    },
+    /// What the server says about the parameters of the call at a position. `help: None` means
+    /// it found no call there, which is an answer too.
+    SignatureHelp {
+        path: PathBuf,
+        line: u32,
+        help: Option<lsp_types::SignatureHelp>,
     },
     /// What the server says about the symbol at a position. `text: None` means it
     /// said nothing, which is the usual answer over whitespace.
@@ -632,6 +646,20 @@ fn apply(
             },
             Err(error) => Outcome::Failed(format!("{error:#}")),
         }),
+        Job::SignatureHelp {
+            path,
+            position,
+            trigger,
+        } => Some(
+            match session.signature_help(&path, position, trigger.map(ide_lsp::triggered_by)) {
+                Ok(help) => Outcome::SignatureHelp {
+                    path,
+                    line: position.line,
+                    help,
+                },
+                Err(error) => Outcome::Failed(format!("{error:#}")),
+            },
+        ),
         Job::Symbols { path } => {
             let mut found = session.document_symbols(&path);
             // Same cold start as a definition: an empty outline before the

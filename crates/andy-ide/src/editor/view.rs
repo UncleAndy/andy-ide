@@ -463,6 +463,16 @@ pub fn ui(ui: &mut Ui, buffer: &mut EditorBuffer, palette: Palette, marks: &[Lin
         {
             draw_completions(ui.ctx(), caret_pos, row_h, view);
         }
+        // The parameters of the call the caret stands in. The list of words wins while it is up:
+        // two popups at one caret would fight, and the list is the one being chosen from.
+        if buffer
+            .completions
+            .as_ref()
+            .is_none_or(|view| view.lines.is_empty())
+            && let Some(view) = buffer.signature.as_ref()
+        {
+            draw_signature_help(ui.ctx(), caret_pos, row_h, view);
+        }
 
         // The view followed the caret in the same frame, so the caret is where
         // it was asked to be, and the scroll target is in screen coordinates:
@@ -906,6 +916,45 @@ fn paint_galleys(
 /// Kept inside the window: a list under the last line of a file would otherwise hang off the bottom
 /// of the screen, and one at the right edge would run off the side. The chosen word is painted like
 /// a selection, because that is what it is — the word Enter would take.
+/// The parameters of the call being written, under the caret and over everything else.
+///
+/// The list of words stands where it stands; this popup sits in the same place and flips above the
+/// line when the room below is gone, exactly as the list does.
+fn draw_signature_help(
+    ctx: &egui::Context,
+    at: Pos2,
+    row_h: f32,
+    view: &crate::ui::signature::View,
+) {
+    const WIDTH: f32 = 420.0;
+    let height = row_h * (view.parameters.len() + 1) as f32 + 12.0;
+    let screen = ctx.viewport_rect();
+    let mut pos = at + egui::vec2(0.0, row_h);
+    if pos.y + height > screen.bottom() {
+        pos.y = (at.y - height).max(screen.top());
+    }
+    if pos.x + WIDTH > screen.right() {
+        pos.x = (screen.right() - WIDTH - 4.0).max(screen.left());
+    }
+    egui::Area::new(egui::Id::new("signature_help"))
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(WIDTH);
+                ui.set_max_width(WIDTH);
+                ui.label(egui::RichText::new(&view.label).color(ui.visuals().strong_text_color()));
+                for (text, active) in &view.parameters {
+                    if *active {
+                        ui.label(egui::RichText::new(text).color(ui.visuals().strong_text_color()));
+                    } else {
+                        ui.label(egui::RichText::new(text).weak());
+                    }
+                }
+            });
+        });
+}
+
 fn draw_completions(ctx: &egui::Context, at: Pos2, row_h: f32, view: &crate::ui::completion::View) {
     const WIDTH: f32 = 340.0;
     let height = row_h * view.lines.len() as f32 + 8.0;
@@ -1180,6 +1229,20 @@ fn the_list_takes_this_key(buffer: &mut EditorBuffer, event: &Event) -> bool {
     let Some(key) = crate::ui::completion::list_key(*key, *modifiers) else {
         return false;
     };
+    // The parameter popup answers to Escape too, and it may be up while no list is: the list is the
+    // one being chosen from, but the popup is only a hint, and Escape is how a hint is refused.
+    if buffer.signature.is_some()
+        && matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            }
+        )
+    {
+        buffer.wave_signature = true;
+    }
     let Some(view) = buffer.completions.as_mut() else {
         return false;
     };

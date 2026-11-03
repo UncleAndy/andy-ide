@@ -130,6 +130,8 @@ pub struct AppState {
     pub fullscreen_asked: bool,
     /// The list of words the server offers for the word under the caret.
     pub completion: crate::ui::completion::Completion,
+    /// The parameters of the call being written, and whether it is worth asking about them.
+    pub signature: crate::ui::signature::Help,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
     /// The panels the person has put away, in the order they were put away. What is not here is
@@ -237,6 +239,7 @@ impl AppState {
             fonts_set: false,
             fullscreen_asked: false,
             completion: crate::ui::completion::Completion::new(),
+            signature: crate::ui::signature::Help::new(),
             recent,
             project: None,
             tabs: Tabs::new(),
@@ -591,6 +594,48 @@ impl AppState {
         None
     }
 
+    /// Asks the server about the parameters of the call the caret stands in.
+    ///
+    /// Asked again only when the call changes: typing inside one parameter leaves the call the
+    /// same, so the server is not bothered per letter — and the answer for the *other* parameter
+    /// comes from the server's own `activeParameter`, which is why the question is repeated on a
+    /// comma. Nothing is asked while the list of words is up: two popups at one caret would fight,
+    /// and the list is the one being chosen from.
+    pub fn track_signature(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            self.signature.forget();
+            return;
+        };
+        if !self.completion.offers().is_empty() {
+            return;
+        }
+        let (line, character) = buffer.line_col();
+        let text = buffer.text().to_owned();
+        let caret = buffer.caret_byte();
+        let Some(now) = self.signature.now(&buffer.path.clone(), line, &text, caret) else {
+            return;
+        };
+        if !self.signature.due(&now) {
+            return;
+        }
+        let Some(lsp) = &self.lsp else {
+            // No server yet. Not marked as asked, so the question goes out as soon as one is up.
+            return;
+        };
+        // What caused the question: a `(` or a `,` just typed, else the caret arrived from
+        // another call. The server is told, because a server may refuse to answer without it.
+        let trigger = text[..caret]
+            .chars()
+            .next_back()
+            .filter(|letter| *letter == '(' || *letter == ',');
+        lsp.send(crate::lsp::Job::SignatureHelp {
+            path: now.path.clone(),
+            position: lsp_types::Position::new(line as u32, character as u32),
+            trigger,
+        });
+        self.signature.asked(now);
+    }
+
     /// Asks the server what could stand where the caret is, once the word under it has rested.
     ///
     /// The same rest clock the hint at the pointer uses, for the same reason: a request per letter
@@ -640,6 +685,33 @@ impl AppState {
         });
         self.completion.asked(place);
         None
+    }
+
+    /// Hands the parameters of the call being written to the editor for this frame.
+    ///
+    /// Passed rather than drawn from here for the same reason the list is: where the caret is on
+    /// screen is the editor's business, and the popup hangs off the caret.
+    pub fn publish_signature(&mut self) {
+        let Some(buffer) = self.active_buffer() else {
+            return;
+        };
+        let (line, _) = buffer.line_col();
+        let text = buffer.text().to_owned();
+        let caret = buffer.caret_byte();
+        let path = buffer.path.clone();
+        let waved_away = buffer.wave_signature;
+        let now = self.signature.now(&path, line, &text, caret);
+        if waved_away {
+            self.signature.wave_away(now.clone());
+        }
+        let view = self
+            .signature
+            .showing(&now)
+            .and_then(crate::ui::signature::view_of);
+        if let Some(buffer) = self.active_buffer_mut() {
+            buffer.wave_signature = false;
+            buffer.signature = view;
+        }
     }
 
     /// Hands the list to the editor for this frame: the lines to draw, and the word taken with Enter
@@ -1964,6 +2036,9 @@ impl AppState {
                 },
                 items,
             ),
+            crate::lsp::Outcome::SignatureHelp { path, line, help } => {
+                self.signature.answer(path, line, help)
+            }
             crate::lsp::Outcome::Highlights {
                 path,
                 line,
