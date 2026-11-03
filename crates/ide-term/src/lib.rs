@@ -238,6 +238,27 @@ impl Session {
         read(parser.screen())
     }
 
+    /// The screen as it looked a number of lines back, for drawing a scrolled view.
+    ///
+    /// The lines above the screen are kept (see `SCROLLBACK`), and `vt100` reads them through its scrollback
+    /// offset: the offset is set, the screen is read, and the offset is put back, so the session itself stays
+    /// at the bottom where the program is writing.
+    pub fn with_screen_scrolled<T>(
+        &self,
+        back: usize,
+        read: impl FnOnce(&vt100::Screen) -> T,
+    ) -> T {
+        let mut parser = self
+            .parser
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let was = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(back);
+        let answer = read(parser.screen());
+        parser.screen_mut().set_scrollback(was);
+        answer
+    }
+
     /// Whether the program in the terminal asked for the application cursor keys.
     ///
     /// A full-screen program turns this on with `smkx` and then expects `ESC O B`

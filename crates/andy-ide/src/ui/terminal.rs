@@ -32,6 +32,11 @@ struct Pane {
     /// Scrolling arrives in pixels and is reported in notches; the remainder is
     /// kept here so a slow wheel is not lost.
     scroll_left: f32,
+    /// How many lines above the live screen the pane is looking, for `Shift+PageUp`.
+    ///
+    /// Zero is the bottom — where the program is writing. The lines themselves are kept by the session
+    /// (`ide_term::SCROLLBACK`); this is only where the eye stands.
+    view: usize,
 }
 
 impl Pane {
@@ -44,6 +49,7 @@ impl Pane {
             anchor: None,
             mouse_cell: None,
             scroll_left: 0.0,
+            view: 0,
         }
     }
 }
@@ -227,6 +233,7 @@ impl Terminal {
         let app = self.application_cursor();
         let events = ui.input_mut(|input| Self::split_terminal_events(&mut input.events));
         let mut bytes = Vec::new();
+        let mut wanted_view: Option<usize> = None;
         {
             for event in &events {
                 match event {
@@ -267,6 +274,14 @@ impl Terminal {
                                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                             continue;
                         }
+                        // The terminal's own scrollback keys, before anything is typed: see
+                        // `walks_the_scrollback`. What they ask for is applied once the events have been read.
+                        if walks_the_scrollback(*key, *modifiers) {
+                            let up = *key == egui::Key::PageUp;
+                            let now = self.pane().map(|pane| pane.view).unwrap_or(0);
+                            wanted_view = Some(scrolled(now, up, self.rows, ide_term::SCROLLBACK));
+                            continue;
+                        }
                         if let Some(byte) = control_letter(*key, *modifiers) {
                             bytes.push(byte);
                         } else if let Some(input) = input_for_key(*key, *modifiers, app) {
@@ -283,6 +298,15 @@ impl Terminal {
         }
         if !bytes.is_empty() {
             self.last_key_at = Some(ui.input(|input| input.time));
+        }
+        if let Some(pane) = self.pane_mut() {
+            // A page key moves the eye; anything written moves it back to the bottom, because a person who
+            // types wants to see what they type.
+            pane.view = match wanted_view {
+                Some(view) => view,
+                None if !bytes.is_empty() => 0,
+                None => pane.view,
+            };
         }
         bytes
     }
@@ -464,7 +488,7 @@ impl Terminal {
         };
         let session = &pane.session;
         let selection = pane.selection;
-        session.with_screen(|screen| {
+        session.with_screen_scrolled(pane.view, |screen| {
             for row in 0..rows {
                 for col in 0..cols {
                     let Some(cell) = screen.cell(row, col) else {
@@ -740,7 +764,7 @@ impl Terminal {
         }
         let pane = self.pane()?;
         let (column, row) = Self::cell_at(rect, cell, pos, cols, rows);
-        let found = pane.session.with_screen(|screen| {
+        let found = pane.session.with_screen_scrolled(pane.view, |screen| {
             let text: String = (0..cols)
                 .filter_map(|col| screen.cell(row, col))
                 .map(|cell| cell.contents())
@@ -757,7 +781,7 @@ impl Terminal {
         let selection = pane.selection?;
         let session = &pane.session;
         let (start, end) = selection.ordered();
-        let text = session.with_screen(|screen| {
+        let text = session.with_screen_scrolled(pane.view, |screen| {
             let (rows, cols) = screen.size();
             let (rows, cols) = (rows.get(), cols.get());
             let mut lines: Vec<String> = Vec::new();
@@ -1018,6 +1042,65 @@ fn colour(value: vt100::Color) -> egui::Color32 {
             }
         },
         vt100::Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
+    }
+}
+
+/// Whether this key walks the lines kept above the screen rather than being typed into the program.
+///
+/// `Shift+PageUp` and `Shift+PageDown` are the terminal's own keys, the habit from every terminal emulator:
+/// sent on to the shell they would ask a full-screen program to move a page, and a shell at a prompt would
+/// ignore them. Andy: "в терминале не работает прокрутка по Shift-PageUp и Shift-PageDown. Добавь её".
+pub fn walks_the_scrollback(key: Key, modifiers: Modifiers) -> bool {
+    modifiers.shift && matches!(key, Key::PageUp | Key::PageDown)
+}
+
+/// Where the view stands after a page up or down.
+///
+/// A page is one screen less a line, so the line that was at the bottom stays in sight and the eye can follow
+/// what it was reading. Zero is the live screen; the view never goes below it, and never above what is kept.
+pub fn scrolled(view: usize, up: bool, rows: u16, kept: usize) -> usize {
+    let page = (rows.saturating_sub(1)).max(1) as usize;
+    if up {
+        (view + page).min(kept)
+    } else {
+        view.saturating_sub(page)
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_key_with_shift_is_the_terminals_own_and_without_it_is_typed() {
+        assert!(walks_the_scrollback(Key::PageUp, Modifiers::SHIFT));
+        assert!(walks_the_scrollback(Key::PageDown, Modifiers::SHIFT));
+        assert!(
+            !walks_the_scrollback(Key::PageUp, Modifiers::NONE),
+            "a plain PageUp belongs to the program in the terminal"
+        );
+        assert!(!walks_the_scrollback(Key::ArrowUp, Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn the_view_walks_a_page_at_a_time_and_stops_at_both_ends() {
+        // A page keeps one line of the old view, so the eye does not lose what it was reading.
+        assert_eq!(scrolled(0, true, 24, 2000), 23);
+        assert_eq!(scrolled(23, true, 24, 2000), 46);
+        assert_eq!(scrolled(46, false, 24, 2000), 23);
+        assert_eq!(scrolled(23, false, 24, 2000), 0);
+        assert_eq!(
+            scrolled(0, false, 24, 2000),
+            0,
+            "the view went below the live screen"
+        );
+        assert_eq!(
+            scrolled(1999, true, 24, 2000),
+            2000,
+            "the view went above the lines that are kept"
+        );
+        // A pane one row tall would otherwise have a page of zero and never move.
+        assert_eq!(scrolled(0, true, 1, 2000), 1);
     }
 }
 
