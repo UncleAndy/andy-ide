@@ -20,6 +20,15 @@ const FAINT: Color32 = Color32::from_rgb(0xE0, 0xE4, 0xEA);
 const PAPER: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
 /// The lines between things.
 const LINE: Color32 = Color32::from_rgb(0xC3, 0xC9, 0xD2);
+/// The menu bar across the top: the band a person reaches for first, a step darker than a panel,
+/// the way a window's own menu strip is.
+const MENU: Color32 = Color32::from_rgb(0xE1, 0xE5, 0xEA);
+/// The strip the tabs stand on. Darker than a tab, so tabs read as things set on it, and darker
+/// than the page: the space beside the tabs used to be the brightest colour in the window.
+const BAR: Color32 = Color32::from_rgb(0xDC, 0xE0, 0xE6);
+/// A tab that is not in front, and the same tab under the pointer.
+const TAB: Color32 = Color32::from_rgb(0xE9, 0xEC, 0xF1);
+const TAB_HOVER: Color32 = Color32::from_rgb(0xF3, 0xF5, 0xF8);
 /// What a person picked, what the pointer is on, and what is being pressed.
 const SELECTION: Color32 = Color32::from_rgb(0xC7, 0xDB, 0xF4);
 const HOVER: Color32 = Color32::from_rgb(0xDD, 0xE2, 0xE9);
@@ -54,6 +63,64 @@ pub fn visuals(theme: Theme) -> egui::Visuals {
             visuals
         }
     }
+}
+
+/// The fill of the menu bar.
+///
+/// The dark theme keeps egui's own: its panels already stand off the window.
+pub fn menu_fill(theme: Theme) -> Color32 {
+    match theme {
+        Theme::Dark => egui::Visuals::dark().panel_fill,
+        Theme::Light => MENU,
+    }
+}
+
+/// The fill of the strip the tabs stand on.
+pub fn tab_bar_fill(theme: Theme) -> Color32 {
+    match theme {
+        Theme::Dark => egui::Visuals::dark().extreme_bg_color,
+        Theme::Light => BAR,
+    }
+}
+
+/// The look of the dock: the tab bar, the tabs and the body under them.
+///
+/// egui_dock paints the tab bar in `extreme_bg_color`, which is the white of a text field, and the
+/// body in the window fill; in the light theme that left the space beside the tabs as the brightest
+/// thing on screen. The light theme gets the strip and the tabs from here, the dark one egui's own.
+pub fn dock_style(style: &egui::Style, theme: Theme) -> egui_dock::Style {
+    let mut dock = egui_dock::Style::from_egui(style);
+    // The strip is the same grey in both themes; for the dark one that is egui's own colour.
+    dock.tab_bar.bg_fill = tab_bar_fill(theme);
+    if theme == Theme::Light {
+        dock.tab_bar.hline_color = LINE;
+        dock.tab.tab_body.bg_fill = PANEL;
+        dock.tab.inactive.bg_fill = TAB;
+        dock.tab.inactive_with_kb_focus.bg_fill = TAB;
+        dock.tab.hovered.bg_fill = TAB_HOVER;
+        dock.tab.active.bg_fill = PANEL;
+        dock.tab.focused.bg_fill = PANEL;
+        dock.tab.active_with_kb_focus.bg_fill = PANEL;
+        dock.tab.focused_with_kb_focus.bg_fill = PANEL;
+        for tab in [
+            &mut dock.tab.inactive,
+            &mut dock.tab.inactive_with_kb_focus,
+            &mut dock.tab.hovered,
+        ] {
+            tab.outline_color = LINE;
+            tab.text_color = Color32::from_rgb(0x3C, 0x42, 0x4A);
+        }
+        for tab in [
+            &mut dock.tab.active,
+            &mut dock.tab.focused,
+            &mut dock.tab.active_with_kb_focus,
+            &mut dock.tab.focused_with_kb_focus,
+        ] {
+            tab.outline_color = LINE;
+            tab.text_color = Color32::from_rgb(0x17, 0x1A, 0x1E);
+        }
+    }
+    dock
 }
 
 #[cfg(test)]
@@ -145,6 +212,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_tabs_stand_on_a_grey_strip() {
+        // egui_dock paints the tab bar in the colour of a text field, so the space beside the tabs
+        // was the brightest thing in a light window. The strip is its own grey, a tab that is not in
+        // front is lighter than the strip, the tab in front is the colour of the body under it.
+        let style = egui::Style::default();
+        let dark = dock_style(&style, Theme::Dark);
+        let stock = egui_dock::Style::from_egui(&style);
+        assert_eq!(dark.tab_bar.bg_fill, stock.tab_bar.bg_fill);
+        assert_eq!(dark.tab.inactive.bg_fill, stock.tab.inactive.bg_fill);
+
+        let light = dock_style(&style, Theme::Light);
+        let paper = visuals(Theme::Light).extreme_bg_color;
+        assert_eq!(light.tab_bar.bg_fill, BAR);
+        assert_ne!(
+            light.tab_bar.bg_fill, paper,
+            "the strip the tabs stand on is the page's white"
+        );
+        assert!(
+            apart(light.tab.inactive.bg_fill, light.tab_bar.bg_fill) >= 6.0,
+            "a tab is not told apart from the strip it stands on"
+        );
+        // The tab in front belongs to the body under it, not to the strip behind it.
+        assert_eq!(light.tab.active.bg_fill, light.tab.tab_body.bg_fill);
+        assert!(
+            apart(light.tab.tab_body.bg_fill, paper) >= 10.0,
+            "the body of a panel is the colour of the page: {light:?}"
+        );
+        // The words on every tab are read against the tab they stand on.
+        for (tab, what) in [
+            (&light.tab.inactive, "a tab that is not in front"),
+            (&light.tab.active, "the tab in front"),
+        ] {
+            assert!(
+                contrast(tab.text_color, tab.bg_fill) >= 4.5,
+                "{what} reads {:.2}:1",
+                contrast(tab.text_color, tab.bg_fill)
+            );
+        }
+    }
+
+    #[test]
+    fn the_menu_strip_is_greyer_than_the_panels() {
+        let light = visuals(Theme::Light);
+        let menu = menu_fill(Theme::Light);
+        assert_ne!(menu, light.panel_fill, "the menu band is a panel");
+        assert_ne!(menu, light.extreme_bg_color, "the menu band is the page");
+        assert!(
+            apart(menu, light.panel_fill) >= 6.0,
+            "the menu band does not stand off the panels"
+        );
+        // The words of the menu are read on the band, and the band is not the page's white.
+        assert!(
+            contrast(light.text_color(), menu) >= 4.5,
+            "the menu reads {:.2}:1 on its band",
+            contrast(light.text_color(), menu)
+        );
+        // The dark theme keeps egui's own band.
+        assert_eq!(
+            menu_fill(Theme::Dark),
+            egui::Visuals::dark().panel_fill,
+            "the dark theme's menu band was changed"
+        );
     }
 
     #[test]

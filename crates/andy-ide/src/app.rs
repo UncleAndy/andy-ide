@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabInsert, TabPath};
+use egui_dock::{DockArea, DockState, Node, NodePath, Split, TabInsert, TabPath};
 
 use crate::state::{AppState, DEFAULT_FONT_SIZE, MAX_ZOOM, MIN_ZOOM, display_name};
 use crate::ui::{Place, Tab, Viewer};
@@ -253,7 +253,21 @@ impl App {
         // its replies waiting in the queue for a panel nobody had asked to see.
         self.state.agent.pump();
 
-        egui::Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &mut self.state, &mut self.dock));
+        // The menu band is a step darker than the panels under it, the way a window's own menu
+        // strip stands off its client area.
+        let menu_frame = egui::Frame::side_top_panel(ui.style())
+            .fill(crate::ui::theme::menu_fill(self.state.config.theme))
+            .stroke(egui::Stroke::new(
+                1.0,
+                crate::ui::theme::visuals(self.state.config.theme)
+                    .widgets
+                    .noninteractive
+                    .bg_stroke
+                    .color,
+            ));
+        egui::Panel::top("menu_bar")
+            .frame(menu_frame)
+            .show(ui, |ui| menu_bar(ui, &mut self.state, &mut self.dock));
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             crate::ui::status::bar(ui, &self.state);
         });
@@ -269,6 +283,9 @@ impl App {
         // panel not filling the window.
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(4);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            // The theme is read before the state is borrowed: the dock is given its colours, and
+            // the viewer holds the state for the rest of the panel.
+            let theme = self.state.config.theme;
             let mut viewer = Viewer {
                 state: &mut self.state,
             };
@@ -277,7 +294,7 @@ impl App {
             // space under the last row of a panel — between the row of facts and the edge a person
             // sees as the panel's end. The sides and the top keep theirs: there the margin is what
             // holds the text off the border.
-            let mut style = Style::from_egui(ui.style().as_ref());
+            let mut style = crate::ui::theme::dock_style(ui.style().as_ref(), theme);
             style.tab.tab_body.inner_margin.bottom = 0;
             DockArea::new(&mut self.dock)
                 .style(style)

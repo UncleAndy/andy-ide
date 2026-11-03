@@ -9111,8 +9111,9 @@ mod the_agent_panel {
 
     #[test]
     fn the_light_theme_layers_the_window_instead_of_painting_it_white() {
-        // White everywhere is not a light theme: the panels, the page a person writes on and the
-        // window behind them have to read as three surfaces, or the window is one blank sheet.
+        // White everywhere is not a light theme: the band the menu stands on, the strip the tabs
+        // stand on, the panels and the page a person writes on have to read as separate surfaces,
+        // or the window is one blank sheet.
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         let mut gui = Gui {
@@ -9129,13 +9130,15 @@ mod the_agent_panel {
         gui.settle();
         gui.settle();
 
-        // Every large surface painted, by colour: the window, the panels, the page.
+        // Every surface painted, by colour: the window, the strips, the panels, the page. A strip is
+        // wide and thin, so what counts as a surface is width and area, not height.
         let mut surfaces: Vec<egui::Color32> = Vec::new();
         for clipped in &gui.harness.output().shapes {
             if let egui::Shape::Rect(rect) = &clipped.shape {
+                let area = rect.rect.width() * rect.rect.height();
                 if rect.fill == egui::Color32::TRANSPARENT
                     || rect.rect.width() < 150.0
-                    || rect.rect.height() < 100.0
+                    || area < 8_000.0
                 {
                     continue;
                 }
@@ -9144,13 +9147,31 @@ mod the_agent_panel {
                 }
             }
         }
+
         let paper = crate::ui::theme::visuals(ide_core::Theme::Light).extreme_bg_color;
         assert!(
             surfaces.contains(&paper),
             "the page a person writes on was not painted: {surfaces:?}"
         );
-        // Three surfaces at the least — the window, a panel, the page — and the page is the
-        // brightest of them, because it is what is read.
+        // The band the menu stands on and the strip the tabs stand on: the two things that used to
+        // be the same white as the page and made the window read as one sheet.
+        for (colour, what) in [
+            (
+                crate::ui::theme::menu_fill(ide_core::Theme::Light),
+                "menu bar",
+            ),
+            (
+                crate::ui::theme::tab_bar_fill(ide_core::Theme::Light),
+                "tab bar",
+            ),
+        ] {
+            assert!(
+                surfaces.contains(&colour),
+                "the {what} was not painted in its own colour {colour:?}: {surfaces:?}"
+            );
+        }
+        // Three surfaces at the least, and the page is the brightest of them, because it is what is
+        // read.
         assert!(
             surfaces.len() >= 3,
             "the window is made of {} surfaces: {surfaces:?}",
