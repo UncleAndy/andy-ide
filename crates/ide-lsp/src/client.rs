@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use lsp_types::{
     DocumentSymbol, GotoDefinitionResponse, Hover, InitializeResult, Location, Position,
-    PublishDiagnosticsParams, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
+    PublishDiagnosticsParams, ReferenceParams, SignatureHelp, SignatureHelpContext,
+    SignatureHelpParams, SignatureHelpTriggerKind, SymbolInformation, TextDocumentIdentifier,
     TextDocumentItem, TextDocumentPositionParams, Uri,
 };
 use serde_json::{Value, json};
@@ -350,6 +351,19 @@ pub struct LspSession {
     versions: HashMap<PathBuf, i32>,
 }
 
+/// The context of a question about parameters: `(` or `,` was just typed.
+///
+/// It is built in one place so that the window, the tests and any future caller all send
+/// the same thing — a server is allowed to answer only when it knows what triggered it.
+pub fn triggered_by(character: char) -> SignatureHelpContext {
+    SignatureHelpContext {
+        trigger_kind: SignatureHelpTriggerKind::TRIGGER_CHARACTER,
+        trigger_character: Some(character.to_string()),
+        is_retrigger: false,
+        active_signature_help: None,
+    }
+}
+
 impl LspSession {
     /// Starts the server and performs `initialize` / `initialized`.
     pub fn start(config: &'static ServerConfig, root: &Path) -> Result<Self> {
@@ -379,6 +393,10 @@ impl LspSession {
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                     "references": {},
+                    // The window shows the parameters of the call being written, so the server is
+                    // told it may answer with them. Andy asked for it: "и с подсказкой по параметрам
+                    // метода". A server that is not told may stay silent.
+                    "signatureHelp": {},
                     // A server may write its words as snippets — `unwrap()$0`, brackets and a place for the
                     // caret — only if the client says it can take them, and rust-analyzer takes this at its
                     // word: without it the answer is the bare name. That is why a taken method had no
@@ -564,6 +582,38 @@ impl LspSession {
     /// The type and documentation under the cursor.
     pub fn hover(&mut self, path: &Path, position: Position) -> Result<Option<Hover>> {
         let result = self.positioned_request("textDocument/hover", path, position)?;
+        Ok(serde_json::from_value(result).ok().flatten())
+    }
+
+    /// The parameters of the call the caret stands in.
+    ///
+    /// A server answers with the signatures of the callable it found, which of them is
+    /// active, and which parameter of it is being written now. The answer changes as the
+    /// text is typed, so the question is asked again whenever the caret may have moved to
+    /// another parameter.
+    ///
+    /// `context` is what says why the question is asked: `(` and `,` are the triggers, and
+    /// the character is the one that caused it. A server may refuse to answer without it,
+    /// so the window always sends it.
+    pub fn signature_help(
+        &mut self,
+        path: &Path,
+        position: Position,
+        context: Option<SignatureHelpContext>,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = self.uri(path)?;
+        let params = SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            context,
+        };
+        let result = self.process.request(
+            "textDocument/signatureHelp",
+            Some(serde_json::to_value(params)?),
+        )?;
         Ok(serde_json::from_value(result).ok().flatten())
     }
 

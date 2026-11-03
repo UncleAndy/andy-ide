@@ -106,6 +106,52 @@ fn the_handshake_document_sync_and_a_definition_request() {
     session.shutdown();
 }
 
+/// Подсказка по параметрам: ответ доехал, сервер назвал текущий параметр и получил контекст —
+/// то, что спросили именно после «(». Заглушка отвечает отголоском триггера, и это единственное,
+/// по чему видно, что контекст не потерялся по дороге: без него в метке будет "(none)", и
+/// проверка обязана упасть.
+#[test]
+fn the_parameters_of_a_call_come_back() {
+    let dir = project();
+    let mut session = LspSession::start(&FAKE, dir.path()).expect("the server starts");
+    let text = "// заголовок\nfn main() {}\n";
+    let relative = std::path::Path::new("lib.rs");
+    session
+        .did_open(relative, text)
+        .expect("the document is sent");
+
+    let help = session
+        .signature_help(
+            relative,
+            Position {
+                line: 0,
+                character: 0,
+            },
+            Some(ide_lsp::triggered_by('(')),
+        )
+        .expect("a signature help answer")
+        .expect("some signature help");
+
+    assert_eq!(
+        help.active_parameter,
+        Some(1),
+        "the answer says which parameter is being written"
+    );
+    assert_eq!(help.signatures.len(), 1, "one signature came back");
+    let parameters = help.signatures[0]
+        .parameters
+        .as_ref()
+        .expect("the parameters come back with the signature");
+    assert_eq!(parameters.len(), 2, "both parameters came back");
+    assert!(
+        help.signatures[0].label.ends_with("after ("),
+        "the trigger reached the server: got {}",
+        help.signatures[0].label
+    );
+
+    session.shutdown();
+}
+
 #[test]
 fn a_change_reaches_the_server() {
     let dir = project();

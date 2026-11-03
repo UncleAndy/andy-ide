@@ -158,6 +158,28 @@ fn main() {
                     }),
                 );
             }
+            // The answer carries the trigger character back, so a test can tell that the
+            // context really reached the server and was not dropped on the way.
+            "textDocument/signatureHelp" => {
+                let trigger = params["context"]["triggerCharacter"]
+                    .as_str()
+                    .unwrap_or("(none)");
+                write_message(
+                    &mut out,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "signatures": [{
+                                "label": format!("fn push(&mut self, value: T) — after {trigger}"),
+                                "parameters": [{"label": "&mut self"}, {"label": "value: T"}]
+                            }],
+                            "activeSignature": 0,
+                            "activeParameter": 1
+                        }
+                    }),
+                );
+            }
             "textDocument/references" => {
                 write_message(
                     &mut out,
