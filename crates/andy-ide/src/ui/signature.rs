@@ -202,15 +202,42 @@ impl Help {
         self.asked = Some(now);
     }
 
-    /// Takes an answer. `None` means the server knows of no call there, which also clears
-    /// whatever was shown before.
+    /// Takes an answer. `None` means the server knows of no call there, which also clears whatever
+    /// was shown before.
+    ///
+    /// An empty answer also takes back the "asked" mark: a server that has just been told about a
+    /// newly written call may not know it yet, and a question asked once and never again would leave
+    /// the popup missing for good. How often the question may be repeated is the window's business —
+    /// it keeps a pause between them.
     pub fn answer(
         &mut self,
         path: std::path::PathBuf,
         line: u32,
         help: Option<lsp_types::SignatureHelp>,
     ) {
+        if help.is_none() {
+            self.asked = None;
+        }
         self.answer = help.map(|help| (path, line, help));
+    }
+
+    /// One line for the `ANDY_IDE_SIGNATURE_PROBE` run: what the rule sees, and what is known about
+    /// the answer. The same shape as the completion probe, and for the same reason — a popup that
+    /// never appears leaves nothing to look at.
+    pub fn probe(&self, path: &std::path::Path, line: usize, text: &str, caret: usize) -> String {
+        let now = self.now(path, line, text, caret);
+        let what = match &now {
+            Some(call) => format!("вызов: скобка {} параметр {}", call.open, call.argument),
+            None => "вызова нет".to_owned(),
+        };
+        format!(
+            "строка {} каретка {} | {} | ответ {} | спрошено {}",
+            line,
+            caret,
+            what,
+            self.answer.is_some(),
+            self.asked.is_some()
+        )
     }
 
     /// The answer to draw for the call the caret stands in now, if there is one.
@@ -456,6 +483,24 @@ mod signature_tests {
         let mut help = an_answer("fn f(a: u32)", None);
         help.signatures.clear();
         assert_eq!(view_of(&help), None, "nothing to draw");
+    }
+
+    #[test]
+    fn an_empty_answer_leaves_the_call_worth_asking_about_again() {
+        let mut help = Help::default();
+        let call = a_call("a.rs", 3, "push(val", 8).expect("inside");
+        help.asked(call.clone());
+        assert!(!help.due(&call), "asked once, so not due again");
+
+        help.answer(std::path::PathBuf::from("a.rs"), 3, None);
+        assert!(
+            help.due(&call),
+            "an empty answer takes the mark back: the server may not know the call yet"
+        );
+        assert!(
+            help.showing(&Some(call)).is_none(),
+            "and there is nothing to show"
+        );
     }
 
     #[test]

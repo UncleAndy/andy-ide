@@ -364,7 +364,7 @@ impl App {
         if let Some(wait) = self.state.track_completion(now) {
             ui.ctx().request_repaint_after(wait);
         }
-        self.state.track_signature();
+        self.state.track_signature(now);
         if let Some(wait) = self.state.track_highlights(now) {
             ui.ctx().request_repaint_after(wait);
         }
@@ -398,6 +398,10 @@ impl App {
 
         // The list of words has no such line of its own: it is read here, on its own switch, so a
         // person checking completion in the window can see what the list thinks it is doing.
+        if std::env::var_os("ANDY_IDE_SIGNATURE_PROBE").is_some() && self.frames.is_multiple_of(30)
+        {
+            eprintln!("signature probe: {}", self.state.signature_probe());
+        }
         if std::env::var_os("ANDY_IDE_COMPLETION_PROBE").is_some() && self.frames.is_multiple_of(60)
         {
             eprintln!("completion probe: {}", self.state.completion.probe_line());

@@ -192,6 +192,9 @@ pub struct AppState {
     /// already behind answers none of them — the uses stay unmarked for as long as it is asked.
     highlight_failed: bool,
     highlight_failed_at: Option<f64>,
+    /// When the parameters of the call were last asked about, so that an empty answer is not
+    /// followed by the same question in the very next frame.
+    signature_asked_at: Option<f64>,
     /// When the zoom last changed, in input time, and the size last written.
     zoom_changed_at: f64,
     saved_font_size: f32,
@@ -273,6 +276,7 @@ impl AppState {
             highlight_since: 0.0,
             highlight_failed: false,
             highlight_failed_at: None,
+            signature_asked_at: None,
             zoom_changed_at: 0.0,
             saved_font_size,
             last_sync: 0.0,
@@ -594,6 +598,18 @@ impl AppState {
         None
     }
 
+    /// One line for the `ANDY_IDE_SIGNATURE_PROBE` run.
+    pub fn signature_probe(&self) -> String {
+        let Some(buffer) = self.active_buffer() else {
+            return "нет файла".to_owned();
+        };
+        let (line, _) = buffer.line_col();
+        let text = buffer.text().to_owned();
+        let caret = buffer.caret_byte();
+        let path = buffer.path.clone();
+        self.signature.probe(&path, line, &text, caret)
+    }
+
     /// Asks the server about the parameters of the call the caret stands in.
     ///
     /// Asked again only when the call changes: typing inside one parameter leaves the call the
@@ -601,7 +617,17 @@ impl AppState {
     /// comes from the server's own `activeParameter`, which is why the question is repeated on a
     /// comma. Nothing is asked while the list of words is up: two popups at one caret would fight,
     /// and the list is the one being chosen from.
-    pub fn track_signature(&mut self) {
+    pub fn track_signature(&mut self, at: f64) {
+        /// How long to wait before asking again when the answer came back empty. A server told about a
+        /// call that was written a moment ago may not know it yet; without this the question would be
+        /// repeated every frame, and with no retry at all the popup would be missing for good.
+        const PAUSE: f64 = 0.35;
+
+        if let Some(when) = self.signature_asked_at
+            && at - when < PAUSE
+        {
+            return;
+        }
         let Some(buffer) = self.active_buffer() else {
             self.signature.forget();
             return;
@@ -628,6 +654,7 @@ impl AppState {
             .chars()
             .next_back()
             .filter(|letter| *letter == '(' || *letter == ',');
+        self.signature_asked_at = Some(at);
         lsp.send(crate::lsp::Job::SignatureHelp {
             path: now.path.clone(),
             position: lsp_types::Position::new(line as u32, character as u32),
