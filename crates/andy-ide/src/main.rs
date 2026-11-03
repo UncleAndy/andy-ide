@@ -41,6 +41,15 @@ impl Args {
     }
 }
 
+/// The project to open: the one named, or the place the command was given in.
+///
+/// An editor is opened *in a place*. Naming nothing used to open whichever project was remembered from last
+/// time, so `andy-ide` started inside one project opened another one. Andy: "даже если я нахожусь в другом
+/// проекте и не указываю --project, у меня открывается проект RUST/andy-ide".
+fn project_to_open(named: Option<PathBuf>, here: Option<PathBuf>) -> Option<PathBuf> {
+    named.or(here)
+}
+
 /// The window the native backend is asked for.
 ///
 /// Whether it opens maximized is read from the configuration before the window
@@ -71,12 +80,13 @@ fn main() -> eframe::Result<()> {
     }
 
     let args = Args::parse(std::env::args().skip(1));
+    let project = project_to_open(args.project.clone(), std::env::current_dir().ok());
     // Who this window is and which desk it can reach, said once at the start. A notification the
     // desk takes and never shows is otherwise a mystery: the id it answers with says a daemon heard,
     // and only the address says whether that daemon is the one drawing the screen in front of the
     // person. When the two disagree, this line is where the disagreement is legible.
     tracing::info!(
-        project = ?args.project,
+        project = ?project,
         file = ?args.file,
         uid = %std::env::var("UID").unwrap_or_default(),
         user = %std::env::var("USER").unwrap_or_default(),
@@ -92,18 +102,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Andy IDE",
         options,
-        Box::new(move |_cc| {
-            Ok(Box::new(app::App::new(
-                args.project.clone(),
-                args.file.clone(),
-            )))
-        }),
+        Box::new(move |_cc| Ok(Box::new(app::App::new(project.clone(), args.file.clone())))),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, options};
+    use super::{Args, options, project_to_open};
     use std::path::PathBuf;
 
     #[test]
@@ -132,6 +137,27 @@ mod tests {
         );
         assert_eq!(args.project, Some(PathBuf::from("/tmp/p")));
         assert_eq!(args.file, Some(PathBuf::from("/tmp/p/a.rs")));
+    }
+
+    #[test]
+    fn a_named_project_wins_over_the_place_the_command_was_given_in() {
+        assert_eq!(
+            project_to_open(
+                Some(PathBuf::from("/tmp/p")),
+                Some(PathBuf::from("/tmp/here"))
+            ),
+            Some(PathBuf::from("/tmp/p"))
+        );
+    }
+
+    #[test]
+    fn without_a_name_the_place_the_command_was_given_in_is_the_project() {
+        assert_eq!(
+            project_to_open(None, Some(PathBuf::from("/tmp/here"))),
+            Some(PathBuf::from("/tmp/here")),
+            "nothing was named and the directory was ignored, so the remembered project would open"
+        );
+        assert_eq!(project_to_open(None, None), None);
     }
 
     #[test]
