@@ -207,9 +207,9 @@ dash rather than a guess — and so is a balance whose account belongs to anothe
 the model in front: the agent keeps its own last accounting, whoever made it, so a turn on one
 provider can carry the numbers of the one that answered before it. A provider that reports no
 balance but does report limits — a subscription answers with a rolling, a weekly and a monthly
-window — puts all of them in the same place as one figure, `Limits: R99 W99 M100 (%)`: the window
-letter and what is left of it, in the provider order, with every window and its reset on hover.
-The facts share the button's row and never wrap: a row that wraps is a
+window — puts all of them in the same place as one figure, `Limits: 98% (w:99% m:100%)`: the window
+that runs out first, and the others by their letter beside it, with every window and its reset on
+hover. The facts share the button's row and never wrap: a row that wraps is a
 second row, and the second row is the height of the foot, which belongs to the field alone — a
 figure gaining a character (the timer does it several times a second) would otherwise make the foot
 a line taller, on a panel that is repainted only when something moves. What does not fit is left

@@ -81,18 +81,32 @@ pub fn limits(lines: &[String]) -> Vec<Limit> {
         .collect()
 }
 
-/// The windows as the row shows them: `Limits: R99 W99 M100 (%)` — every window by its letter and what
-/// is left of it, in the order the provider sent them, and the unit once at the end. A row is one row:
-/// three shares with a percent sign each would be half again as wide for the same three numbers.
+/// The windows as the row shows them: `Limits: 98% (w:99% m:100%)`.
+///
+/// The figure in front is the window that runs out first — the one a person would hit — and the others
+/// follow in the provider order, each with its letter, because a share that is not yet the tightest only
+/// needs a name when it is read beside one that is. One window alone needs no parentheses at all.
 pub fn limits_figure(limits: &[Limit]) -> Option<String> {
-    if limits.is_empty() {
-        return None;
-    }
-    let windows: Vec<String> = limits
+    let tightest = limits
         .iter()
-        .map(|limit| format!("{}{}", limit.initial(), limit.left))
-        .collect();
-    Some(format!("Limits: {} (%)", windows.join(" ")))
+        .enumerate()
+        .min_by_key(|(_, limit)| limit.left)?
+        .0;
+    let mut others: Vec<String> = Vec::new();
+    for (index, limit) in limits.iter().enumerate() {
+        if index != tightest {
+            others.push(format!(
+                "{}:{}%",
+                limit.initial().to_ascii_lowercase(),
+                limit.left
+            ));
+        }
+    }
+    let mut figure = format!("Limits: {}%", limits[tightest].left);
+    if !others.is_empty() {
+        figure.push_str(&format!(" ({})", others.join(" ")));
+    }
+    Some(figure)
 }
 
 /// How much of a window is left, read from the words of the provider: `99% remaining`, `42% left`,
@@ -264,7 +278,7 @@ mod tests {
         );
         assert_eq!(
             limits_figure(&limits(&go)),
-            Some("Limits: R99 W99 M100 (%)".to_owned())
+            Some("Limits: 99% (w:99% m:100%)".to_owned())
         );
     }
 
@@ -285,11 +299,16 @@ mod tests {
             "Monthly: 5% remaining",
             "Rolling window: 80% remaining",
         ]);
-        // One letter per window, the shares as they came, the unit once: the order is the provider
-        // order, because a row that reorders its own facts reads as a different set of them.
+        // The tightest in front, unlabelled - it is the one a person would hit - and the others in
+        // the provider order with their letters.
         assert_eq!(
             limits_figure(&limits(&block)),
-            Some("Limits: W40 M5 R80 (%)".to_owned())
+            Some("Limits: 5% (w:40% r:80%)".to_owned())
+        );
+        // A window on its own needs no parentheses.
+        assert_eq!(
+            limits_figure(&limits(&lines(&["Monthly: 40% remaining"]))),
+            Some("Limits: 40%".to_owned())
         );
         assert_eq!(limits_figure(&[]), None);
     }

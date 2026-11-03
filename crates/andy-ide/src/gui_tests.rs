@@ -336,7 +336,7 @@ fn a_subscription_that_reports_limits_puts_them_in_one_figure() {
     gui.settle();
 
     assert!(
-        spots(&mut gui, "Limits: R99 W40 M100 (%)") >= 1,
+        spots(&mut gui, "Limits: 40% (r:99% m:100%)") >= 1,
         "the windows the provider reported are not on the line"
     );
     assert_eq!(
