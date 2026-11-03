@@ -53,6 +53,11 @@
 
         runnable = pkgs.writeShellScriptBin "andy-ide" ''
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (graphicsLibs ++ xorgLibs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # The editor starts a language server by its bare name and lets the system find it in PATH, so the
+          # shell the editor was launched from used to decide whether hints worked at all: from a plain
+          # terminal rust-analyzer was not there. The servers this flake knows travel with the wrapper now,
+          # and the rest of the PATH is left as it was.
+          export PATH="${pkgs.lib.makeBinPath [ pkgs.rust-analyzer ]}:$PATH"
           exec ${windowed}/bin/andy-ide "$@"
         '';
       in
