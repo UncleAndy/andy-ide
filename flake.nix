@@ -45,7 +45,18 @@
         windowed = pkgs.rustPlatform.buildRustPackage {
           pname = "andy-ide";
           version = "0.1.0";
-          src = ./.;
+          # The source the build is hashed on: the crates and the lock file. The flake itself is left out,
+          # or every edit of this file — even a comment — changes the hash and rebuilds the whole program.
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: _type: !(builtins.elem (baseNameOf path) [
+              "flake.nix"
+              "flake.lock"
+              ".git"
+              ".hermes"
+              "target"
+            ]);
+          };
           cargoLock.lockFile = ./Cargo.lock;
           # The checks of a windowed program need a window; the devshell is where they run.
           doCheck = false;
@@ -62,7 +73,11 @@
         '';
       in
       {
-        packages.default = windowed;
+        # `default` is the wrapper, not the bare program: `nix profile install` takes `default`, and the
+        # window libraries are opened at run time, so whoever ends up in a profile must be the thing that
+        # hands them over. Installing the bare package is how a perfectly good build answers `NoWaylandLib`.
+        packages.default = runnable;
+        packages.plain = windowed;
         packages.run = runnable;
         apps.default = {
           type = "app";
