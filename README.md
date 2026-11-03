@@ -34,7 +34,7 @@ layout, the caret of every open file, and the switches of the View menu — atom
 filesystem watching, Markdown preview, dark and light themes.
 Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
-Milestone M2 (navigation through a language server) is done, except for completion: the
+Milestone M2 (navigation through a language server) is done: the
 LSP client in `ide-lsp` speaks the protocol to a real child process, and everything it can
 answer is reachable from one door — the editor's context menu. `F12` and `Ctrl+Click` go
 to the definition, `Ctrl+Alt+B` lists the implementations of a trait, `Shift+F12` lists
@@ -45,10 +45,16 @@ caret are dimmed behind the text. `Shift+F6` renames the symbol under the caret:
 server's answer is shown as a list of the places it would change, and nothing is written
 until Enter is pressed on that list. The problems panel shows what the server published.
 Every item of that menu names its key beside it, and the ones that need a symbol under the
-caret are greyed out when the caret stands on no name. What is not there yet: completion.
+caret are greyed out when the caret stands on no name.
+A word is completed from the server as well: the list appears by the caret once the word has
+rested, the arrows walk it, `Enter` takes it, `Esc` closes it until the next letter, and the
+list and the hint yield to each other. After a `.` or `::` the list is asked for at once and
+holds the members of what stands before it, narrowing as letters are typed; a method is taken
+with its brackets and a place for the caret, and the caret goes inside them — or after them
+when the method takes no arguments.
 The client today asks a server for a definition, the implementations of a trait, the places
 a symbol is used, the places that call it, the symbols of a file and of the project, a
-hover, the other uses under the caret and a rename, and for nothing else.
+hover, the other uses under the caret, a rename and a completion, and for nothing else.
 Acceptance report: [`docs/M2_acceptance.md`](docs/M2_acceptance.md).
 Plan and state:
 [`.hermes/plans/2026-11-02_andy-ide-m2-navigation.md`](.hermes/plans/2026-11-02_andy-ide-m2-navigation.md).
