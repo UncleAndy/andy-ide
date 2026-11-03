@@ -93,7 +93,7 @@ impl App {
 ///
 /// The diff and the history are windows onto the repository the Git panel already shows, and the
 /// Git panel says the same things from inside itself; a project that wants them as panels of their
-/// own asks in the View menu, and the answer is remembered with the project.
+/// own asks in the Panels menu, and the answer is remembered with the project.
 const PUT_AWAY_AT_START: [Tab; 2] = [Tab::Diff, Tab::History];
 
 /// Editor in the middle, projects on the left, problems along the bottom.
@@ -872,6 +872,32 @@ pub(crate) fn bring_to_front(dock: &mut DockState<Tab>, tab: Tab) {
     }
 }
 
+/// Every panel the window has, on or off.
+///
+/// The list is built from the panels this build knows rather than written out by hand, so a panel
+/// cannot end up reachable only by remembering its shortcut. A tick shows the panel and brings it to
+/// the front; a panel that is not on screen is put back where its kind belongs, with everything
+/// behind it exactly as it was left. It has a menu of its own: a panel is not a way of looking at a
+/// file, and among the switches that are, it was the one thing that could empty half the window.
+fn panels_menu(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) {
+    let mut asked: Option<(Tab, bool)> = None;
+    for tab in Tab::ALL {
+        let mut shown = dock.find_tab(&tab).is_some();
+        let label = match tab.shortcut() {
+            Some(key) => format!("{title}\t{key}", title = tab.title()),
+            None => tab.title().to_owned(),
+        };
+        if ui.checkbox(&mut shown, label).changed() {
+            asked = Some((tab, shown));
+        }
+    }
+    match asked {
+        Some((tab, true)) => show_panel(dock, state, tab),
+        Some((tab, false)) => hide_panel(dock, state, tab),
+        None => {}
+    }
+}
+
 fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Project", |ui| {
@@ -919,30 +945,8 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 ui.close();
             }
             ui.separator();
-            // Every panel the window has, on or off. The list is built from the panels this
-            // build knows rather than written out here, so a panel cannot end up reachable only
-            // by remembering its shortcut. A tick shows the panel and brings it to the front; a
-            // panel that is not on screen is put back where its kind belongs, with everything
-            // behind it exactly as it was left.
-            let mut asked: Option<(Tab, bool)> = None;
-            for tab in Tab::ALL {
-                let mut shown = dock.find_tab(&tab).is_some();
-                let label = match tab.shortcut() {
-                    Some(key) => format!("{title}\t{key}", title = tab.title()),
-                    None => tab.title().to_owned(),
-                };
-                if ui.checkbox(&mut shown, label).changed() {
-                    asked = Some((tab, shown));
-                }
-            }
-            match asked {
-                Some((tab, true)) => show_panel(dock, state, tab),
-                Some((tab, false)) => hide_panel(dock, state, tab),
-                None => {}
-            }
-            ui.separator();
-            // The window, not what is in it. The key is named beside it, the way the panels above
-            // name theirs.
+            // The window, not what is in it. The key is named beside it, the way the panels name
+            // theirs.
             if ui.button("full screen\tF11").clicked() {
                 state.fullscreen_asked = true;
                 ui.close();
@@ -957,6 +961,8 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                 state.save_config();
             }
         });
+
+        ui.menu_button("Panels", |ui| panels_menu(ui, state, dock));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             match &state.project {
@@ -1508,7 +1514,7 @@ mod layout_persistence_tests {
 
     #[test]
     fn the_view_switches_of_the_project_come_back() {
-        // Every checkbox of the View menu belongs to the project: someone who works without
+        // Every switch the window keeps belongs to the project: someone who works without
         // hints, with the preview on and with hidden files shown gets that window back.
         let (project, config, mut app) = drawn_app();
         app.state.hints = false;

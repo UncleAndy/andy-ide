@@ -30,7 +30,7 @@ Milestone M1 (framework and editing) is complete: window with dock panels, proje
 rope-backed editor with tree-sitter highlighting for twelve languages, tabs, quick open,
 find and replace in the file (`Ctrl+F`, `Ctrl+H`: every match painted, the caret walked
 through them, `Replace all` as one step of undo), a session that comes back — the tabs, the
-layout, the caret of every open file, and the switches of the View menu — atomic save,
+layout, the caret of every open file, and the switches the window keeps — atomic save,
 filesystem watching, Markdown preview, dark and light themes.
 Acceptance report: [`docs/M1_acceptance.md`](docs/M1_acceptance.md).
 
@@ -76,14 +76,17 @@ above the screen: `+` opens another shell, `×` closes it with its process. A UR
 the file at its line in the editor.
 
 Every panel of the window is a place, not a document, and every one of them can be put
-away: the `View` menu lists them all with the key that calls each one, and the `×` on a tab
-means the same thing. Putting a panel away is not throwing it out — a shell keeps running,
-a conversation keeps its words, the changes of a repository keep their places — and the
-panel comes back where its kind belongs: the files on the left, the code in the middle,
-everything else along the bottom beside the problems. Which panels are on screen, and where
-each of them stands, are remembered with the project in `.andy-ide`: the layout is written
-out together with the list of what was put away, so the next launch is the window that was
-left. A layout is read back, not rebuilt — a panel that was dragged somewhere of its own
+away: the `Panels` menu lists them all with the key that calls each one, and the `×` on
+a tab means the same thing. It is a menu of its own, apart from `View`: a panel is not a
+way of looking at a file, and among the switches that are, it was the one line that
+could empty half the window. Putting a panel away is not throwing it out — a shell keeps
+running, a conversation keeps its words, the changes of a repository keep their places —
+and the panel comes back where its kind belongs: the files on the left, the code in the
+middle, everything else along the bottom beside the problems. Which panels are on
+screen, and where each of them stands, are remembered with the project in `.andy-ide`:
+the layout is written out together with the list of what was put away, so the next
+launch is the window that was left.
+A layout is read back, not rebuilt — a panel that was dragged somewhere of its own
 stays there, and only a panel the layout has never heard of is put where its kind belongs.
 A project opened for the first time starts without the `Diff` and `History` panels: the Git
 panel says the same things from inside itself, and a window with fewer tabs is a window

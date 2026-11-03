@@ -117,6 +117,10 @@ fn the_window_has_a_menu_a_project_tree_and_a_status_bar() {
         "no Project menu"
     );
     assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
+    assert!(
+        gui.harness.query_by_label("Panels").is_some(),
+        "no Panels menu"
+    );
 
     // The project tree, read as labels.
     assert!(
@@ -3554,14 +3558,17 @@ mod opening_a_panel {
     }
 
     #[test]
-    fn the_view_menu_names_both_panels() {
+    fn the_panels_menu_names_every_panel() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
-        assert!(gui.harness.query_by_label("View").is_some(), "no View menu");
+        assert!(
+            gui.harness.query_by_label("Panels").is_some(),
+            "no Panels menu"
+        );
 
         // Every panel the window has is a line of the menu, on or off: a panel that is not
         // listed by name can only be reached by remembering its shortcut, and visibility that
         // is a shortcut for some and a blank for the rest is not a visibility at all.
-        gui.harness.get_by_label("View").click();
+        gui.harness.get_by_label("Panels").click();
         gui.settle();
         for tab in Tab::ALL {
             let label = match tab.shortcut() {
@@ -3570,8 +3577,23 @@ mod opening_a_panel {
             };
             assert!(
                 gui.harness.query_by_label(&label).is_some(),
-                "the View menu has no line for {}",
+                "the Panels menu has no line for {}",
                 tab.title()
+            );
+        }
+        // The View menu keeps the switches that change how a file is read, and no panel: a panel
+        // is not a way of looking at a file, and it was the one line there that could empty half
+        // the window. The menu of panels has to be closed first: the labels of an open menu are
+        // on screen wherever they were written from.
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        gui.harness.get_by_label("View").click();
+        gui.settle();
+        for gone in ["Agent\tAlt+0", "Terminal\tAlt+F12"] {
+            assert!(
+                gui.harness.query_by_label(gone).is_none(),
+                "{} is still a line of the View menu",
+                gone
             );
         }
     }
@@ -4676,7 +4698,7 @@ mod the_panels {
         assert!(gui.app().dock.find_tab(&Tab::Agent).is_none());
 
         // The menu is the door it was put away from.
-        gui.harness.get_by_label("View").click();
+        gui.harness.get_by_label("Panels").click();
         gui.settle();
         gui.harness.get_by_label("Agent\tAlt+0").click();
         gui.settle();
@@ -4718,7 +4740,7 @@ mod the_panels {
         );
 
         // And the menu brings it back, which is the door it was put away from.
-        gui.harness.get_by_label("View").click();
+        gui.harness.get_by_label("Panels").click();
         gui.settle();
         gui.harness.get_by_label("Terminal\tAlt+F12").click();
         gui.settle();
@@ -11082,7 +11104,7 @@ mod the_agent_panel {
         );
 
         // The panel's own line in the menu, unchecked.
-        gui.harness.get_by_label("View").click();
+        gui.harness.get_by_label("Panels").click();
         gui.settle();
         gui.harness.get_by_label("Agent\tAlt+0").click();
         gui.settle();
@@ -11103,7 +11125,7 @@ mod the_agent_panel {
         );
 
         // And back it comes, with everything that was in it.
-        gui.harness.get_by_label("View").click();
+        gui.harness.get_by_label("Panels").click();
         gui.settle();
         gui.harness.get_by_label("Agent\tAlt+0").click();
         gui.settle();
