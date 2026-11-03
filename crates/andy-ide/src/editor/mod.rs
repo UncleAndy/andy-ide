@@ -682,31 +682,37 @@ impl EditorBuffer {
     /// name rather than finishing one — the name goes in at the caret. That is what a method list after a dot
     /// needs: the list has been asked for after a dot from the start (`completion::worth_asking`), but taking
     /// a word from it wrote nothing, because there was no word to write over.
-    pub fn complete_with(&mut self, word: &str) -> bool {
+    pub fn complete_with(&mut self, taken: &crate::ui::completion::Written) -> bool {
         let from = match crate::ui::completion::word_under_caret(&self.text, self.caret_byte()) {
             Some((start, existing)) => {
                 let from = self.byte_to_char(start);
                 self.doc
-                    .replace_range(from..from + existing.chars().count(), word);
+                    .replace_range(from..from + existing.chars().count(), &taken.text);
                 from
             }
             None => {
                 let at = self.byte_to_char(self.caret_byte());
-                self.insert_text(word);
+                self.insert_text(&taken.text);
                 at
             }
         };
-        // A method is taken with its brackets. The caret goes inside them, where the arguments go — but only
-        // when there is something to write there: with no arguments at all, `unwrap()`, it goes after the
-        // closing bracket, because a person who took a method with nothing in it wants to write on. Andy:
-        // "если у метода нет аргументов, курсор после вставки надо ставить после закрывающей скобки; если
-        // аргументы есть — оставить как сейчас".
-        let inside = word
-            .find('(')
-            .and_then(|open| word.rfind(')').map(|close| (open, close)))
-            .filter(|(open, close)| !word[open + 1..*close].trim().is_empty())
-            .map(|(open, _)| word[..open].chars().count() + 1);
-        self.cursor = Cursor::caret(from + inside.unwrap_or_else(|| word.chars().count()));
+        // A method is written as a call with empty brackets: the arguments the server offered are left
+        // out, because they stand in the way of the person's own — and there is a hint about them now.
+        // Where the caret goes is said by the server's snippet, which `taken.inside` carries: inside the
+        // brackets when the method takes arguments, after the closing bracket when it takes none, since a
+        // person who took a method with nothing in it wants to write on. Andy: «Лучше аргументы не
+        // подставлять при автозаполнении метода. Если они есть — устанавливать курсор внутрь скобок…
+        // Если их нет — за закрывающей скобкой».
+        let inside = taken
+            .inside
+            .then(|| {
+                taken
+                    .text
+                    .find('(')
+                    .map(|open| taken.text[..open].chars().count() + 1)
+            })
+            .flatten();
+        self.cursor = Cursor::caret(from + inside.unwrap_or_else(|| taken.text.chars().count()));
         self.refresh();
         true
     }
@@ -1108,7 +1114,10 @@ mod complete_with_tests {
         let mut buf = buffer("value.");
         buf.set_caret(buf.text().len());
         assert!(
-            buf.complete_with("len"),
+            buf.complete_with(&crate::ui::completion::Written {
+                text: "len".to_owned(),
+                inside: false,
+            }),
             "the list refused to write after a dot"
         );
         assert_eq!(buf.text(), "value.len");
@@ -1120,13 +1129,19 @@ mod complete_with_tests {
         // Andy: "при выборе метода хорошо бы его добавлять уже с первой скобкой и с подсказкой по параметрам".
         let mut buf = buffer("value.le");
         buf.set_caret(buf.text().len());
-        assert!(buf.complete_with("len()"));
+        assert!(buf.complete_with(&crate::ui::completion::Written {
+            text: "len()".to_owned(),
+            inside: false,
+        }));
         assert_eq!(buf.text(), "value.len()");
 
         // With arguments in the brackets the caret goes between them, where the arguments are written.
         let mut buf = buffer("stack.");
         buf.set_caret(buf.text().len());
-        assert!(buf.complete_with("push(value)"));
+        assert!(buf.complete_with(&crate::ui::completion::Written {
+            text: "push(value)".to_owned(),
+            inside: true,
+        }));
         assert_eq!(buf.text(), "stack.push(value)");
         assert_eq!(
             buf.caret(),
@@ -1140,7 +1155,10 @@ mod complete_with_tests {
         // Andy: "если у метода нет аргументов, курсор после вставки надо ставить после закрывающей скобки".
         let mut buf = buffer("project.unwrap().");
         buf.set_caret(buf.text().len());
-        assert!(buf.complete_with("unwrap()"));
+        assert!(buf.complete_with(&crate::ui::completion::Written {
+            text: "unwrap()".to_owned(),
+            inside: false,
+        }));
         assert_eq!(buf.text(), "project.unwrap().unwrap()");
         assert_eq!(
             buf.caret(),
@@ -1151,7 +1169,10 @@ mod complete_with_tests {
         // The same after a plain name: brackets with nothing in them leave the caret after them.
         let mut buf = buffer("value.le");
         buf.set_caret(buf.text().len());
-        assert!(buf.complete_with("len()"));
+        assert!(buf.complete_with(&crate::ui::completion::Written {
+            text: "len()".to_owned(),
+            inside: false,
+        }));
         assert_eq!(buf.caret(), "value.len()".chars().count());
     }
 
@@ -1159,7 +1180,10 @@ mod complete_with_tests {
     fn a_chosen_name_still_replaces_the_word_being_written() {
         let mut buf = buffer("value.le");
         buf.set_caret(buf.text().len());
-        assert!(buf.complete_with("len"));
+        assert!(buf.complete_with(&crate::ui::completion::Written {
+            text: "len".to_owned(),
+            inside: false,
+        }));
         assert_eq!(
             buf.text(),
             "value.len",

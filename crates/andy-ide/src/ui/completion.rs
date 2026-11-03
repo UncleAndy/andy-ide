@@ -20,13 +20,27 @@ pub const COMPLETION_DELAY: f64 = 0.2;
 /// How many words are offered at most — a longer list is one nobody reads.
 pub const COMPLETION_LIMIT: usize = 12;
 
+/// What is written when a word is taken, and where the caret goes afterwards.
+///
+/// The caret's place is decided by the *server's* snippet and kept here, because the text that is
+/// finally written cannot say it: the arguments are dropped, so `push()` alone does not tell whether
+/// the method takes anything. Andy: «Лучше аргументы не подставлять при автозаполнении метода. Если
+/// они есть — устанавливать курсор внутрь скобок… Если их нет — за закрывающей скобкой».
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// The text to write.
+    pub text: String,
+    /// The call takes arguments, so the caret belongs inside the brackets.
+    pub inside: bool,
+}
+
 /// One word on offer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Offer {
     pub label: String,
     /// What is written when the word is taken: the server's `insertText` when it sent one, since a
     /// word may be written differently from how it is shown.
-    pub insert: String,
+    pub insert: Written,
     /// What the word is, in a word: `fn`, `field`, `type`, `mod`, `keyword`, …
     pub kind: String,
     /// Whatever the server said beside it — a type, a signature.
@@ -102,7 +116,7 @@ fn on_a_character(text: &str, caret: usize) -> usize {
 /// who takes a method wants exactly that — the brackets, and the caret inside them, ready for the
 /// arguments. The bare label is what was taken before, which left the brackets to be typed by hand. Andy:
 /// "при выборе метода хорошо бы его добавлять уже с первой скобкой".
-fn written(item: &lsp_types::CompletionItem) -> String {
+fn written(item: &lsp_types::CompletionItem) -> Written {
     let text = item
         .text_edit
         .as_ref()
@@ -112,7 +126,30 @@ fn written(item: &lsp_types::CompletionItem) -> String {
         })
         .or_else(|| item.insert_text.clone())
         .unwrap_or_else(|| item.label.clone());
-    without_placeholders(&text)
+    // Whether the server offered arguments is read from *its* snippet, before the placeholders are
+    // taken out: written out, `push(${1:value})` becomes `push()`, and the brackets alone no longer
+    // say anything.
+    let takes_arguments = brackets_of(&text)
+        .map(|(open, close)| !text[open + 1..close].trim().is_empty())
+        .unwrap_or(false);
+    let stripped = without_placeholders(&text);
+    let text = match brackets_of(&stripped) {
+        // A call is written with empty brackets: the arguments the server offered would stand in the
+        // way of the person's own, and there is a hint for them now.
+        Some((open, close)) => format!("{}(){}", &stripped[..open], &stripped[close + 1..]),
+        None => stripped,
+    };
+    Written {
+        text,
+        inside: takes_arguments,
+    }
+}
+
+/// The outer pair of brackets of a call, if the text has one.
+fn brackets_of(text: &str) -> Option<(usize, usize)> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    (close > open).then_some((open, close))
 }
 
 /// The snippet's placeholders taken out: `unwrap()$0` is written as `unwrap()`, and `${1:name}` as `name`.
@@ -215,7 +252,7 @@ fn kind_in_words(kind: Option<lsp_types::CompletionItemKind>) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct View {
     /// The word taken with Enter, for the editor to write over the word under the caret.
-    pub taken: Option<String>,
+    pub taken: Option<Written>,
     /// The lines to show: the word, and what stands beside it.
     pub lines: Vec<(String, String)>,
     /// Which of them is chosen.
@@ -458,7 +495,7 @@ impl Completion {
     }
 
     /// The word to write, when one is taken. Taking is what closes the list.
-    pub fn take(&mut self) -> Option<String> {
+    pub fn take(&mut self) -> Option<Written> {
         let offer = self.offers.get(self.selected)?.clone();
         self.close();
         Some(offer.insert)
@@ -594,7 +631,7 @@ mod tests {
         assert!(list.accepted());
         // Taking is what closes it: the state takes the word at the end of the frame, once the word has
         // been written into the file — not the moment Enter is read.
-        assert_eq!(list.take().as_deref(), Some("alpine"));
+        assert_eq!(list.take().map(|word| word.text).as_deref(), Some("alpine"));
         assert!(
             !list.is_open(),
             "the list stayed open after a word was taken"
@@ -715,23 +752,52 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(written(&called), "unwrap()");
+        assert_eq!(written(&called).text, "unwrap()");
 
-        // A placeholder that stands for a name keeps the name, and the first of several choices is taken.
+        // The arguments the server offered are not written: the brackets stay empty, and only the
+        // fact that the method takes something is kept — for the caret.
         called.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
             range: lsp_types::Range::default(),
             new_text: "push(${1:value})$0".to_owned(),
         }));
-        assert_eq!(written(&called), "push(value)");
+        let written_out = written(&called);
+        assert_eq!(written_out.text, "push()", "the argument is not written");
+        assert!(
+            written_out.inside,
+            "…but the caret still belongs inside the brackets"
+        );
+
         called.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
             range: lsp_types::Range::default(),
             new_text: "push(${1|one,two|})$0".to_owned(),
         }));
-        assert_eq!(written(&called), "push(one)");
+        let written_out = written(&called);
+        assert_eq!(
+            written_out.text, "push()",
+            "neither is the first of several choices"
+        );
+        assert!(written_out.inside, "…and the method still takes arguments");
+
+        // Several arguments leave no separators behind: the whole list goes.
+        called.text_edit = Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+            range: lsp_types::Range::default(),
+            new_text: "push(${1:first}, ${2:second})$0".to_owned(),
+        }));
+        let written_out = written(&called);
+        assert_eq!(
+            written_out.text, "push()",
+            "no stray comma is left between the brackets"
+        );
+        assert!(written_out.inside, "…and the caret belongs inside");
 
         // With nothing to write given, the label stands as it always did.
         called.text_edit = None;
-        assert_eq!(written(&called), "unwrap");
+        let written_out = written(&called);
+        assert_eq!(written_out.text, "unwrap");
+        assert!(
+            !written_out.inside,
+            "a word with no brackets takes the caret after itself"
+        );
     }
 
     #[test]
@@ -855,7 +921,10 @@ mod tests {
         assert_eq!(list.offers().len(), 1);
         assert_eq!(
             list.offers()[0].insert,
-            "alpha",
+            Written {
+                text: "alpha".to_owned(),
+                inside: false,
+            },
             "the label is the word to write"
         );
     }
@@ -891,7 +960,7 @@ mod tests {
         };
         list.answer(place(), vec![item("alpha"), item("alpine")]);
         list.move_selection(1);
-        assert_eq!(list.take().as_deref(), Some("alpine"));
+        assert_eq!(list.take().map(|word| word.text).as_deref(), Some("alpine"));
         assert!(!list.is_open(), "the list stayed after a word was taken");
 
         // Escape, and the same word is not asked about again; a new letter is a new word.
