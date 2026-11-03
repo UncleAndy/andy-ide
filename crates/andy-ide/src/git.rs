@@ -175,9 +175,33 @@ impl GitState {
         self.changes.iter().filter(|c| c.area == Area::Worktree)
     }
 
+    /// The changes in the order the panel draws them: the index first, then the work tree.
+    ///
+    /// One order for the list and for the selection, because the two used to differ: `changes` is
+    /// sorted by path and the panel draws two blocks, so the row under the cursor was not the
+    /// change at that index, and `Stage` could put a file other than the one that was clicked
+    /// into the index. Drawing and choosing now read the same list.
+    pub fn listed(&self) -> Vec<Change> {
+        let mut listed: Vec<Change> = Vec::with_capacity(self.changes.len());
+        for area in [Area::Staged, Area::Worktree] {
+            listed.extend(
+                self.changes
+                    .iter()
+                    .filter(|change| change.area == area)
+                    .cloned(),
+            );
+        }
+        listed
+    }
+
     /// The change under the selection, if it is still there.
-    pub fn selected_change(&self) -> Option<&Change> {
-        self.selected.and_then(|index| self.changes.get(index))
+    pub fn selected_change(&self) -> Option<Change> {
+        self.listed().into_iter().nth(self.selected?)
+    }
+
+    /// Puts the selection back on a path, wherever the list has it now.
+    fn keep_selected(&mut self, path: &Path) {
+        self.selected = self.listed().iter().position(|change| change.path == path);
     }
 
     /// Reads the diff of the selected change into `diff`.
@@ -185,7 +209,7 @@ impl GitState {
     /// Kept apart from the panel so the window can ask for it from a key press and
     /// the panel only draws what arrived.
     pub fn open_selected_diff(&mut self) {
-        let Some(change) = self.selected_change().cloned() else {
+        let Some(change) = self.selected_change() else {
             return;
         };
         let Some(repo) = &self.repo else {
@@ -401,18 +425,23 @@ impl GitState {
 
     /// Puts the selected change into the index.
     pub fn stage_selected(&mut self) {
-        let Some(path) = self.selected_change().map(|change| change.path.clone()) else {
+        let Some(change) = self.selected_change() else {
             return;
         };
-        self.apply(|repo| repo.stage(&path), "staged");
+        self.apply(|repo| repo.stage(&change.path), "staged");
+        // The row moves into the index — a lower-case letter and a green line — and the selection
+        // goes with it: a file that changes group and leaves the cursor behind reads as if
+        // nothing had happened.
+        self.keep_selected(&change.path);
     }
 
     /// Takes the selected change out of the index again.
     pub fn unstage_selected(&mut self) {
-        let Some(path) = self.selected_change().map(|change| change.path.clone()) else {
+        let Some(change) = self.selected_change() else {
             return;
         };
-        self.apply(|repo| repo.unstage(&path), "unstaged");
+        self.apply(|repo| repo.unstage(&change.path), "unstaged");
+        self.keep_selected(&change.path);
     }
 
     /// Puts every change into the index.

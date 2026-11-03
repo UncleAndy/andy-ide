@@ -5102,6 +5102,78 @@ mod the_git_panel {
     }
 
     #[test]
+    fn a_staged_change_reads_lower_case_and_keeps_the_cursor_on_it() {
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        std::fs::write(gui._project.path().join("a.txt"), "one\ntwo\n").unwrap();
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+        show_panel(&mut gui);
+        assert!(
+            gui.harness.query_by_label("M  a.txt").is_some(),
+            "a change only on disk is not read with a capital letter"
+        );
+
+        gui.harness.get_by_label("M  a.txt").click();
+        gui.settle();
+        gui.harness.get_by_label("Stage").click();
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label("m  a.txt").is_some(),
+            "the staged row is not read in lower case"
+        );
+        assert!(
+            gui.harness.query_by_label("M  a.txt").is_none(),
+            "the staged row still reads as one that is only on disk"
+        );
+        assert_eq!(
+            gui.app()
+                .state
+                .git
+                .selected_change()
+                .map(|change| change.path.clone()),
+            Some(PathBuf::from("a.txt")),
+            "the cursor left the file it staged"
+        );
+    }
+
+    #[test]
+    fn stage_puts_the_change_under_the_cursor_into_the_index() {
+        // A staged file whose path sorts after the clicked one. `changes` is ordered by path while
+        // the panel draws the index first, so the row's index was not the change's index and
+        // `Stage` took the file that sorted first instead of the one that was clicked.
+        let mut gui = managed(&[("a.txt", "one\n"), ("z.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("z.txt"), "one\ntwo\n").unwrap();
+        git(&root, &["add", "z.txt"]);
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+        show_panel(&mut gui);
+
+        gui.harness.get_by_label("M  a.txt").click();
+        gui.settle();
+        gui.harness.get_by_label("Stage").click();
+        gui.settle();
+
+        let left: Vec<String> = gui
+            .app()
+            .state
+            .git
+            .worktree()
+            .map(|change| change.path.display().to_string())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the file that was clicked is still outside the index: {left:?}"
+        );
+        assert!(
+            gui.harness.query_by_label("m  a.txt").is_some(),
+            "the clicked row did not move into the index"
+        );
+    }
+
+    #[test]
     fn a_changed_line_is_marked_in_the_margin() {
         let mut gui = managed(&[("a.txt", "one\ntwo\nthree\n")], Some("a.txt"));
         assert!(

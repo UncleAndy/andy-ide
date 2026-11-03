@@ -108,7 +108,11 @@ file when its row is clicked; a project that is not a repository says so instead
 showing an empty list. A row is the letter `git status` prints, in the colour of what
 happened to the file, then the whole repository-relative path with its directories
 dimmed — the folder above a name is what tells two `mod.rs` apart — and the row itself
-is the click, the whole width of it, so a list is not something a person has to aim at.
+is the click, the whole width of it, so a list is not something a person has to aim at. What
+is in the index reads differently from what is not: the letter goes to lower case — `m`, `d`,
+`r`, `a` — and the whole row turns green, because the halves of `git status` hold the same
+paths and, without that, a staged file and a changed one were told apart only by the group it
+sat under.
 A single click selects a change, a double click opens the file, and `Enter` shows its
 diff under the list, in the panel itself — both sides read where they live, `HEAD`'s
 tree and the index as objects, the work tree as a file, so looking at a diff cannot

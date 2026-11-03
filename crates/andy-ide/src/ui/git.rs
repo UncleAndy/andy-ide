@@ -13,6 +13,9 @@ use super::{diff, history};
 
 /// The letters `git status` prints, in colours that read on both themes.
 const ADDED: Color32 = Color32::from_rgb(78, 154, 92);
+/// The line of a change that is already in the index: the green of an added line, because it is
+/// the same promise — this is going into the next commit.
+const STAGED: Color32 = Color32::from_rgb(78, 154, 92);
 const MODIFIED: Color32 = Color32::from_rgb(206, 168, 78);
 const DELETED: Color32 = Color32::from_rgb(196, 84, 84);
 const RENAMED: Color32 = Color32::from_rgb(120, 160, 210);
@@ -302,8 +305,19 @@ fn change_row(ui: &mut Ui, selected: bool, change: &Change) -> egui::Response {
 /// answer that tells two `mod.rs` apart, and `git status` prints it for the same reason.
 fn change_text(change: &Change, style: &egui::Style) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
+    // The case of the letter says which half of `git status` the row is in: `M` is a file only on
+    // disk, `m` is one the next commit will take, and `d`/`r` follow the same rule. `git status
+    // --short` keeps the halves apart by column; this list has room for one letter, so the case
+    // carries it — and the whole row turns green with it, because what the next commit takes
+    // should be seen before it is read.
+    let staged = change.area == Area::Staged;
+    let letter = if staged {
+        change.kind.letter().to_ascii_lowercase()
+    } else {
+        change.kind.letter()
+    };
     job.append(
-        &format!("{}  ", change.kind.letter()),
+        &format!("{letter}  "),
         0.0,
         egui::TextFormat {
             font_id: egui::TextStyle::Monospace.resolve(style),
@@ -311,16 +325,24 @@ fn change_text(change: &Change, style: &egui::Style) -> egui::text::LayoutJob {
             ..Default::default()
         },
     );
-    let path = change.path.display().to_string();
+    let (plain_colour, dimmed_colour) = if staged {
+        (STAGED, STAGED.gamma_multiply(0.7))
+    } else {
+        (
+            style.visuals.strong_text_color(),
+            style.visuals.weak_text_color(),
+        )
+    };
     let plain = egui::TextFormat {
         font_id: egui::TextStyle::Body.resolve(style),
-        color: style.visuals.strong_text_color(),
+        color: plain_colour,
         ..Default::default()
     };
     let dimmed = egui::TextFormat {
-        color: style.visuals.weak_text_color(),
+        color: dimmed_colour,
         ..plain.clone()
     };
+    let path = change.path.display().to_string();
     match path.rfind('/') {
         Some(at) => {
             job.append(&path[..=at], 0.0, dimmed);
