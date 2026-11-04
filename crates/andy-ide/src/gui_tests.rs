@@ -6071,6 +6071,156 @@ mod the_project_tree {
             .map(|(_, tab)| *tab)
     }
 
+    /// Puts a panel into the leaf another one stands in, the way a hand drags a tab there.
+    fn move_into(gui: &mut Gui, tab: Tab, beside: Tab) {
+        let (from, to) = {
+            let dock = &mut gui.app_mut().dock;
+            let from = dock.find_tab(&tab).expect("the tab that moves");
+            let to = dock
+                .find_tab(&beside)
+                .expect("the tab it moves to")
+                .node_path();
+            (from, to)
+        };
+        gui.app_mut().dock.move_tab(
+            from,
+            egui_dock::TabDestination::Node(to, egui_dock::TabInsert::Append),
+        );
+        gui.settle();
+    }
+
+    fn hide(gui: &mut Gui, tab: Tab) {
+        let app = gui.app_mut();
+        crate::app::hide_panel(&mut app.dock, &mut app.state, tab);
+    }
+
+    fn show(gui: &mut Gui, tab: Tab) {
+        let app = gui.app_mut();
+        crate::app::show_panel(&mut app.dock, &mut app.state, tab);
+    }
+
+    /// The leaf a panel stands in, as the dock numbers it.
+    fn leaf_of(gui: &mut Gui, tab: Tab) -> Option<egui_dock::NodePath> {
+        gui.app_mut()
+            .dock
+            .find_tab(&tab)
+            .map(|path| path.node_path())
+    }
+
+    #[test]
+    fn a_panel_put_away_comes_back_beside_the_panels_it_stood_with() {
+        // A person drags the editor down beside the problems and closes it. Opening a file brings it
+        // back — and it belongs where it was, not in the middle where the editor starts out.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        move_into(&mut gui, Tab::Editor, Tab::Problems);
+        let together = leaf_of(&mut gui, Tab::Problems);
+        assert_eq!(
+            leaf_of(&mut gui, Tab::Editor),
+            together,
+            "the editor was not moved beside the problems"
+        );
+
+        hide(&mut gui, Tab::Editor);
+        gui.settle();
+        assert!(
+            leaf_of(&mut gui, Tab::Editor).is_none(),
+            "the editor is still in the dock"
+        );
+
+        show(&mut gui, Tab::Editor);
+        gui.settle();
+
+        assert_eq!(
+            leaf_of(&mut gui, Tab::Editor),
+            leaf_of(&mut gui, Tab::Problems),
+            "the editor came back somewhere other than the leaf it was taken from"
+        );
+    }
+
+    #[test]
+    fn a_panel_whose_company_is_gone_goes_where_its_kind_belongs() {
+        // The leaf is the arrangement while it is there. When everything it stood with has gone too,
+        // the panel goes where its kind starts out rather than nowhere.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        move_into(&mut gui, Tab::Editor, Tab::Problems);
+        // The whole leaf goes: the panel stood with the problems, the terminal, the git panel and
+        // the agent, and a panel that comes back beside none of them goes where its kind starts.
+        for tab in [
+            Tab::Editor,
+            Tab::Problems,
+            Tab::Terminal,
+            Tab::Git,
+            Tab::Agent,
+        ] {
+            hide(&mut gui, tab);
+            gui.settle();
+        }
+
+        show(&mut gui, Tab::Editor);
+        gui.settle();
+
+        let leaf = leaf_of(&mut gui, Tab::Editor).expect("the editor did not come back");
+        let leaves: Vec<Vec<Tab>> = gui
+            .app()
+            .dock
+            .iter_leaves()
+            .map(|(_, leaf)| leaf.tabs().to_vec())
+            .collect();
+        assert!(
+            gui.app()
+                .dock
+                .leaf(leaf)
+                .is_ok_and(|leaf| leaf.tabs().len() == 1),
+            "the editor came back into a leaf of strangers: {leaves:?}"
+        );
+    }
+
+    #[test]
+    fn where_the_panels_stood_is_remembered_by_the_project() {
+        // The arrangement outlives the window: a project reopened with the editor put away puts it
+        // back beside the panels it stood with, not in the middle.
+        let project = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        let workspace = ide_core::Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&ide_core::WorkspaceState {
+                hidden: Some(vec!["editor".to_owned()]),
+                company: [("editor".to_owned(), vec!["problems".to_owned()])]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut gui = Gui {
+            harness: window(
+                project.path(),
+                config.path(),
+                &[("a.rs", "fn a() {}\n")],
+                Some("a.rs"),
+            ),
+            _project: project,
+            _config: Some(config),
+        };
+        gui.settle();
+        assert!(
+            leaf_of(&mut gui, Tab::Editor).is_none(),
+            "the editor starts on screen"
+        );
+
+        show(&mut gui, Tab::Editor);
+        gui.settle();
+        assert_eq!(
+            leaf_of(&mut gui, Tab::Editor),
+            leaf_of(&mut gui, Tab::Problems),
+            "the arrangement the project kept was not read"
+        );
+    }
+
     #[test]
     fn a_file_opened_from_the_tree_is_brought_in_front() {
         // A file clicked in the tree is a file read in the editor: a tab opened behind the terminal
@@ -10483,6 +10633,7 @@ mod the_agent_panel {
                 .into_iter()
                 .collect(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
 
@@ -10731,6 +10882,7 @@ mod the_agent_panel {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
 

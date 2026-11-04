@@ -165,6 +165,13 @@ pub struct AppState {
     pub signature: crate::ui::signature::Help,
     /// The dock layout as it will be written back to `.andy-ide`.
     layout: Option<String>,
+    /// Where each panel stands: the panels it shares a leaf with, as of the last frame.
+    ///
+    /// Written down every frame rather than at the moment a panel is closed: the cross on a tab is
+    /// answered by the dock itself, which removes the tab before the window can read the leaf it
+    /// stood in. A panel that comes back goes beside the panels it stood with, which is the thing a
+    /// person arranged — the place its kind starts at is only the answer when that leaf is gone.
+    pub company: Vec<(Tab, Vec<Tab>)>,
     /// The panels the person has put away, in the order they were put away. What is not here is
     /// on screen: a panel that is written down is a panel the dock does not hold.
     pub hidden: Vec<Tab>,
@@ -296,6 +303,7 @@ impl AppState {
             pending: Vec::new(),
             layout: None,
             hidden: Vec::new(),
+            company: Vec::new(),
             prompt: None,
             quit_requested: false,
             quit_decided: false,
@@ -1697,6 +1705,72 @@ impl AppState {
         )
     }
 
+    /// Writes down which panels share a leaf, for the panels that are on screen.
+    pub fn remember_company(&mut self, leaves: &[Vec<Tab>]) {
+        // Only the panels that are on screen are rewritten. A panel that is not in a leaf keeps the
+        // company it had: the record is what brings it back, and a list rebuilt from the panels alone
+        // would wipe the answer in the very frame that put the panel away.
+        for leaf in leaves {
+            for tab in leaf {
+                let others: Vec<Tab> = leaf.iter().copied().filter(|other| other != tab).collect();
+                match self
+                    .company
+                    .iter_mut()
+                    .find(|(surveyed, _)| surveyed == tab)
+                {
+                    Some((_, recorded)) => *recorded = others,
+                    None => self.company.push((*tab, others)),
+                }
+            }
+        }
+    }
+
+    /// The panels a panel shared a leaf with, if the window knows.
+    pub fn company_of(&self, tab: Tab) -> Vec<Tab> {
+        self.company
+            .iter()
+            .find(|(surveyed, _)| *surveyed == tab)
+            .map(|(_, others)| others.clone())
+            .unwrap_or_default()
+    }
+
+    /// The company as the workspace file keeps it: names, not panels.
+    fn company_slugs(&self) -> BTreeMap<String, Vec<String>> {
+        self.company
+            .iter()
+            .map(|(tab, others)| {
+                (
+                    tab.slug().to_owned(),
+                    others.iter().map(|other| other.slug().to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The company the project remembers, if it has ever said.
+    pub fn stored_company(&self) -> Option<BTreeMap<String, Vec<String>>> {
+        let workspace = self.workspace.as_ref()?;
+        let company = workspace.read_state().company;
+        (!company.is_empty()).then_some(company)
+    }
+
+    /// Puts the company of a project back. A name this build does not know is left out: it belongs
+    /// to a build that does.
+    pub fn apply_company(&mut self, company: &BTreeMap<String, Vec<String>>) {
+        self.company = company
+            .iter()
+            .filter_map(|(tab, others)| {
+                Some((
+                    Tab::of_slug(tab)?,
+                    others
+                        .iter()
+                        .filter_map(|other| Tab::of_slug(other))
+                        .collect(),
+                ))
+            })
+            .collect();
+    }
+
     /// The View switches, as the workspace file keeps them: the two the window has now, under
     /// the names it knows them by.
     pub fn view_switches(&self) -> BTreeMap<String, bool> {
@@ -1778,6 +1852,8 @@ impl AppState {
                     .map(|tab| tab.slug().to_owned())
                     .collect(),
             ),
+            // Where the panels stood, for the ones that come back.
+            company: self.company_slugs(),
             // The agent that was on duty, so the next launch can open it as though the
             // person had pressed Start the moment the panel was in front of them. Only an
             // agent that has actually been opened counts: a fresh project has not chosen

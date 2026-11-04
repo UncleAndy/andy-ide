@@ -81,8 +81,11 @@ a tab means the same thing. It is a menu of its own, apart from `View`: a panel 
 way of looking at a file, and among the switches that are, it was the one line that
 could empty half the window. Putting a panel away is not throwing it out — a shell keeps
 running, a conversation keeps its words, the changes of a repository keep their places —
-and the panel comes back where its kind belongs: the files on the left, the code in the
-middle, everything else along the bottom beside the problems. Which panels are on
+and the panel comes back where it was: into the leaf it was taken from, beside the panels
+it stood with, which is the arrangement a person made. Only a panel whose leaf is gone
+goes where its kind belongs — the files on the left, the code in the middle, everything
+else along the bottom beside the problems — and that arrangement is kept with the
+project, so a window reopened puts a put-away panel back where it stood. Which panels are on
 screen, and where each of them stands, are remembered with the project in `.andy-ide`:
 the layout is written out together with the list of what was put away, so the next
 launch is the window that was left — and so is a move to that project through the

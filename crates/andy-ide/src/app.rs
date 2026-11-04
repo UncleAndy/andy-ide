@@ -85,6 +85,10 @@ impl App {
         if let Some(view) = self.state.stored_view() {
             self.state.apply_view(&view);
         }
+        // And where the panels stood, so one that is put away comes back into its own leaf.
+        if let Some(company) = self.state.stored_company() {
+            self.state.apply_company(&company);
+        }
         self.dock = self
             .state
             .stored_layout()
@@ -367,6 +371,15 @@ impl App {
         // back if it was put away, and comes to the front if something else was standing there. The
         // dock was drawn above, before the row was clicked, so the next frame is the one that shows
         // it — and the frame is asked for, or an idle window would keep the change until a keystroke.
+        // Where the panels stand, kept up to date for the ones that are put away and come back. Eight
+        // panels once a frame is not a cost; reading the leaf at the moment of closing would be, and
+        // the dock does the removing itself, before the window can look.
+        let leaves: Vec<Vec<Tab>> = self
+            .dock
+            .iter_leaves()
+            .map(|(_, leaf)| leaf.tabs().to_vec())
+            .collect();
+        self.state.remember_company(&leaves);
         if std::mem::take(&mut self.state.editor_asked) {
             show_panel(&mut self.dock, &mut self.state, Tab::Editor);
             ui.ctx().request_repaint();
@@ -902,9 +915,28 @@ impl App {
 pub(crate) fn show_panel(dock: &mut DockState<Tab>, state: &mut AppState, tab: Tab) {
     state.bring_back(tab);
     if dock.find_tab(&tab).is_none() {
-        place(dock, tab);
+        // Back beside the panels it stood with, if any of them is still on screen: the leaf a person
+        // dragged it into is the arrangement, and the place its kind starts at is only the answer
+        // when that leaf is gone.
+        let beside = state
+            .company_of(tab)
+            .into_iter()
+            .find(|other| put_beside(dock, tab, *other).is_some());
+        if beside.is_none() {
+            place(dock, tab);
+        }
     }
     bring_to_front(dock, tab);
+}
+
+/// Puts a panel into the leaf `anchor` stands in, after the last tab of it.
+///
+/// `None` when the anchor is not on screen, so the caller can try the next panel it stood with.
+fn put_beside(dock: &mut DockState<Tab>, tab: Tab, anchor: Tab) -> Option<()> {
+    let path = dock.find_tab(&anchor)?.node_path();
+    let at = dock.leaf(path).ok()?.tabs().len();
+    dock.leaf_mut(path).ok()?.insert_tab(at, tab);
+    Some(())
 }
 
 /// Puts a panel away: it leaves the dock and the workspace remembers that it is gone.
@@ -1563,6 +1595,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
 
@@ -1681,6 +1714,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
 
@@ -1716,6 +1750,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
 

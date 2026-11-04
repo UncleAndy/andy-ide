@@ -46,6 +46,12 @@ pub struct WorkspaceState {
     /// build's own answer, the second is a person who has shown every panel and means it.
     #[serde(default)]
     pub hidden: Option<Vec<String>>,
+    /// Where each panel stood: the panels it shared a leaf with, by name — the same reason the
+    /// panels themselves are stored by name. A panel put away comes back into the leaf it was taken
+    /// from, which is what a person arranged; the place its kind starts at is only the answer when
+    /// that leaf is gone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub company: BTreeMap<String, Vec<String>>,
     /// The agent that was on duty when the window closed, by the name the window gives it.
     /// The connection to it is opened again on the next launch, the way the conversation it
     /// kept is picked up. A workspace that never connected to one has no line for it at all
@@ -182,6 +188,7 @@ mod tests {
             view: BTreeMap::from([("hints".to_owned(), false)]),
             contexts: Default::default(),
             session_names: Default::default(),
+            company: BTreeMap::from([("editor".to_owned(), vec!["problems".to_owned()])]),
         };
         workspace.write_state(&state).unwrap();
         assert_eq!(workspace.read_state(), state);
@@ -204,6 +211,7 @@ mod tests {
                 view: BTreeMap::new(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                company: Default::default(),
             })
             .unwrap();
         let written = std::fs::read_to_string(workspace.dir().join(WORKSPACE_FILE)).unwrap();
