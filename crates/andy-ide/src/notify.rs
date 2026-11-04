@@ -65,6 +65,40 @@ pub fn should_tell(looking: Looking) -> bool {
     !(looking.focused && looking.panel_in_front)
 }
 
+/// The urgency a desk honours: the one lever a notice has for how long it stands, and not one every
+/// desk knows.
+///
+/// Linux and Windows take it; macOS has no such call unless the crate is built with its
+/// `preview-macos-un` feature, which is off — so asking there is a compile error, not a runtime one.
+/// Nothing is lost on that desk: a notification without a level is still shown.
+#[cfg(any(all(unix, not(target_os = "macos")), target_os = "windows"))]
+fn make_urgent(note: &mut notify_rust::Notification) {
+    note.urgency(notify_rust::Urgency::Critical);
+}
+
+/// The same, where the desk has no such lever.
+#[cfg(not(any(all(unix, not(target_os = "macos")), target_os = "windows")))]
+fn make_urgent(note: &mut notify_rust::Notification) {
+    let _ = note;
+}
+
+/// The desk's own name for the notice.
+///
+/// Only the D-Bus backend answers with one, and only that backend's `id()` is a number: the macOS
+/// and Windows handles carry no id at all, and an id is read here as "a daemon took it". Zero means
+/// the desk did not name it, which is what those desks say.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn handle_id(handle: &notify_rust::NotificationHandle) -> u32 {
+    handle.id()
+}
+
+/// The same, where the handle carries no id.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn handle_id(handle: &notify_rust::NotificationHandle) -> u32 {
+    let _ = handle;
+    0
+}
+
 /// Sends one notification from this very process, before anything else is drawn.
 ///
 /// Kept for the question the probes from a terminal cannot answer: whether the desk is willing to show
@@ -79,9 +113,9 @@ pub fn probe() {
         let mut note = notify_rust::Notification::new();
         note.summary(label).body(label);
         if urgent {
-            note.urgency(notify_rust::Urgency::Critical);
+            make_urgent(&mut note);
         }
-        let sent = note.show().map(|handle| handle.id());
+        let sent = note.show().map(|handle| handle_id(&handle));
         tracing::info!(label, urgent, sent = ?sent, "the probe was sent");
         std::thread::sleep(std::time::Duration::from_millis(3_000));
     };
@@ -154,22 +188,21 @@ impl Surface for System {
         // notice, and urgency is the only lever the protocol has that a desk honours. It also
         // passes a desk setting of do not disturb, which is the right way round for the one thing the
         // person is being told: the agent is waiting for them.
-        match notify_rust::Notification::new()
-            .urgency(notify_rust::Urgency::Critical)
-            .summary(title)
+        let mut note = notify_rust::Notification::new();
+        note.summary(title)
             .body(body)
             .timeout(notify_rust::Timeout::Milliseconds(
                 STANDING.as_millis() as u32
-            ))
-            .show()
-        {
+            ));
+        make_urgent(&mut note);
+        match note.show() {
             Ok(handle) => {
                 // Which bus took it, and under which id: an id means a daemon answered, and a
                 // notification that answered but never appeared means the daemon is not the one
                 // drawing the desk. That difference is invisible without the address.
                 // At info, not debug: when a notification is taken and never seen, this line is the
                 // only way to learn which bus answered — and the default filter would hide it.
-                let id = handle.id();
+                let id = handle_id(&handle);
                 tracing::info!(
                     id,
                     bus = %std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default(),
@@ -188,6 +221,8 @@ impl Surface for System {
 
 #[cfg(test)]
 mod try_the_desk {
+    use super::handle_id;
+
     /// Four notifications that differ only in their words, and say which is which.
     ///
     /// The probe carrying the window's own words was taken with an id and never shown, while
@@ -206,7 +241,7 @@ mod try_the_desk {
                     .body(body)
                     .timeout(notify_rust::Timeout::Milliseconds(20_000))
                     .show()
-                    .map(|handle| handle.id())
+                    .map(|handle| handle_id(&handle))
             );
             std::thread::sleep(std::time::Duration::from_millis(4_000));
         };
