@@ -3214,8 +3214,17 @@ impl AppState {
     pub fn apply_pending(&mut self) {
         for action in std::mem::take(&mut self.pending) {
             match action {
-                Action::OpenFile(rel) => self.open_file(&rel),
+                // Everything that arrives here is a person asking to look at a file — quick open, a
+                // search hit, a problem, a row of the tree, a file of a commit — so the editor comes
+                // forward, the way it does for a row double clicked in the tree. A file opened while
+                // putting a project together does not come through here and does not raise the flag:
+                // it would otherwise put the editor on top of the layout a project was saved with.
+                Action::OpenFile(rel) => {
+                    self.editor_asked = true;
+                    self.open_file(&rel);
+                }
                 Action::OpenFileAt(rel, line, character) => {
+                    self.editor_asked = true;
                     self.open_file(&rel);
                     // The server counts characters in UTF-16 units, so the column
                     // is turned into a byte offset the same way a request is.

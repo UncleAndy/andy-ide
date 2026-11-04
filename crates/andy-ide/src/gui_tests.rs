@@ -7024,13 +7024,14 @@ mod the_project_tree {
             "the editor was not put away"
         );
 
+        // The flag is raised by the door itself: a file asked for is a file to read, whether it was
+        // asked for from the tree, from quick open or from a search hit.
         gui.app_mut()
             .state
             .pending
             .push(crate::state::Action::OpenFile(std::path::PathBuf::from(
                 "b.rs",
             )));
-        gui.app_mut().state.editor_asked = true;
         gui.settle();
         gui.settle();
 
@@ -7041,6 +7042,57 @@ mod the_project_tree {
         assert!(
             !gui.app().state.hidden.contains(&Tab::Editor),
             "the workspace still thinks the editor is put away"
+        );
+    }
+
+    #[test]
+    fn a_file_picked_in_quick_open_is_brought_in_front() {
+        // The same errand as a double click in the tree, and the same defect it had: the file is read,
+        // the tab is made, and the person is left looking at the terminal it was opened behind.
+        let mut gui = Gui::new(
+            &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        {
+            // The editor put away and the terminal in front: the worst of both.
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Editor);
+        }
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Editor).is_none(),
+            "the editor was not put away, so the check proves nothing"
+        );
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::P);
+        gui.settle();
+        assert!(gui.app().state.quick_open.open, "Ctrl+P did not open it");
+
+        gui.harness.event(egui::Event::Text("b.rs".to_owned()));
+        gui.settle();
+        gui.harness.key_press(egui::Key::Enter);
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(
+            gui.app()
+                .state
+                .tabs
+                .active()
+                .map(|index| gui.app().state.tabs.items()[index].path.clone()),
+            Some(std::path::PathBuf::from("b.rs")),
+            "the file picked in quick open is not the one in front"
+        );
+        assert!(
+            gui.app().dock.find_tab(&Tab::Editor).is_some(),
+            "the editor did not come back for a file picked in quick open"
+        );
+        assert_eq!(
+            in_front(&mut gui),
+            Some(Tab::Editor),
+            "the editor did not come to the front of a file picked in quick open"
         );
     }
 
