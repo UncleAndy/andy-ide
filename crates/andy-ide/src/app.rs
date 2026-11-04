@@ -371,6 +371,14 @@ impl App {
         self.state.agent.follow(root, &config);
         self.handle_keys(ui);
         self.state.poll_fs_events();
+        // The answer of the folder dialog arrives on a thread of its own: the window asks for frames
+        // while one is up, so the answer is taken the moment it comes rather than at the next stray
+        // keystroke.
+        self.state.poll_project_choice();
+        if self.state.choosing.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.state.poll_lsp();
         // Only documents with unsaved edits need telling, and not on every
         // keystroke: the server reads the file from disk otherwise.
@@ -941,22 +949,43 @@ fn panels_menu(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab
 fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Project", |ui| {
+            // A project that is not in the list is opened from the desktop's own folder dialog, the
+            // way it is opened from any other program.
+            if ui.button("Open folder\u{2026}").clicked() {
+                state.choose_project();
+                ui.close();
+            }
+            ui.separator();
             ui.label("Recent");
             let recent = state.recent.list().to_vec();
             if recent.is_empty() {
                 ui.weak("nothing yet");
             }
             for path in recent {
-                if ui
-                    .button(display_name(&path))
-                    .on_hover_text(path.display().to_string())
-                    .clicked()
-                {
-                    // The panels and the agent are the window's, and this menu holds only the
-                    // state: the move is asked for here and made by the frame.
-                    state.switch_asked = Some(path);
-                    ui.close();
-                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(display_name(&path))
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        // The panels and the agent are the window's, and this menu holds only the
+                        // state: the move is asked for here and made by the frame.
+                        state.switch_asked = Some(path.clone());
+                        ui.close();
+                    }
+                    // The cross takes an entry out of the list, and asks first: a project leaves
+                    // the list for good, and a press that cannot be taken back is a press a person
+                    // learns to fear.
+                    if ui
+                        .small_button("\u{00d7}")
+                        .on_hover_text("Forget this project")
+                        .clicked()
+                    {
+                        state.prompt =
+                            Some(crate::state::Prompt::ForgetProject { path: path.clone() });
+                        ui.close();
+                    }
+                });
             }
         });
 

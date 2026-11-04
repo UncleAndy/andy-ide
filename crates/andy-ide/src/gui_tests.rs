@@ -6047,6 +6047,188 @@ mod the_remote {
 
 /// The conversation panel, driven by the stand-in agent the crate ships for its tests.
 #[cfg(test)]
+/// Opening a project: from the list of recent projects, and from the desktop's folder dialog.
+mod opening_a_project {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            gui.settle();
+            if check(gui) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        panic!(
+            "{what} did not happen; the status says {:?}",
+            gui.app().state.status
+        );
+    }
+
+    /// A second project on disk, with a file of its own.
+    fn other_project() -> tempfile::TempDir {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(project.path().join("b.rs"), "fn b() {}\n").unwrap();
+        project
+    }
+
+    #[test]
+    fn a_project_is_forgotten_from_the_list_only_after_it_is_asked_about() {
+        // A project leaves the list for good, so the cross asks first, and the asking is drawn
+        // before anything is taken away: a press that cannot be taken back is a press to fear.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let project = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_path_buf();
+        let config = gui.app().state.config_dir.clone();
+        assert_eq!(
+            gui.app().state.recent.list(),
+            std::slice::from_ref(&project)
+        );
+
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        gui.harness.get_by_label("\u{00d7}").click();
+        gui.settle();
+
+        // The question is on screen, and the list is untouched until it is answered.
+        assert_eq!(
+            gui.app().state.prompt,
+            Some(crate::state::Prompt::ForgetProject {
+                path: project.clone()
+            }),
+            "the cross forgot the project without asking"
+        );
+        assert_eq!(
+            gui.app().state.recent.list(),
+            std::slice::from_ref(&project),
+            "the project left the list before the question was answered"
+        );
+
+        // Giving up leaves everything as it was.
+        gui.harness.get_by_label("Cancel").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.recent.list(),
+            std::slice::from_ref(&project)
+        );
+        assert!(gui.app().state.prompt.is_none());
+
+        // And answering takes it away, from the list and from the file the next launch reads.
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        gui.harness.get_by_label("\u{00d7}").click();
+        gui.settle();
+        gui.harness.get_by_label("Forget it").click();
+        gui.settle();
+        gui.settle();
+        assert!(
+            gui.app().state.recent.list().is_empty(),
+            "the project is still in the list"
+        );
+        let written = std::fs::read_to_string(config.join("recent.json")).unwrap_or_default();
+        assert!(
+            !written.contains(&project.to_string_lossy().to_string()),
+            "the forgotten project is still written down: {written}"
+        );
+        // The project in front stays open: forgetting an entry is not closing a window.
+        assert!(gui.app().state.project.is_some());
+    }
+
+    #[test]
+    fn a_project_is_opened_from_the_desktop_folder_dialog() {
+        // A project that is not in the list is opened from the folder dialog, and the dialog is
+        // asked where the person already is: the project in front.
+        let second = other_project();
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let here = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_path_buf();
+        let chooser = std::sync::Arc::new(crate::choose::Written::answering(vec![Some(
+            second.path().to_path_buf(),
+        )]));
+        gui.app_mut().state.chooser = chooser.clone();
+
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        gui.harness.get_by_label("Open folder\u{2026}").click();
+        wait(
+            &mut gui,
+            "the project of the dialog coming in front",
+            |gui| {
+                gui.app()
+                    .state
+                    .project
+                    .as_ref()
+                    .is_some_and(|project| project.root() == second.path())
+            },
+        );
+        assert_eq!(
+            chooser.asked(),
+            vec![Some(here)],
+            "the dialog was not opened where the person was"
+        );
+        // The project that was picked is the one in front, and it is the one the list offers next
+        // time: a project opened by hand joins the list the way one opened from it stays there.
+        assert_eq!(
+            gui.app()
+                .state
+                .recent
+                .list()
+                .first()
+                .and_then(|path| path.file_name()),
+            second.path().canonicalize().unwrap().file_name(),
+            "the project of the dialog did not join the list"
+        );
+    }
+
+    #[test]
+    fn giving_up_in_the_folder_dialog_leaves_the_project_alone() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let here = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_path_buf();
+        gui.app_mut().state.chooser =
+            std::sync::Arc::new(crate::choose::Written::answering(vec![None]));
+
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        gui.harness.get_by_label("Open folder\u{2026}").click();
+        wait(&mut gui, "the dialog going away", |gui| {
+            gui.app().state.choosing.is_none()
+        });
+        gui.settle();
+        assert_eq!(
+            gui.app()
+                .state
+                .project
+                .as_ref()
+                .map(|project| project.root()),
+            Some(here.as_path()),
+            "giving up in the dialog moved the window to another project"
+        );
+        assert_eq!(gui.app().state.status, "no project chosen");
+    }
+}
+
 mod the_agent_panel {
     use super::*;
     use std::time::{Duration, Instant};

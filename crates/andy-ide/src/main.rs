@@ -2,6 +2,7 @@
 
 mod agent;
 mod app;
+mod choose;
 mod credits;
 mod editor;
 mod git;

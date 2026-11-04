@@ -378,11 +378,16 @@ cargo build
 cargo run -p andy-ide -- --project ~/projects/RUST/andy-ide
 ```
 
-Started without `--project`, the editor opens the project that was open last, and
-skips the remembered ones whose directory is gone. `Ctrl`+`+`, `Ctrl`+`-` and
-`Ctrl`+`0` zoom the whole interface, and the size is kept in the `font_size` of
-`~/.config/andy-ide/config.toml`, so the next launch opens at the same scale. A
-window that was maximized comes back maximized: that flag lives in the same file.
+Started without `--project`, the editor opens the project that was open last, and skips
+the remembered ones whose directory is gone. The `Project` menu holds the list, a folder
+dialog for a project that is not in it — `Open folder…` asks the desktop, the dialog
+opens where the person already is, and giving up leaves the window alone — and a cross
+on every row: a project leaves the list only after a question that says what goes and
+what stays, because the entry goes for good and the directory is not touched.
+`Ctrl`+`+`, `Ctrl`+`-` and `Ctrl`+`0` zoom the whole interface, and the size is kept in
+the `font_size` of `~/.config/andy-ide/config.toml`, so the next launch opens at the
+same scale. A window that was maximized comes back maximized: that flag lives in the
+same file.
 
 Build artifacts go to `$HOME/.cache/andy-ide-target`, never into the repository.
 

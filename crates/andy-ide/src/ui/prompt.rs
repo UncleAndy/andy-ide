@@ -55,6 +55,26 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     }
                 });
             }
+            Prompt::ForgetProject { path } => {
+                // A list of projects is a list of afternoons, and an entry that goes without being
+                // asked about is an entry a person fears losing: the question says what leaves and
+                // what stays.
+                ui.heading("Forget this project");
+                ui.label(format!(
+                    "{} leaves the list of recent projects.",
+                    path.display()
+                ));
+                ui.label("The directory and everything in it are left as they are.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Forget it").clicked() {
+                        answer = Some(Action::ForgetProject(path.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(Action::CancelPrompt);
+                    }
+                });
+            }
             Prompt::Quit => {
                 let unsaved = state
                     .buffers

@@ -43,6 +43,14 @@ impl Recent {
         self.entries.truncate(RECENT_LIMIT);
     }
 
+    /// Forgets a project.
+    ///
+    /// The list is the only thing touched: the directory and everything in it are the person's,
+    /// and nothing here has ever known where the directory ends.
+    pub fn remove(&mut self, project: &Path) {
+        self.entries.retain(|existing| existing != project);
+    }
+
     /// The remembered projects, newest first.
     pub fn list(&self) -> &[PathBuf] {
         &self.entries
