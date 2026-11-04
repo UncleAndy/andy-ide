@@ -6089,6 +6089,64 @@ mod the_settings {
     }
 
     #[test]
+    fn the_dialog_never_asks_for_more_than_the_window_has() {
+        // A window is the same pixels at every scale and fewer points the bigger the scale, so the room
+        // is worked out from what is there — the old `min_size(760, 520)` stood half off the screen at
+        // 200 %, with its foot, its `Close` among them, below the bottom edge.
+        use crate::ui::settings::room_for;
+        let roomy = room_for(egui::vec2(1200.0, 800.0));
+        assert_eq!(
+            roomy,
+            egui::vec2(900.0, 672.0),
+            "a wide window gets its sheet"
+        );
+        let doubled = room_for(egui::vec2(600.0, 400.0));
+        assert_eq!(
+            doubled,
+            egui::vec2(472.0, 272.0),
+            "at 200 % the window is the limit"
+        );
+        assert!(doubled.x < 600.0 && doubled.y < 400.0);
+        let cramped = room_for(egui::vec2(20.0, 20.0));
+        assert!(cramped.x <= 20.0 && cramped.y <= 20.0 && cramped.x > 0.0);
+    }
+
+    #[test]
+    fn the_dialog_uses_the_height_the_window_has() {
+        // A dialog sized by its content gave the section on the right a scrollbar while the window
+        // around it stood empty: the list of panels scrolled inside a box a third of the height it
+        // could have had. The room comes from the window now, and this is what says so.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Panels));
+        gui.settle();
+
+        let heading = gui.harness.get_by_label("Settings").rect();
+        let close = gui.harness.get_by_label("Close").rect();
+        let asked_for = gui.harness.ctx.content_rect().size();
+        let tall = close.bottom() - heading.top();
+        assert!(
+            tall > asked_for.y * 0.7,
+            "the dialog is {tall:.0} points tall in a window of {:.0}: it does not use the room \
+             it was given",
+            asked_for.y
+        );
+
+        // And the body between the two is what a section is drawn in: the first row of the Panels
+        // section stands near the top of it, nowhere near the foot.
+        let first = gui.harness.get_by_label("Put back").rect();
+        assert!(
+            close.top() - first.top() > asked_for.y * 0.5,
+            "the section is drawn in {:.0} points of a window {:.0} tall",
+            close.top() - first.top(),
+            asked_for.y
+        );
+    }
+
+    #[test]
     fn every_size_the_dialog_offers_lands_on_that_size() {
         // The scale used to be a slider, and a slider moves its handle to where the pointer pressed: on a
         // straight 0.2…5.0 groove a press in the middle asked for 260 %, so merely touching the control
@@ -6103,6 +6161,13 @@ mod the_settings {
 
         for stop in crate::ui::settings::SCALE_STOPS {
             let label = format!("{:.0}%", stop * 100.0);
+            // Each size is asked for from the same place: a new scale changes the room the dialog has
+            // (the window is the same number of pixels and a different number of points), so the row
+            // moves, and a press aimed at an old rectangle lands on its neighbour.
+            gui.harness.ctx.set_zoom_factor(1.0);
+            gui.app_mut().state.config.font_size = crate::state::DEFAULT_FONT_SIZE;
+            gui.settle();
+            gui.settle();
             gui.harness.get_by_label(&label).click();
             gui.settle();
 

@@ -56,6 +56,39 @@ impl Section {
     }
 }
 
+/// What the window leaves around the dialog, so it reads as a sheet lying on the window rather than as
+/// the window itself.
+const MARGIN: f32 = 64.0;
+/// The room the dialog asks for when the window has more: a section has to be readable without the
+/// dialog becoming a wall of text.
+const LEAST_WIDTH: f32 = 760.0;
+const LEAST_HEIGHT: f32 = 520.0;
+/// However wide the window is, a settings sheet reads badly past this.
+const MOST_WIDTH: f32 = 900.0;
+/// The column of section names.
+const SECTIONS_WIDTH: f32 = 168.0;
+/// The row `Close` stands in, with the space above it.
+const FOOT: f32 = 36.0;
+/// What is left of the window when it cannot hold the least: a dialog may be cramped, but it may not
+/// stand with its foot below the screen.
+const GAP: f32 = 8.0;
+
+/// The room the dialog asks for, from the room the window has.
+///
+/// The window is the same number of pixels at every scale and a different number of points, so at 200 %
+/// it has half the points it has at 100 %: the dialog takes what there is, up to a width that still
+/// reads, and down to nothing more than the window.
+pub(crate) fn room_for(screen: egui::Vec2) -> egui::Vec2 {
+    let spare = egui::vec2(
+        (screen.x - 2.0 * MARGIN).max(GAP),
+        (screen.y - 2.0 * MARGIN).max(GAP),
+    );
+    egui::vec2(
+        spare.x.min(MOST_WIDTH).max(LEAST_WIDTH.min(spare.x)),
+        spare.y.max(LEAST_HEIGHT.min(spare.y)),
+    )
+}
+
 /// The dialog itself: whether it is open, which section is in front, and what is being typed.
 #[derive(Debug, Default)]
 pub struct Settings {
@@ -91,44 +124,60 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, dock: &mut egui_dock::Doc
         return;
     }
     let section = state.settings.section.unwrap_or(Section::View);
+    // The room is taken from the window, not from the content: a dialog sized by what it holds gives a
+    // section a scrollbar while the window around it stands empty, and the section underneath the
+    // scrollbar is the one a person came to read.
+    let room = room_for(ctx.content_rect().size());
+    let body = (room.y - FOOT).max(120.0);
     let mut close = false;
     Modal::new(Id::new("andy-ide-settings")).show(ctx, |ui| {
-        ui.set_min_size(egui::vec2(760.0, 520.0));
+        ui.set_min_size(room);
         ui.horizontal(|ui| {
-            // The list of sections: a column of its own, so the section in front keeps the whole
-            // width for what it says.
-            ui.vertical(|ui| {
-                ui.set_width(150.0);
-                ui.heading("Settings");
-                ui.add_space(6.0);
-                for candidate in Section::ALL {
-                    if ui
-                        .selectable_label(candidate == section, candidate.title())
-                        .clicked()
-                    {
-                        state.settings.section = Some(candidate);
+            // The list of sections: a column of its own, told the same height as the body, so the
+            // separator between the two runs the whole way down.
+            ui.allocate_ui_with_layout(
+                egui::vec2(SECTIONS_WIDTH, body),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.heading("Settings");
+                    ui.add_space(6.0);
+                    for candidate in Section::ALL {
+                        if ui
+                            .selectable_label(candidate == section, candidate.title())
+                            .clicked()
+                        {
+                            state.settings.section = Some(candidate);
+                        }
                     }
-                }
-            });
+                },
+            );
             ui.separator();
-            ui.vertical(|ui| {
-                ui.set_width(560.0);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match section {
-                        Section::View => view_section(ui, state, ctx),
-                        Section::Editor => editor_section(ui, state),
-                        Section::Panels => panels_section(ui, state, dock),
-                        Section::Tools => tools_section(ui, state),
-                        Section::Agent => agent_section(ui, state),
-                        Section::Keys => keys_section(ui),
-                        Section::About => about_section(ui, state, ctx),
-                    });
-                ui.add_space(8.0);
-                if ui.button("Close").clicked() {
-                    close = true;
-                }
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(room.x - SECTIONS_WIDTH - 24.0, body),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(body)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match section {
+                            Section::View => view_section(ui, state, ctx),
+                            Section::Editor => editor_section(ui, state),
+                            Section::Panels => panels_section(ui, state, dock),
+                            Section::Tools => tools_section(ui, state),
+                            Section::Agent => agent_section(ui, state),
+                            Section::Keys => keys_section(ui),
+                            Section::About => about_section(ui, state, ctx),
+                        });
+                },
+            );
+        });
+        ui.add_space(6.0);
+        // The foot keeps the button in the corner a dialog keeps it in, so the eye finds it where the
+        // eye already looks for the way out.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Close").clicked() {
+                close = true;
+            }
         });
     });
     if close {
