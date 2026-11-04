@@ -6047,6 +6047,224 @@ mod the_remote {
 
 /// The conversation panel, driven by the stand-in agent the crate ships for its tests.
 #[cfg(test)]
+/// The tree is a place a person works in, not only reads: files and folders are made, renamed and
+/// taken away from it.
+mod the_project_tree {
+    use super::*;
+    use crate::state::NamingKind;
+
+    fn project_root(gui: &Gui) -> std::path::PathBuf {
+        gui.app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf()
+    }
+
+    #[test]
+    fn a_file_is_made_from_the_tree_menu_and_opens_in_a_tab() {
+        // The menu is where a person starts a file, and a file made there is a file open: a file
+        // written into the project and left for the person to go looking for is half an errand.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = project_root(&gui);
+
+        gui.harness.get_by_label("New").click();
+        gui.settle();
+        gui.harness.get_by_label("New file\u{2026}").click();
+        gui.settle();
+        assert!(
+            gui.app().state.naming.is_some(),
+            "the name was not asked for"
+        );
+
+        type_text(&mut gui, "notes.txt");
+        gui.harness.get_by_label("Create").click();
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            root.join("notes.txt").is_file(),
+            "the file was not written into the project"
+        );
+        assert!(
+            gui.app()
+                .state
+                .tabs
+                .items()
+                .iter()
+                .any(|item| item.path == std::path::Path::new("notes.txt")),
+            "the file that was made did not open: {:?}",
+            gui.app().state.tabs.items()
+        );
+    }
+
+    #[test]
+    fn a_folder_is_made_and_stands_open_in_the_tree() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = project_root(&gui);
+
+        gui.app_mut()
+            .state
+            .ask_for_name(NamingKind::Folder, std::path::PathBuf::new());
+        gui.app_mut().state.naming.as_mut().expect("a name").text = "chapters".to_owned();
+        gui.app_mut().state.write_name();
+        gui.settle();
+
+        assert!(root.join("chapters").is_dir(), "the folder was not made");
+        assert!(
+            gui.app()
+                .state
+                .tree
+                .expanded
+                .contains(std::path::Path::new("chapters")),
+            "the folder that was made is closed in the tree"
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_takes_its_tab_and_its_buffer_with_it() {
+        // Renaming in the tree is the same file under another name: a tab left on the old path
+        // would save into a name the person has just renamed out of existence.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = project_root(&gui);
+
+        gui.app_mut()
+            .state
+            .ask_for_name(NamingKind::Rename, std::path::PathBuf::from("a.rs"));
+        assert_eq!(
+            gui.app().state.naming.as_ref().expect("a name").text,
+            "a.rs",
+            "a rename does not start with the name the file has"
+        );
+        gui.app_mut().state.naming.as_mut().expect("a name").text = "b.rs".to_owned();
+        gui.app_mut().state.write_name();
+        gui.settle();
+
+        assert!(root.join("b.rs").is_file(), "the file did not move on disk");
+        assert!(!root.join("a.rs").exists(), "the old name is still there");
+        assert!(
+            gui.app()
+                .state
+                .tabs
+                .items()
+                .iter()
+                .any(|item| item.path == std::path::Path::new("b.rs")),
+            "the tab still names the old path: {:?}",
+            gui.app().state.tabs.items()
+        );
+        assert!(
+            gui.app()
+                .state
+                .buffers
+                .values()
+                .any(|buffer| buffer.path == std::path::Path::new("b.rs")),
+            "the buffer still names the old path"
+        );
+        // And a save writes into the new name.
+        gui.app_mut().state.save_active();
+        gui.settle();
+        assert!(root.join("b.rs").is_file());
+    }
+
+    #[test]
+    fn a_deleted_file_is_gone_and_its_tab_with_it() {
+        let mut gui = Gui::new(
+            &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+            Some("b.rs"),
+        );
+        gui.settle();
+        let root = project_root(&gui);
+        assert_eq!(gui.app().state.tabs.len(), 1, "one file is open");
+
+        gui.app_mut()
+            .state
+            .delete_path(std::path::Path::new("b.rs"));
+        gui.settle();
+
+        assert!(!root.join("b.rs").exists(), "the file is still on disk");
+        assert!(
+            gui.app().state.tabs.is_empty(),
+            "the tab of a deleted file is still open"
+        );
+    }
+
+    #[test]
+    fn a_file_with_unsaved_edits_is_not_deleted() {
+        // The words on the screen are the person's, and the file is the only place they are
+        // written: deleting it would take them away without a question.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = project_root(&gui);
+        // The edit is put in the buffer the way a keystroke puts it there, without a frame that
+        // waits on the language server warming up: the check is about the refusal, not about typing.
+        gui.app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("a buffer")
+            .insert_text("let b = 2;");
+        gui.app_mut().state.sync_dirty();
+        assert!(
+            gui.app()
+                .state
+                .active_buffer()
+                .is_some_and(|buffer| buffer.is_dirty()),
+            "the buffer is not dirty, so the check proves nothing"
+        );
+
+        gui.app_mut()
+            .state
+            .delete_path(std::path::Path::new("a.rs"));
+
+        assert!(root.join("a.rs").is_file(), "a file with edits was deleted");
+        assert!(
+            gui.app().state.status.contains("not saved"),
+            "the refusal does not say why: {:?}",
+            gui.app().state.status
+        );
+        assert!(
+            !gui.app().state.tabs.is_empty(),
+            "the tab went with the file"
+        );
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_a_file_name_is_refused() {
+        // A separator in the field is not a request for folders, and a name that already stands
+        // there is not a request to overwrite it.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = project_root(&gui);
+
+        for (name, why) in [
+            ("sub/inner.rs", "a separator"),
+            ("a.rs", "a name already in use"),
+        ] {
+            gui.app_mut()
+                .state
+                .ask_for_name(NamingKind::File, std::path::PathBuf::new());
+            gui.app_mut().state.naming.as_mut().expect("a name").text = name.to_owned();
+            gui.app_mut().state.write_name();
+            assert!(!root.join("sub").exists(), "{why} made a folder on the way");
+            assert_eq!(
+                std::fs::read_to_string(root.join("a.rs")).unwrap(),
+                "fn a() {}\n",
+                "{why} overwrote the file"
+            );
+            assert!(
+                gui.app().state.status.contains("is already here")
+                    || gui.app().state.status.contains("is not a name"),
+                "the refusal for {why} does not say why: {:?}",
+                gui.app().state.status
+            );
+        }
+    }
+}
+
 /// Opening a project: from the list of recent projects, and from the desktop's folder dialog.
 mod opening_a_project {
     use super::*;

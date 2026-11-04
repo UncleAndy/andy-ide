@@ -75,6 +75,29 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     }
                 });
             }
+            Prompt::DeletePath { path, dir } => {
+                // A deletion is the one thing in this window that cannot be taken back, so the
+                // question says what goes and says it plainly.
+                ui.heading("Delete");
+                if *dir {
+                    ui.label(format!(
+                        "{} and everything in it are deleted for good.",
+                        path.display()
+                    ));
+                } else {
+                    ui.label(format!("{} is deleted for good.", path.display()));
+                }
+                ui.label("There is no undo in this window; the file system has no bin here.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        answer = Some(Action::DeletePath(path.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(Action::CancelPrompt);
+                    }
+                });
+            }
             Prompt::Quit => {
                 let unsaved = state
                     .buffers

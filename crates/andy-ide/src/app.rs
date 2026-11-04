@@ -391,6 +391,7 @@ impl App {
         }
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
         crate::ui::folder::show(ui.ctx(), &mut self.state);
+        crate::ui::naming::show(ui.ctx(), &mut self.state);
         match self.state.rename.show(ui.ctx()) {
             crate::ui::rename::Reply::Submit => self.state.submit_rename(),
             crate::ui::rename::Reply::Apply => self.state.apply_rename(),

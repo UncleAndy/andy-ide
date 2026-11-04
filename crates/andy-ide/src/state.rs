@@ -59,6 +59,8 @@ pub enum Action {
     Quit,
     /// Take a project out of the list of recent projects.
     ForgetProject(PathBuf),
+    /// Take this path out of the project: a file, or a folder and everything in it.
+    DeletePath(PathBuf),
     /// Go away, do nothing.
     CancelPrompt,
 }
@@ -74,6 +76,31 @@ pub enum Prompt {
     Quit,
     /// A project is about to be taken out of the list of recent projects.
     ForgetProject { path: PathBuf },
+    /// A file or a folder is about to be taken out of the project for good.
+    DeletePath { path: PathBuf, dir: bool },
+}
+
+/// What a name is being written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamingKind {
+    /// A new file inside a folder.
+    File,
+    /// A new folder inside a folder.
+    Folder,
+    /// A new name for what already stands at the path.
+    Rename,
+}
+
+/// A name being written in the dialog: a new file, a new folder, or a rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Naming {
+    pub kind: NamingKind,
+    /// What the name is written for: the folder a new thing goes into, or the thing being renamed.
+    pub at: PathBuf,
+    /// The name being written.
+    pub text: String,
+    /// Whether the field has taken the keyboard yet.
+    pub(crate) focus: bool,
 }
 
 /// Which directories the project tree shows open, and how it is shown.
@@ -143,6 +170,8 @@ pub struct AppState {
     pub hidden: Vec<Tab>,
     /// The folder dialog: a project opened by picking a directory inside the window.
     pub folder: crate::ui::folder::FolderDialog,
+    /// The name being written, when the tree asked for one.
+    pub naming: Option<Naming>,
     /// A project the person asked to open from the `Project` menu.
     ///
     /// The menu knows the state, and a move to another project also rearranges the window: the
@@ -306,6 +335,7 @@ impl AppState {
             last_write: 0.0,
             switch_asked: None,
             folder: crate::ui::folder::FolderDialog::default(),
+            naming: None,
         };
 
         // Launched without a project argument, the editor opens the one the user
@@ -345,6 +375,255 @@ impl AppState {
             .map(|project| project.root().to_path_buf())
             .or_else(|| self.recent.list().first().cloned());
         self.folder.open_at(start.as_deref());
+    }
+
+    /// Asks for a name: a new file or folder in `at`, or a new name for `at` itself.
+    pub fn ask_for_name(&mut self, kind: NamingKind, at: PathBuf) {
+        let text = match kind {
+            // A rename starts with the name the thing has: a person is changing a word, not
+            // writing a path from nothing.
+            NamingKind::Rename => at
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            NamingKind::File | NamingKind::Folder => String::new(),
+        };
+        self.naming = Some(Naming {
+            kind,
+            at,
+            text,
+            focus: false,
+        });
+    }
+
+    /// Writes the name that was asked for, or says why it cannot be written.
+    ///
+    /// A name is one name: a path with a separator in it is refused rather than quietly turned into
+    /// folders nobody asked for, and a name that already stands there is refused rather than
+    /// overwritten — a dialog that can destroy a file on a typo is a dialog a person learns to fear.
+    pub fn write_name(&mut self) {
+        let Some(naming) = self.naming.take() else {
+            return;
+        };
+        let name = naming.text.trim().to_owned();
+        if name.is_empty() {
+            self.status = "a name is needed".to_owned();
+            return;
+        }
+        if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+            self.status = format!("{name} is not a name a file can have");
+            return;
+        }
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        match naming.kind {
+            NamingKind::File | NamingKind::Folder => {
+                let at = if naming.at.as_os_str().is_empty() {
+                    root.clone()
+                } else {
+                    root.join(&naming.at)
+                };
+                let path = at.join(&name);
+                if path.exists() {
+                    self.status = format!("{name} is already here");
+                    return;
+                }
+                let made = match naming.kind {
+                    NamingKind::File => std::fs::write(&path, ""),
+                    _ => std::fs::create_dir(&path),
+                };
+                match made {
+                    Ok(()) => {
+                        match naming.kind {
+                            NamingKind::File => {
+                                let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+                                self.open_file(&rel);
+                                self.status = format!("{name} created");
+                            }
+                            _ => {
+                                // The folder is opened where it was made: a folder nobody can see
+                                // is a folder a person makes twice.
+                                let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+                                self.tree.expanded.insert(rel);
+                                self.status = format!("{name} created");
+                            }
+                        }
+                        self.refresh_index(&root);
+                    }
+                    Err(error) => self.status = format!("cannot create {name}: {error}"),
+                }
+            }
+            NamingKind::Rename => {
+                let old = if naming.at.is_absolute() {
+                    naming.at.clone()
+                } else {
+                    root.join(&naming.at)
+                };
+                let Some(parent) = old.parent().map(Path::to_path_buf) else {
+                    self.status = "there is nowhere to put that name".to_owned();
+                    return;
+                };
+                let new = parent.join(&name);
+                if new == old {
+                    self.status = "the name is the one it had".to_owned();
+                    return;
+                }
+                if new.exists() {
+                    self.status = format!("{name} is already here");
+                    return;
+                }
+                match std::fs::rename(&old, &new) {
+                    Ok(()) => {
+                        // Every tab and every buffer under the old path belongs to the new one: a
+                        // window that kept writing to the old path would save into a file the
+                        // person has just renamed out of existence.
+                        self.repath(&old, &new);
+                        self.status = format!("renamed to {name}");
+                        self.refresh_index(&root);
+                    }
+                    Err(error) => self.status = format!("cannot rename: {error}"),
+                }
+            }
+        }
+    }
+
+    /// Takes a path out of the project: a file, or a folder and everything in it.
+    ///
+    /// A file with edits that are not saved is not deleted: the words on the screen are the person's
+    /// and the file is the only place they are written, so the answer is a refusal that says so
+    /// rather than a dialog that decides for them.
+    pub fn delete_path(&mut self, path: &Path) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+        else {
+            return;
+        };
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let dir = full.is_dir();
+        let unsaved = self.buffers.values().any(|buffer| {
+            let here = self.absolute(&buffer.path);
+            buffer.is_dirty() && (here == full || here.starts_with(&full))
+        });
+        if unsaved {
+            self.status = format!(
+                "{} has edits that are not saved: save or close it first",
+                display_name(&full)
+            );
+            return;
+        }
+        let removed = if dir {
+            std::fs::remove_dir_all(&full)
+        } else {
+            std::fs::remove_file(&full)
+        };
+        match removed {
+            Ok(()) => {
+                // The tabs under the path are closed: a tab whose file is gone can only be saved
+                // back into existence, and that is not what deleting a file means.
+                self.close_tabs_under(&full);
+                self.tree
+                    .expanded
+                    .retain(|expanded| !root.join(expanded).starts_with(&full));
+                self.status = format!("{} deleted", display_name(&full));
+                self.refresh_index(&root);
+            }
+            Err(error) => self.status = format!("cannot delete {}: {error}", display_name(&full)),
+        }
+    }
+
+    /// The path as the window keeps it: a project file is relative to the root, a file from outside
+    /// is absolute — joining an absolute path leaves it alone, so one join answers both.
+    fn absolute(&self, path: &Path) -> PathBuf {
+        match self.project.as_ref() {
+            Some(project) => project.root().join(path),
+            None => path.to_path_buf(),
+        }
+    }
+
+    /// Points every tab, buffer and open folder at a path that moved.
+    fn repath(&mut self, old: &Path, new: &Path) {
+        let root = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+            .unwrap_or_default();
+        for item in self.tabs.items_mut() {
+            let here = root.join(&item.path);
+            if let Ok(rest) = here.strip_prefix(old) {
+                let moved = new.join(rest);
+                item.path = moved
+                    .strip_prefix(&root)
+                    .map(Path::to_path_buf)
+                    .unwrap_or(moved);
+            }
+        }
+        for buffer in self.buffers.values_mut() {
+            let here = root.join(&buffer.path);
+            if let Ok(rest) = here.strip_prefix(old) {
+                let moved = new.join(rest);
+                buffer.path = moved
+                    .strip_prefix(&root)
+                    .map(Path::to_path_buf)
+                    .unwrap_or(moved);
+            }
+        }
+        let expanded: Vec<PathBuf> = self.tree.expanded.iter().cloned().collect();
+        self.tree.expanded.clear();
+        for path in expanded {
+            match root.join(&path).strip_prefix(old) {
+                Ok(rest) => {
+                    let moved = new.join(rest);
+                    self.tree.expanded.insert(
+                        moved
+                            .strip_prefix(&root)
+                            .map(Path::to_path_buf)
+                            .unwrap_or(moved),
+                    );
+                }
+                Err(_) => {
+                    self.tree.expanded.insert(path);
+                }
+            }
+        }
+    }
+
+    /// Closes every tab whose file stands under a path that is gone.
+    fn close_tabs_under(&mut self, path: &Path) {
+        let root = self
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf())
+            .unwrap_or_default();
+        let mut index = 0;
+        while index < self.tabs.len() {
+            let under = self.tabs.items().get(index).is_some_and(|item| {
+                let here = root.join(&item.path);
+                here == path || here.starts_with(path)
+            });
+            if under {
+                self.force_close_tab(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Asks the file list to be built again: a file that appeared or went is one the index does not
+    /// know about, and quick open reads the index.
+    fn refresh_index(&mut self, root: &Path) {
+        self.index = None;
+        self.start_index_refresh(root);
     }
 
     /// Opens a directory as the project: creates `.andy-ide`, shows the cached
@@ -2525,6 +2804,10 @@ impl AppState {
                     self.prompt = None;
                     self.save_tab(index);
                     self.force_close_tab(index);
+                }
+                Action::DeletePath(path) => {
+                    self.prompt = None;
+                    self.delete_path(&path);
                 }
                 Action::ForgetProject(path) => {
                     self.prompt = None;

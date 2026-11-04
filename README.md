@@ -94,6 +94,18 @@ A project opened for the first time starts without the `Diff` and `History` pane
 panel says the same things from inside itself, and a window with fewer tabs is a window
 where the ones that are there can be read.
 
+The tree is a place to work in, not only to read: the `New` menu in its header makes a
+file or a folder in the project root, and every row has a menu of its own — a new file
+or folder beside it, a rename, a delete. A file made there opens at once and a folder
+made there stands open. A renamed file takes its tab and its buffer with it: renaming in
+the tree is the same file under another name, and a tab left on the old path would save
+into a name that is gone. A delete asks first and says what goes — a folder goes with
+everything in it — and a file with edits that are not saved is refused rather than taken
+away, because the words on the screen are the person's and the file is the only place
+they are written. A name with a separator in it, or one that already stands there, is
+refused too: a dialog that can destroy a file on a typo is a dialog a person learns to
+fear.
+
 Plan and state:
 [`.hermes/plans/2026-10-28_andy-ide-m3.md`](.hermes/plans/2026-10-28_andy-ide-m3.md).
 

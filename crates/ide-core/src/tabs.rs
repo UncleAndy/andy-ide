@@ -108,6 +108,12 @@ impl Tabs {
         &self.items
     }
 
+    /// The tabs, for a window pointing them at paths that moved: a file renamed in the tree is the
+    /// same file, and a tab still naming the old path would save into a name that is gone.
+    pub fn items_mut(&mut self) -> &mut [TabItem] {
+        &mut self.items
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
