@@ -6050,29 +6050,14 @@ mod the_remote {
 /// Opening a project: from the list of recent projects, and from the desktop's folder dialog.
 mod opening_a_project {
     use super::*;
-    use std::time::{Duration, Instant};
 
-    fn wait(gui: &mut Gui, what: &str, check: impl Fn(&Gui) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            gui.settle();
-            if check(gui) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(40));
-        }
-        panic!(
-            "{what} did not happen; the status says {:?}",
-            gui.app().state.status
-        );
-    }
-
-    /// A second project on disk, with a file of its own.
-    fn other_project() -> tempfile::TempDir {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
-        std::fs::write(project.path().join("b.rs"), "fn b() {}\n").unwrap();
-        project
+    /// A folder inside the project in front, with a file of its own: a project to walk into
+    /// through the folder dialog, which lists the directories of one folder and nothing else.
+    fn folder_inside(root: &std::path::Path) -> std::path::PathBuf {
+        let folder = root.join("inner");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("b.rs"), "fn b() {}\n").unwrap();
+        folder
     }
 
     #[test]
@@ -6144,10 +6129,9 @@ mod opening_a_project {
     }
 
     #[test]
-    fn a_project_is_opened_from_the_desktop_folder_dialog() {
-        // A project that is not in the list is opened from the folder dialog, and the dialog is
-        // asked where the person already is: the project in front.
-        let second = other_project();
+    fn a_project_is_opened_from_the_folder_dialog() {
+        // The dialog is the window's own: it lists the folders of one directory, walks into one
+        // and opens it as the project. Nothing here waits on another process.
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         let here = gui
             .app()
@@ -6157,41 +6141,83 @@ mod opening_a_project {
             .unwrap()
             .root()
             .to_path_buf();
-        let chooser = std::sync::Arc::new(crate::choose::Written::answering(vec![Some(
-            second.path().to_path_buf(),
-        )]));
-        gui.app_mut().state.chooser = chooser.clone();
+        let inner = folder_inside(&here);
 
         gui.harness.get_by_label("Project").click();
         gui.settle();
         gui.harness.get_by_label("Open folder\u{2026}").click();
-        wait(
-            &mut gui,
-            "the project of the dialog coming in front",
-            |gui| {
-                gui.app()
-                    .state
-                    .project
-                    .as_ref()
-                    .is_some_and(|project| project.root() == second.path())
-            },
-        );
+        gui.settle();
+        assert!(gui.app().state.folder.open, "the dialog did not open");
         assert_eq!(
-            chooser.asked(),
-            vec![Some(here)],
-            "the dialog was not opened where the person was"
+            gui.app().state.folder.current.as_deref(),
+            Some(here.as_path()),
+            "the dialog did not open where the person was"
         );
-        // The project that was picked is the one in front, and it is the one the list offers next
-        // time: a project opened by hand joins the list the way one opened from it stays there.
+
+        // The folder in front is listed, and a click walks into it.
+        gui.harness.get_by_label("inner/").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.folder.current.as_deref(),
+            Some(inner.as_path()),
+            "the dialog did not walk into the folder"
+        );
+
+        gui.harness.get_by_label("Open this folder").click();
+        gui.settle();
+        gui.settle();
+        assert!(!gui.app().state.folder.open, "the dialog stayed open");
         assert_eq!(
             gui.app()
                 .state
-                .recent
-                .list()
-                .first()
-                .and_then(|path| path.file_name()),
-            second.path().canonicalize().unwrap().file_name(),
-            "the project of the dialog did not join the list"
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf()),
+            Some(inner.canonicalize().unwrap()),
+            "the folder the dialog showed is not the project in front"
+        );
+    }
+
+    #[test]
+    fn the_folder_dialog_walks_back_up_and_says_what_it_is_looking_at() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let here = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_path_buf();
+        let inner = folder_inside(&here);
+
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        gui.harness.get_by_label("Open folder\u{2026}").click();
+        gui.settle();
+        gui.harness.get_by_label("inner/").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.folder.current.as_deref(),
+            Some(inner.as_path())
+        );
+
+        // One row up is the folder it came from, and the project is still the one it was.
+        gui.harness.get_by_label("..").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.folder.current.as_deref(),
+            Some(here.as_path()),
+            "the dialog did not walk back up"
+        );
+        assert_eq!(
+            gui.app()
+                .state
+                .project
+                .as_ref()
+                .map(|project| project.root()),
+            Some(here.as_path()),
+            "walking through folders moved the project"
         );
     }
 
@@ -6206,16 +6232,15 @@ mod opening_a_project {
             .unwrap()
             .root()
             .to_path_buf();
-        gui.app_mut().state.chooser =
-            std::sync::Arc::new(crate::choose::Written::answering(vec![None]));
 
         gui.harness.get_by_label("Project").click();
         gui.settle();
         gui.harness.get_by_label("Open folder\u{2026}").click();
-        wait(&mut gui, "the dialog going away", |gui| {
-            gui.app().state.choosing.is_none()
-        });
         gui.settle();
+        gui.harness.get_by_label("Cancel").click();
+        gui.settle();
+
+        assert!(!gui.app().state.folder.open, "the dialog stayed open");
         assert_eq!(
             gui.app()
                 .state

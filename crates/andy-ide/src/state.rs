@@ -141,11 +141,8 @@ pub struct AppState {
     /// The panels the person has put away, in the order they were put away. What is not here is
     /// on screen: a panel that is written down is a panel the dock does not hold.
     pub hidden: Vec<Tab>,
-    /// Who is asked for a directory when a project is opened from a folder dialog.
-    pub chooser: std::sync::Arc<dyn crate::choose::Chooser>,
-    /// A folder being asked for: the answer arrives on this channel, from the thread that holds
-    /// the dialog.
-    pub choosing: Option<crate::choose::Answer>,
+    /// The folder dialog: a project opened by picking a directory inside the window.
+    pub folder: crate::ui::folder::FolderDialog,
     /// A project the person asked to open from the `Project` menu.
     ///
     /// The menu knows the state, and a move to another project also rearranges the window: the
@@ -308,8 +305,7 @@ impl AppState {
             last_state: None,
             last_write: 0.0,
             switch_asked: None,
-            chooser: std::sync::Arc::new(crate::choose::Desktop),
-            choosing: None,
+            folder: crate::ui::folder::FolderDialog::default(),
         };
 
         // Launched without a project argument, the editor opens the one the user
@@ -340,55 +336,15 @@ impl AppState {
         recent.list().iter().find(|path| path.is_dir()).cloned()
     }
 
-    /// Asks the desktop for a directory to open as a project, on a thread of its own.
-    ///
-    /// The dialog is not drawn by this window and cannot be drawn by it: the answer comes back
-    /// through a channel and is taken by [`AppState::poll_project_choice`], so a window whose
-    /// dialog is up is still a window that draws.
+    /// Opens the folder dialog at the project in front, or at the last one, so the person stands
+    /// where they left off.
     pub fn choose_project(&mut self) {
-        if self.choosing.is_some() {
-            return;
-        }
-        let chooser = std::sync::Arc::clone(&self.chooser);
-        // The dialog opens where the person already is: the project in front, or the last one.
         let start = self
             .project
             .as_ref()
             .map(|project| project.root().to_path_buf())
             .or_else(|| self.recent.list().first().cloned());
-        let (sender, answer) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let picked = chooser.choose(start.as_deref());
-            // The receiver may be gone: a window that closed while the dialog was up has nowhere to
-            // put the answer, and nothing is waiting for it.
-            let _ = sender.send(picked);
-        });
-        self.choosing = Some(answer);
-        self.status = "choosing a project\u{2026}".to_owned();
-    }
-
-    /// Takes the answer of the folder dialog, if it has arrived.
-    pub fn poll_project_choice(&mut self) {
-        let Some(answer) = self.choosing.as_ref() else {
-            return;
-        };
-        match answer.try_recv() {
-            Ok(Some(root)) => {
-                self.choosing = None;
-                // Opening it is the same errand as a choice from the list: the frame that holds the
-                // panels is the one that does it.
-                self.switch_asked = Some(root);
-            }
-            Ok(None) => {
-                self.choosing = None;
-                self.status = "no project chosen".to_owned();
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.choosing = None;
-                self.status = "the folder dialog went away".to_owned();
-            }
-        }
+        self.folder.open_at(start.as_deref());
     }
 
     /// Opens a directory as the project: creates `.andy-ide`, shows the cached

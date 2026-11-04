@@ -371,14 +371,6 @@ impl App {
         self.state.agent.follow(root, &config);
         self.handle_keys(ui);
         self.state.poll_fs_events();
-        // The answer of the folder dialog arrives on a thread of its own: the window asks for frames
-        // while one is up, so the answer is taken the moment it comes rather than at the next stray
-        // keystroke.
-        self.state.poll_project_choice();
-        if self.state.choosing.is_some() {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(100));
-        }
         self.state.poll_lsp();
         // Only documents with unsaved edits need telling, and not on every
         // keystroke: the server reads the file from disk otherwise.
@@ -398,6 +390,7 @@ impl App {
                 .push(crate::state::Action::OpenFile(path));
         }
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
+        crate::ui::folder::show(ui.ctx(), &mut self.state);
         match self.state.rename.show(ui.ctx()) {
             crate::ui::rename::Reply::Submit => self.state.submit_rename(),
             crate::ui::rename::Reply::Apply => self.state.apply_rename(),
@@ -949,8 +942,8 @@ fn panels_menu(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab
 fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Project", |ui| {
-            // A project that is not in the list is opened from the desktop's own folder dialog, the
-            // way it is opened from any other program.
+            // A project that is not in the list is opened from the folder dialog, which the window
+            // draws itself: the desktop's own never appeared on this desk.
             if ui.button("Open folder\u{2026}").clicked() {
                 state.choose_project();
                 ui.close();

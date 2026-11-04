@@ -4,6 +4,7 @@ pub mod agent;
 pub mod completion;
 pub mod diff;
 pub mod editor;
+pub mod folder;
 pub mod git;
 pub mod history;
 pub mod hover;
