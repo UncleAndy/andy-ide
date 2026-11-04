@@ -69,6 +69,8 @@ const MOST_WIDTH: f32 = 900.0;
 const SECTIONS_WIDTH: f32 = 168.0;
 /// The row `Close` stands in, with the space above it.
 const FOOT: f32 = 36.0;
+/// The space between the column of section names and the section itself, with the line in the middle.
+const GAP_BETWEEN: f32 = 12.0;
 /// What is left of the window when it cannot hold the least: a dialog may be cramped, but it may not
 /// stand with its foot below the screen.
 const GAP: f32 = 8.0;
@@ -136,53 +138,67 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, dock: &mut egui_dock::Doc
         // scale changed — and, being centred, hangs off the top of a window that just got smaller.
         ui.set_min_size(room);
         ui.set_max_size(room);
-        ui.horizontal(|ui| {
-            // The list of sections: a column of its own, told the same height as the body, so the
-            // separator between the two runs the whole way down.
-            ui.allocate_ui_with_layout(
-                egui::vec2(SECTIONS_WIDTH, body),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.heading("Settings");
-                    ui.add_space(6.0);
-                    for candidate in Section::ALL {
-                        if ui
-                            .selectable_label(candidate == section, candidate.title())
-                            .clicked()
-                        {
-                            state.settings.section = Some(candidate);
-                        }
-                    }
-                },
-            );
-            ui.separator();
-            ui.allocate_ui_with_layout(
-                egui::vec2(room.x - SECTIONS_WIDTH - 24.0, body),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(body)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| match section {
-                            Section::View => view_section(ui, state, ctx),
-                            Section::Editor => editor_section(ui, state),
-                            Section::Panels => panels_section(ui, state, dock),
-                            Section::Tools => tools_section(ui, state),
-                            Section::Agent => agent_section(ui, state),
-                            Section::Keys => keys_section(ui),
-                            Section::About => about_section(ui, state, ctx),
-                        });
-                },
-            );
-        });
-        ui.add_space(6.0);
-        // The foot keeps the button in the corner a dialog keeps it in, so the eye finds it where the
-        // eye already looks for the way out.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Close").clicked() {
-                close = true;
+        // The two columns are given rectangles of their own. A column laid out with a size still ends
+        // where its content ends, so the section started in the middle of the sheet and the rest of the
+        // width — the scroll bar with it — hung short of the right edge.
+        // The room the dialog asked for, not the room the area happened to hand over: an area gives its
+        // content the size of the frame before, and a layout built on that keeps the old size for good.
+        let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(room.x, body));
+        let names = egui::Rect::from_min_size(row.min, egui::vec2(SECTIONS_WIDTH, body));
+        let page = egui::Rect::from_min_max(
+            egui::pos2(names.right() + GAP_BETWEEN, row.top()),
+            row.right_bottom(),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(names), |ui| {
+            ui.heading("Settings");
+            ui.add_space(6.0);
+            for candidate in Section::ALL {
+                if ui
+                    .selectable_label(candidate == section, candidate.title())
+                    .clicked()
+                {
+                    state.settings.section = Some(candidate);
+                }
             }
         });
+        ui.painter().vline(
+            names.right() + GAP_BETWEEN * 0.5,
+            row.y_range(),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
+            // Both axes: when the room is small — a large scale leaves the window few points — a row
+            // of controls can be wider than the section, and an axis that does not scroll lets the
+            // content push the frame out of the window instead of scrolling inside it.
+            egui::ScrollArea::both()
+                .max_height(body)
+                .auto_shrink([false, false])
+                .show(ui, |ui| match section {
+                    Section::View => view_section(ui, state, ctx),
+                    Section::Editor => editor_section(ui, state),
+                    Section::Panels => panels_section(ui, state, dock),
+                    Section::Tools => tools_section(ui, state),
+                    Section::Agent => agent_section(ui, state),
+                    Section::Keys => keys_section(ui),
+                    Section::About => about_section(ui, state, ctx),
+                });
+        });
+        ui.advance_cursor_after_rect(row);
+        // The foot keeps the button in the corner a dialog keeps it in, so the eye finds it where the
+        // eye already looks for the way out — in a rectangle of its own, because a row laid out from
+        // the room the area handed over takes that room for its own and drags the frame out with it.
+        let foot = egui::Rect::from_min_size(
+            egui::pos2(row.left(), row.bottom() + 6.0),
+            egui::vec2(room.x, FOOT - 6.0),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(foot), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+        ui.advance_cursor_after_rect(foot);
     });
     if close {
         state.settings.open = false;
@@ -598,13 +614,18 @@ fn keys_section(ui: &mut egui::Ui) {
     ui.weak("Read from the one table the window answers to; changing them is not here yet.");
     ui.add_space(4.0);
     egui::Grid::new("settings_keys")
-        .num_columns(2)
+        .num_columns(3)
         .spacing([18.0, 4.0])
         .striped(true)
         .show(ui, |ui| {
             for (shortcut, command) in crate::app::KEYS {
                 ui.strong(format_shortcut(*shortcut));
                 ui.label(command.name());
+                // The room that is left goes to the row itself. A grid is as wide as its columns, and
+                // the scroll bar of the section is drawn past the content: a table two thirds of the
+                // width put the bar in the middle of the dialog, beside the words, and a person read
+                // it as a bar in the wrong place.
+                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                 ui.end_row();
             }
         });

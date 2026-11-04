@@ -6089,6 +6089,42 @@ mod the_settings {
     }
 
     #[test]
+    fn probe_scroll_bar() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        for section in [
+            crate::ui::settings::Section::Keys,
+            crate::ui::settings::Section::Tools,
+            crate::ui::settings::Section::Panels,
+        ] {
+            gui.app_mut().state.settings.open_at(Some(section));
+            gui.settle();
+            gui.settle();
+            let mut bands: Vec<egui::Rect> = Vec::new();
+            for shape in gui.harness.output().shapes.iter() {
+                if let egui::Shape::Rect(rect) = &shape.shape {
+                    let fill = rect.fill;
+                    if fill != egui::Color32::TRANSPARENT
+                        && rect.rect.width() > 80.0
+                        && rect.rect.height() < 25.0
+                    {
+                        bands.push(rect.rect);
+                    }
+                }
+            }
+            bands.sort_by(|a, b| a.top().total_cmp(&b.top()));
+            eprintln!(
+                "PROBE {section:?} close={:?} bands={:?}",
+                gui.harness.get_by_label("Close").rect(),
+                bands
+                    .iter()
+                    .map(|r| (r.left(), r.right()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn a_scale_change_does_not_push_the_dialog_off_the_window() {
         // The dialog asks the window for its room every frame, but the modal's area hands the content
         // the size it had on the frame before: a dialog that only said how small it may be kept the
@@ -6149,6 +6185,56 @@ mod the_settings {
             heading.left_top(),
             close.right_bottom(),
             screen.size()
+        );
+    }
+
+    #[test]
+    fn the_keys_table_reaches_the_right_edge_of_the_sheet() {
+        // The scroll bar of a section is drawn past its content, so a table narrower than the sheet put
+        // the bar beside the words — in the middle of the dialog — and it read as a bar in the wrong
+        // place. The rows take the room that is left, and this measures them against the edge the foot's
+        // own button sits on.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Keys));
+        gui.settle();
+        gui.settle();
+
+        let heading = gui.harness.get_by_label("Settings").rect();
+        let close = gui.harness.get_by_label("Close").rect();
+        let mut bands: Vec<egui::Rect> = Vec::new();
+        for shape in gui.harness.output().shapes.iter() {
+            if let egui::Shape::Rect(painted) = &shape.shape {
+                // Bands of the table: inside the sheet, one row tall, and shorter than the sheet —
+                // the backdrop behind the dialog is a band too, and it runs the whole window.
+                if painted.fill != egui::Color32::TRANSPARENT
+                    && painted.rect.left() > heading.right()
+                    && painted.rect.width() > 80.0
+                    && painted.rect.width() < close.right() - heading.left()
+                    && painted.rect.height() < 25.0
+                {
+                    bands.push(painted.rect);
+                }
+            }
+        }
+        assert!(
+            bands.len() > 5,
+            "the table's own bands are not among the shapes: {} found",
+            bands.len()
+        );
+        let widest = bands
+            .iter()
+            .map(|band| band.right())
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (widest - close.right()).abs() < 8.0,
+            "the widest row ends at {widest:.0} and the sheet at {:.0}: a scroll bar stands {:.0} \
+             points short of the edge",
+            close.right(),
+            close.right() - widest
         );
     }
 
