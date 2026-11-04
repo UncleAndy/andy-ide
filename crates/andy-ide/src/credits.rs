@@ -50,6 +50,11 @@ pub struct Limit {
 }
 
 impl Limit {
+    /// Whether this is the window of the day: the one a provider calls rolling.
+    fn is_rolling(&self) -> bool {
+        self.label.to_ascii_lowercase().starts_with("rolling")
+    }
+
     /// The window in one letter: `Rolling window` is `R`, `Weekly` is `W`.
     pub fn initial(&self) -> char {
         self.label
@@ -81,20 +86,25 @@ pub fn limits(lines: &[String]) -> Vec<Limit> {
         .collect()
 }
 
-/// The windows as the row shows them: `Limits: 98% (w:99% m:100%)`.
+/// The windows as the row shows them: `Limits: 96% (w:99% m:98%)`.
 ///
-/// The figure in front is the window that runs out first — the one a person would hit — and the others
-/// follow in the provider order, each with its letter, because a share that is not yet the tightest only
-/// needs a name when it is read beside one that is. One window alone needs no parentheses at all.
+/// The figure in front is the rolling window, without a letter: it answers "can I work now", and it
+/// is the one a person wants without reading brackets — so it keeps the front place even when a
+/// longer window is tighter, and the week and the month follow in the provider order, each with its
+/// letter. A subscription that reports no rolling window is led by the window that runs out first,
+/// because then the tightest is what the front place can say at all. One window alone needs no
+/// parentheses.
 pub fn limits_figure(limits: &[Limit]) -> Option<String> {
-    let tightest = limits
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, limit)| limit.left)?
-        .0;
+    let front = limits.iter().position(Limit::is_rolling).or_else(|| {
+        limits
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, limit)| limit.left)
+            .map(|(index, _)| index)
+    })?;
     let mut others: Vec<String> = Vec::new();
     for (index, limit) in limits.iter().enumerate() {
-        if index != tightest {
+        if index != front {
             others.push(format!(
                 "{}:{}%",
                 limit.initial().to_ascii_lowercase(),
@@ -102,7 +112,7 @@ pub fn limits_figure(limits: &[Limit]) -> Option<String> {
             ));
         }
     }
-    let mut figure = format!("Limits: {}%", limits[tightest].left);
+    let mut figure = format!("Limits: {}%", limits[front].left);
     if !others.is_empty() {
         figure.push_str(&format!(" ({})", others.join(" ")));
     }
@@ -299,11 +309,20 @@ mod tests {
             "Monthly: 5% remaining",
             "Rolling window: 80% remaining",
         ]);
-        // The tightest in front, unlabelled - it is the one a person would hit - and the others in
-        // the provider order with their letters.
+        // The rolling window in front, unlabelled - it is the one that answers what is left today -
+        // and the others in the provider order with their letters, the tightest among them included:
+        // a week that runs out first is still written down, in the brackets.
         assert_eq!(
             limits_figure(&limits(&block)),
-            Some("Limits: 5% (w:40% r:80%)".to_owned())
+            Some("Limits: 80% (w:40% m:5%)".to_owned())
+        );
+        // A subscription with no rolling window is led by the one that runs out first.
+        assert_eq!(
+            limits_figure(&limits(&lines(&[
+                "Weekly: 40% remaining",
+                "Monthly: 5% remaining",
+            ]))),
+            Some("Limits: 5% (w:40%)".to_owned())
         );
         // A window on its own needs no parentheses.
         assert_eq!(
