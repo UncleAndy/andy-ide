@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use ide_agents::Usage;
 use ide_core::{
@@ -101,6 +102,129 @@ pub struct Naming {
     pub text: String,
     /// Whether the field has taken the keyboard yet.
     pub(crate) focus: bool,
+}
+
+/// What the window does about a language server that died.
+///
+/// A server is brought back on its own, but not as fast as the window repaints: the wait grows with
+/// each death in a row, and after a few the window stops trying and says so. A person's own question
+/// still starts a server — a person is not a loop.
+#[derive(Debug, Default)]
+pub struct Recovery {
+    /// Deaths in a row, with no answer between them.
+    attempts: u32,
+    /// When the next restart is due, if one is.
+    at: Option<Instant>,
+}
+
+/// What the window does next about a server that died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryNext {
+    /// It comes back after this wait.
+    After(Duration),
+    /// The window has stopped bringing it back on its own.
+    GiveUp,
+}
+
+impl Recovery {
+    /// Deaths in a row before the window stops bringing the server back by itself.
+    pub const LIMIT: u32 = 3;
+
+    /// The server died: says how long the window waits before bringing it back, or that it gives up.
+    pub fn died(&mut self, now: Instant) -> RecoveryNext {
+        self.attempts += 1;
+        if self.attempts > Self::LIMIT {
+            self.at = None;
+            return RecoveryNext::GiveUp;
+        }
+        // Half a second, a second, two: a server that dies on start is not started again at the speed
+        // of the display.
+        let wait = Duration::from_millis(500 * (1 << (self.attempts - 1)));
+        self.at = Some(now + wait);
+        RecoveryNext::After(wait)
+    }
+
+    /// The server answered: whatever died before it was not a loop.
+    pub fn ready(&mut self) {
+        self.attempts = 0;
+        self.at = None;
+    }
+
+    /// Whether a restart is due, and forgets it: the caller starts the server or gives up on it.
+    pub fn take_due(&mut self, now: Instant) -> bool {
+        if self.at.is_some_and(|at| now >= at) {
+            self.at = None;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the window is waiting to bring the server back.
+    pub fn waiting(&self) -> bool {
+        self.at.is_some()
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::{Recovery, RecoveryNext};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_server_that_keeps_dying_is_brought_back_with_a_growing_wait() {
+        // A server that dies on start would otherwise be started again at the speed of the display:
+        // each death in a row buys a longer wait, and the fourth ends the trying.
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        assert_eq!(
+            recovery.died(now),
+            RecoveryNext::After(Duration::from_millis(500))
+        );
+        assert!(recovery.waiting());
+        assert_eq!(
+            recovery.died(now),
+            RecoveryNext::After(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            recovery.died(now),
+            RecoveryNext::After(Duration::from_millis(2000))
+        );
+        assert_eq!(recovery.died(now), RecoveryNext::GiveUp);
+        assert!(
+            !recovery.waiting(),
+            "the window is still waiting after it gave up"
+        );
+    }
+
+    #[test]
+    fn the_restart_is_due_once_and_then_it_is_the_callers() {
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        let RecoveryNext::After(wait) = recovery.died(now) else {
+            panic!("the first death does not wait");
+        };
+        assert!(!recovery.take_due(now), "the wait is not over yet");
+        assert!(recovery.take_due(now + wait), "the restart was never due");
+        assert!(
+            !recovery.take_due(now + wait),
+            "the same restart is offered twice"
+        );
+    }
+
+    #[test]
+    fn a_server_that_answers_ends_the_count() {
+        // A server that ran for a while and then died is not a loop: the next death starts again from
+        // half a second rather than from the end of the budget.
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        recovery.died(now);
+        recovery.died(now);
+        recovery.ready();
+        assert_eq!(
+            recovery.died(now),
+            RecoveryNext::After(Duration::from_millis(500))
+        );
+    }
 }
 
 /// Which directories the project tree shows open, and how it is shown.
@@ -226,6 +350,8 @@ pub struct AppState {
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
     pub lsp_status: String,
+    /// What the window does about a server that died.
+    pub recovery: Recovery,
     /// The caret whose uses were last asked for, and when it got there.
     highlight_key: Option<(PathBuf, usize)>,
     highlight_asked: Option<(PathBuf, usize)>,
@@ -322,6 +448,7 @@ impl AppState {
             agent: crate::agent::AgentState::default(),
             lsp: None,
             lsp_status: String::new(),
+            recovery: Recovery::default(),
             highlight_key: None,
             highlight_asked: None,
             highlight_asked_word: None,
@@ -669,6 +796,12 @@ impl AppState {
                 self.recent.add(canonical.clone());
                 let _ = self.recent.save(&self.config_dir.join("recent.json"));
 
+                // The server of the project being left is dropped: it was started in another
+                // directory and cannot answer about this one, and `ensure_lsp` would keep it as long as
+                // it is there.
+                self.lsp = None;
+                self.lsp_status.clear();
+                self.recovery = Recovery::default();
                 self.tree.expanded.clear();
                 self.tabs = Tabs::new();
                 self.buffers.clear();
@@ -2407,6 +2540,12 @@ impl AppState {
 
     /// Takes what the language server answered since the last frame.
     pub fn poll_lsp(&mut self) {
+        // A server that has gone is noticed here, on the frame that would otherwise wait for an answer
+        // that can never come: navigation stops silently, and the status bar says nothing about it.
+        if self.lsp.as_mut().is_some_and(|lsp| lsp.finished()) {
+            self.server_gone();
+        }
+        self.restart_the_server_if_due();
         let Some(lsp) = self.lsp.as_ref() else {
             return;
         };
@@ -2416,9 +2555,55 @@ impl AppState {
         }
     }
 
+    /// The language server has gone: it is dropped, the window says so, and a restart is either
+    /// scheduled or refused — a server that dies on start is not started again at the speed of the
+    /// display.
+    pub(crate) fn server_gone(&mut self) {
+        let name = self
+            .lsp_status
+            .trim_end_matches(PROCESSING)
+            .trim()
+            .to_owned();
+        let name = if name.is_empty() {
+            "the language server".to_owned()
+        } else {
+            name
+        };
+        self.lsp = None;
+        self.lsp_status.clear();
+        // Every word the dead server said about the code is about a server nobody can ask again.
+        self.hover.forget_marks();
+        self.status = match self.recovery.died(Instant::now()) {
+            RecoveryNext::After(wait) => format!(
+                "{name} stopped \u{2014} bringing it back in {:.1} s",
+                wait.as_secs_f32()
+            ),
+            RecoveryNext::GiveUp => format!(
+                "{name} keeps stopping; navigation waits for you to ask about something again"
+            ),
+        };
+    }
+
+    /// Brings the server back when the wait is over: the file in front is what it is started for, and
+    /// every open document is announced to it again.
+    fn restart_the_server_if_due(&mut self) {
+        if self.lsp.is_some() || !self.recovery.take_due(Instant::now()) {
+            return;
+        }
+        let Some(path) = self.active_buffer().map(|buffer| buffer.path.clone()) else {
+            return;
+        };
+        self.ensure_lsp(&path);
+        if self.lsp.is_some() {
+            self.replay_documents();
+        }
+    }
+
     pub(crate) fn apply_outcome(&mut self, outcome: crate::lsp::Outcome) {
         match outcome {
             crate::lsp::Outcome::Ready => {
+                // The server is up: whatever died before it was not a loop.
+                self.recovery.ready();
                 // The server is up. Whatever the status line was waiting for is waited for no longer.
                 let said = std::mem::take(&mut self.lsp_status);
                 if self.status == said {

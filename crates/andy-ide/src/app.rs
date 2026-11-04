@@ -393,6 +393,12 @@ impl App {
         self.handle_keys(ui);
         self.state.poll_fs_events();
         self.state.poll_lsp();
+        // A restart that is due has to be looked at again: the window is otherwise idle between
+        // frames, and a timer nobody repaints for never fires.
+        if self.state.recovery.waiting() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(200));
+        }
         // Only documents with unsaved edits need telling, and not on every
         // keystroke: the server reads the file from disk otherwise.
         let now = ui.ctx().input(|input| input.time);

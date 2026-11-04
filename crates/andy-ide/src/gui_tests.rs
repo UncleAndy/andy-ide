@@ -6047,6 +6047,117 @@ mod the_remote {
 
 /// The conversation panel, driven by the stand-in agent the crate ships for its tests.
 #[cfg(test)]
+/// The language server: a process this window does not own, which can die.
+mod the_language_server {
+    use super::*;
+
+    /// A server that cannot start at all: the command is nowhere on the disk, so the worker behind the
+    /// service comes back at once, exactly as it does for a server that died.
+    fn a_broken_server(root: &std::path::Path) -> crate::lsp::LanguageService {
+        let config: &'static ide_lsp::registry::ServerConfig =
+            Box::leak(Box::new(ide_lsp::registry::ServerConfig {
+                name: "stand-in",
+                command: "/nonexistent/language-server",
+                args: &[],
+                language_id: "rust",
+                extensions: &["rs"],
+                markers: &[],
+            }));
+        crate::lsp::LanguageService::start(config, root)
+    }
+
+    #[test]
+    fn a_server_that_died_is_noticed_and_brought_back() {
+        // The window used to keep a dead client: the navigation stopped and the status bar said
+        // nothing at all. The death is noticed on the frame that would have waited for the answer.
+        let mut gui = Gui::new(&[("a.txt", "text\n")], Some("a.txt"));
+        gui.settle();
+        let root = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf();
+        gui.app_mut().state.lsp = Some(a_broken_server(&root));
+        gui.app_mut().state.lsp_status = format!("stand-in{}", crate::state::PROCESSING);
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            gui.app().state.lsp.is_none(),
+            "the dead server is still held"
+        );
+        assert!(
+            gui.app().state.status.contains("stopped"),
+            "the window did not say the server stopped: {:?}",
+            gui.app().state.status
+        );
+        assert!(
+            gui.app().state.recovery.waiting(),
+            "no restart was scheduled"
+        );
+    }
+
+    #[test]
+    fn the_server_is_brought_back_when_the_wait_is_over() {
+        // The wait passes and the window asks again — here for a file no server handles, so the check
+        // sees the ask itself instead of a real language server starting.
+        let mut gui = Gui::new(&[("a.txt", "text\n")], Some("a.txt"));
+        gui.settle();
+        let root = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf();
+        gui.app_mut().state.lsp = Some(a_broken_server(&root));
+        gui.app_mut().state.lsp_status = format!("stand-in{}", crate::state::PROCESSING);
+        gui.settle();
+        gui.settle();
+        assert!(gui.app().state.recovery.waiting());
+
+        // The wait the window asked for, and then the frame it asks on.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            gui.app().state.lsp_status.contains("no language server"),
+            "the server was not asked again for the file in front: {:?}",
+            gui.app().state.lsp_status
+        );
+        assert!(
+            !gui.app().state.recovery.waiting(),
+            "the window is still waiting after the restart"
+        );
+    }
+
+    #[test]
+    fn a_server_that_keeps_dying_ends_the_trying_and_says_so() {
+        let mut gui = Gui::new(&[("a.txt", "text\n")], Some("a.txt"));
+        gui.settle();
+        gui.app_mut().state.lsp_status = "stand-in".to_owned();
+        // Deaths in a row, the way the frames would see them.
+        for _ in 0..=crate::state::Recovery::LIMIT {
+            gui.app_mut().state.server_gone();
+        }
+
+        assert!(
+            !gui.app().state.recovery.waiting(),
+            "the window keeps bringing a dead server back"
+        );
+        assert!(
+            gui.app().state.status.contains("keeps stopping"),
+            "the window does not say it gave up: {:?}",
+            gui.app().state.status
+        );
+    }
+}
+
 /// The tree is a place a person works in, not only reads: files and folders are made, renamed and
 /// taken away from it.
 mod the_project_tree {

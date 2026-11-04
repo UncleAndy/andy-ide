@@ -46,6 +46,15 @@ server's answer is shown as a list of the places it would change, and nothing is
 until Enter is pressed on that list. The problems panel shows what the server published.
 Every item of that menu names its key beside it, and the ones that need a symbol under the
 caret are greyed out when the caret stands on no name.
+The server is a process this window does not own, and it can die — or never start at
+all. The window notices it on the frame that would have waited for an answer: the dead
+client is dropped, the status bar says so, and the server is brought back for the file
+in front after half a second, a second, two — the wait grows with each death in a row,
+so a server that dies on start is not started again at the speed of the display. After
+three the window stops trying and says that navigation waits for a question to be asked
+again; a person's own question starts a server at once, because a person is not a loop.
+Everything the dead server said about the code — the marks of the symbol under the caret
+— goes with it.
 A word is completed from the server as well: the list appears by the caret once the word has
 rested, the arrows walk it, `Enter` takes it, `Esc` closes it until the next letter, and the
 list and the hint yield to each other. After a `.` or `::` the list is asked for at once and

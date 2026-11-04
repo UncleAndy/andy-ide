@@ -368,6 +368,21 @@ impl LanguageService {
         let _ = self.jobs.send(job);
     }
 
+    /// Whether the worker has come back: the server behind it is gone, or it could never be started.
+    ///
+    /// The answer is read off the channel the worker rings on its way out rather than off the process:
+    /// a server that could not be spawned ends the same way as one that died, and both leave a window
+    /// whose navigation has stopped working without a word about it.
+    pub fn finished(&mut self) -> bool {
+        let Some(finished) = self.finished.as_ref() else {
+            return true;
+        };
+        match finished.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        }
+    }
+
     /// Takes every outcome that arrived since the last frame.
     pub fn poll(&self) -> Vec<Outcome> {
         let mut found = Vec::new();
