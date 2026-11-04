@@ -17,6 +17,7 @@ pub mod quick_open;
 pub mod rename;
 pub mod results;
 pub mod search;
+pub mod settings;
 pub mod signature;
 pub mod status;
 pub mod symbols;

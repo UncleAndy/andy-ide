@@ -367,6 +367,10 @@ impl App {
         }
 
         self.state.apply_pending();
+        // The setting is a period, not a habit of the person: what has edits is written when it is
+        // due, and the window says what it did.
+        self.state
+            .autosave_if_due(ui.ctx().input(|input| input.time));
         // A file asked for from another panel is put in front of the person: the editor panel comes
         // back if it was put away, and comes to the front if something else was standing there. The
         // dock was drawn above, before the row was clicked, so the next frame is the one that shows
@@ -419,6 +423,7 @@ impl App {
         crate::ui::prompt::show(ui.ctx(), &mut self.state);
         crate::ui::folder::show(ui.ctx(), &mut self.state);
         crate::ui::naming::show(ui.ctx(), &mut self.state);
+        crate::ui::settings::show(ui.ctx(), &mut self.state, &mut self.dock);
         match self.state.rename.show(ui.ctx()) {
             crate::ui::rename::Reply::Submit => self.state.submit_rename(),
             crate::ui::rename::Reply::Apply => self.state.apply_rename(),
@@ -634,6 +639,7 @@ pub(crate) enum Command {
     NextTab,
     PreviousTab,
     Fullscreen,
+    Settings,
 }
 
 impl Command {
@@ -698,6 +704,9 @@ impl Command {
             Command::Rename => {
                 state.begin_rename();
             }
+            Command::Settings => {
+                state.settings.open_at(None);
+            }
             Command::Blame => {
                 state.toggle_blame();
             }
@@ -746,6 +755,7 @@ impl Command {
             Command::NextTab => "the next tab",
             Command::PreviousTab => "the tab before",
             Command::Fullscreen => "full screen",
+            Command::Settings => "settings",
         }
     }
 }
@@ -771,6 +781,11 @@ impl From<crate::editor::Ask> for Command {
 
 pub(crate) const KEYS: &[(KeyboardShortcut, Command)] = &[
     // The project-symbol search and the file structure keep the keys IntelliJ gives them.
+    // The settings dialog keeps the key every desktop gives it.
+    (
+        KeyboardShortcut::new(Modifiers::CTRL, Key::Comma),
+        Command::Settings,
+    ),
     (
         KeyboardShortcut::new(
             Modifiers::CTRL.plus(Modifiers::SHIFT).plus(Modifiers::ALT),
@@ -935,6 +950,16 @@ pub(crate) fn show_panel(dock: &mut DockState<Tab>, state: &mut AppState, tab: T
     bring_to_front(dock, tab);
 }
 
+/// Puts the panels back where a project that has never said starts: the default layout, and the
+/// panels this build starts without put away.
+pub(crate) fn reset_layout(state: &mut AppState, dock: &mut DockState<Tab>) {
+    state.hidden = PUT_AWAY_AT_START.to_vec();
+    *dock = default_layout();
+    complete(dock, &state.hidden);
+    bring_to_front(dock, Tab::Editor);
+    state.status = "the panels are back where they belong".to_owned();
+}
+
 /// Puts a panel into the leaf `anchor` stands in, after the last tab of it.
 ///
 /// `None` when the anchor is not on screen, so the caller can try the next panel it stood with.
@@ -1053,6 +1078,14 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             }
             if ui.button("quick open	Ctrl+P").clicked() {
                 state.quick_open.open();
+                ui.close();
+            }
+            if ui
+                .button("settings\u{2026}\tCtrl+,")
+                .on_hover_text("Theme, scale, indentation, saving, the panels of this project")
+                .clicked()
+            {
+                state.settings.open_at(None);
                 ui.close();
             }
             ui.separator();

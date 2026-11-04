@@ -6047,6 +6047,187 @@ mod the_remote {
 
 /// The conversation panel, driven by the stand-in agent the crate ships for its tests.
 #[cfg(test)]
+/// The settings dialog: what the window does, and where it writes it down.
+mod the_settings {
+    use super::*;
+
+    fn written_config(gui: &Gui) -> String {
+        std::fs::read_to_string(gui.app().state.config_dir.join("config.toml")).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_dialog_opens_on_its_key_and_the_theme_is_written_at_once() {
+        // A settings dialog that needs `Apply` is a dialog whose file and screen can disagree. The
+        // theme is changed here and the file the next launch reads is changed with it.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        assert!(!gui.app().state.settings.open, "the dialog starts open");
+
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Comma);
+        gui.settle();
+        assert!(gui.app().state.settings.open, "Ctrl+, did not open it");
+
+        gui.harness.get_by_label("Light").click();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.config.theme,
+            ide_core::Theme::Light,
+            "the theme was not taken"
+        );
+        assert!(
+            written_config(&gui).contains("theme = \"Light\""),
+            "the theme was not written down: {}",
+            written_config(&gui)
+        );
+
+        // And Esc closes it without undoing anything.
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(!gui.app().state.settings.open);
+        assert_eq!(gui.app().state.config.theme, ide_core::Theme::Light);
+    }
+
+    #[test]
+    fn the_panels_section_puts_a_panel_away_and_the_layout_can_be_put_back() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Panels));
+        gui.settle();
+        assert!(gui.app().dock.find_tab(&Tab::Problems).is_some());
+
+        gui.harness.get_by_label("Problems").click();
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Problems).is_none(),
+            "the panel the dialog unticked is still on screen"
+        );
+        assert!(gui.app().state.hidden.contains(&Tab::Problems));
+
+        gui.harness.get_by_label("Put back").click();
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Problems).is_some(),
+            "the default layout did not bring the panel back"
+        );
+        assert!(!gui.app().state.hidden.contains(&Tab::Problems));
+    }
+
+    #[test]
+    fn a_file_opens_with_the_indentation_the_setting_names() {
+        // The width used to be a constant in the code and the config field was read by nobody: a
+        // setting that does nothing is worse than no setting at all.
+        let mut gui = Gui::new(
+            &[("a.rs", "fn a() {\n}\n"), ("b.rs", "fn b() {}\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        gui.app_mut().state.config.tab_width = 2;
+        gui.app_mut().state.config.indent_with_spaces = false;
+        gui.app_mut().state.open_file(std::path::Path::new("b.rs"));
+
+        let buffer = gui.app().state.active_buffer().expect("a buffer");
+        assert_eq!(
+            buffer.indent,
+            crate::editor::Indent {
+                width: 2,
+                spaces: false
+            },
+            "the file did not take the window's indentation"
+        );
+    }
+
+    #[test]
+    fn saving_takes_the_trailing_whitespace_off_the_lines_when_the_setting_says_so() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}   \n")], Some("a.rs"));
+        gui.settle();
+        let root = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf();
+
+        // Off, the file is written as it stands.
+        gui.app_mut().state.config.trim_trailing_whitespace = false;
+        gui.app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("a buffer")
+            .insert_text("x");
+        gui.app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("a buffer")
+            .insert_text("   ");
+        gui.app_mut().state.sync_dirty();
+        gui.app_mut().state.save_active();
+        let saved = std::fs::read_to_string(root.join("a.rs")).unwrap();
+        assert!(
+            saved.contains("   "),
+            "a file was trimmed with the setting off: {saved:?}"
+        );
+
+        // On, the trailing spaces do not reach the disk — and the buffer keeps its own text.
+        gui.app_mut().state.config.trim_trailing_whitespace = true;
+        gui.app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("a buffer")
+            .insert_text("  ");
+        gui.app_mut().state.sync_dirty();
+        gui.app_mut().state.save_active();
+        let saved = std::fs::read_to_string(root.join("a.rs")).unwrap();
+        assert!(
+            saved.lines().all(|line| line.trim_end() == line),
+            "the trailing whitespace reached the file with the setting on: {saved:?}"
+        );
+    }
+
+    #[test]
+    fn autosave_writes_what_has_edits_when_it_is_due() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf();
+        gui.app_mut().state.config.autosave_seconds = 30;
+        gui.app_mut()
+            .state
+            .active_buffer_mut()
+            .expect("a buffer")
+            .insert_text("let b = 2;");
+        gui.app_mut().state.sync_dirty();
+
+        // Not yet due: nothing is written.
+        gui.app_mut().state.autosave_if_due(10.0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.rs")).unwrap(),
+            "fn a() {}\n",
+            "a save happened before the period was over"
+        );
+
+        // Due: the edit reaches the file.
+        gui.app_mut().state.autosave_if_due(40.0);
+        assert!(
+            std::fs::read_to_string(root.join("a.rs"))
+                .unwrap()
+                .contains("let b = 2;"),
+            "the autosave did not write the edit"
+        );
+    }
+}
+
 /// The language server: a process this window does not own, which can die.
 mod the_language_server {
     use super::*;

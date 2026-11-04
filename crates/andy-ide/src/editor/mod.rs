@@ -10,8 +10,32 @@ use anyhow::{Context, Result};
 use ide_buffer::{Cursor, Document, search};
 use ide_syntax::{Highlighter, Language};
 
-/// Spaces per indent level; also how wide a tab is drawn.
-pub const INDENT_WIDTH: usize = 4;
+/// How a file is indented: how wide one step is, and whether a step is written with spaces.
+///
+/// The window has a setting; the file keeps what it was opened with, so the width of a tab cannot
+/// change under a person who is editing, and two files with different habits can be open at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Indent {
+    pub width: usize,
+    pub spaces: bool,
+}
+
+impl Indent {
+    /// Four columns, written with spaces: what a file gets when nothing says otherwise.
+    pub const DEFAULT: Indent = Indent {
+        width: 4,
+        spaces: true,
+    };
+
+    /// One step, as it is written into the text.
+    pub fn unit(self) -> String {
+        if self.spaces {
+            " ".repeat(self.width)
+        } else {
+            "\t".to_owned()
+        }
+    }
+}
 
 /// What a new line starts with, when Enter is pressed with the caret where it stands.
 ///
@@ -22,7 +46,7 @@ pub const INDENT_WIDTH: usize = 4;
 ///
 /// A line holding nothing but its own indentation is looked through to the last line above that holds
 /// something: a person pressing Enter twice means "the same again", not "nothing".
-pub fn indentation_for_a_new_line(text: &str, caret: usize) -> String {
+pub fn indentation_for_a_new_line(text: &str, caret: usize, step: Indent) -> String {
     let head = &text[..caret.min(text.len())];
     let mut line = head.rsplit('\n').next().unwrap_or("");
     if line.trim().is_empty() {
@@ -41,7 +65,7 @@ pub fn indentation_for_a_new_line(text: &str, caret: usize) -> String {
         Some('{') | Some('(') | Some('[')
     );
     let mut indent = if opens {
-        format!("{base}{}", " ".repeat(INDENT_WIDTH))
+        format!("{base}{}", step.unit())
     } else {
         base.clone()
     };
@@ -49,8 +73,8 @@ pub fn indentation_for_a_new_line(text: &str, caret: usize) -> String {
         text[caret.min(text.len())..].chars().next(),
         Some('}') | Some(')') | Some(']')
     );
-    if closer && indent.len() >= INDENT_WIDTH && indent.chars().all(|ch| ch == ' ') {
-        indent.truncate(indent.len() - INDENT_WIDTH);
+    if closer && indent.ends_with(&step.unit()) && indent.chars().all(|ch| ch == ' ') {
+        indent.truncate(indent.len() - step.unit().len());
     }
     indent
 }
@@ -186,8 +210,32 @@ pub struct EditorBuffer {
     needle: Option<search::Needle>,
     /// Byte ranges of every match of that needle, in the order they appear.
     pub search_hits: Vec<(usize, usize)>,
+    /// How this file is indented: the window's setting at the moment it was opened.
+    pub indent: Indent,
     /// The match the caret was last taken to.
     pub search_current: Option<usize>,
+}
+
+/// The text with every line's trailing whitespace taken off.
+///
+/// A line keeps its own ending: a file of `\r\n` lines is written back as `\r\n` lines, because the
+/// setting is about spaces at the end of a line and not about the line endings the file uses.
+fn without_trailing_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let (body, carriage) = match line.strip_suffix('\r') {
+            Some(body) => (body, true),
+            None => (line, false),
+        };
+        out.push_str(body.trim_end_matches([' ', '\t']));
+        if carriage {
+            out.push('\r');
+        }
+    }
+    out
 }
 
 impl EditorBuffer {
@@ -231,15 +279,25 @@ impl EditorBuffer {
             needle: None,
             search_hits: Vec::new(),
             search_current: None,
+            indent: Indent::DEFAULT,
         };
         buffer.refresh();
         buffer
     }
 
     /// Writes the buffer back to disk and marks it clean.
-    pub fn save(&mut self, root: &Path) -> Result<()> {
+    ///
+    /// `trim` takes the trailing whitespace off every line on the way out. The buffer keeps its text
+    /// as it is on screen: the setting is about the file, and a person who asked for it does not also
+    /// ask to watch spaces vanish from under the caret.
+    pub fn save(&mut self, root: &Path, trim: bool) -> Result<()> {
+        let text = if trim {
+            without_trailing_whitespace(&self.text)
+        } else {
+            self.text.clone()
+        };
         let absolute = root.join(&self.path);
-        ide_core::fs::write_atomic(&absolute, self.text.as_bytes())
+        ide_core::fs::write_atomic(&absolute, text.as_bytes())
             .with_context(|| format!("cannot write {}", absolute.display()))?;
         self.doc.mark_saved();
         Ok(())
@@ -455,7 +513,7 @@ impl EditorBuffer {
             if outdent {
                 self.outdent_current_line(first);
             } else {
-                self.insert_text(&" ".repeat(INDENT_WIDTH));
+                self.insert_text(&self.indent.unit());
             }
             return;
         }
@@ -468,7 +526,7 @@ impl EditorBuffer {
             if outdent {
                 self.remove_indent_at(start);
             } else {
-                self.doc.insert(start, &" ".repeat(INDENT_WIDTH));
+                self.doc.insert(start, &self.indent.unit());
             }
         }
 
@@ -496,7 +554,7 @@ impl EditorBuffer {
     /// Removes up to one indent worth of leading whitespace at `start`.
     fn remove_indent_at(&mut self, start: usize) -> usize {
         let mut removed = 0;
-        let end = (start + INDENT_WIDTH).min(self.doc.len_chars());
+        let end = (start + self.indent.unit().len()).min(self.doc.len_chars());
         let mut index = start;
         while index < end {
             let ch = self.char_at_view(index);
@@ -975,7 +1033,7 @@ mod tests {
         let mut buf = EditorBuffer::load(dir.path(), Path::new("a.txt")).unwrap();
         buf.set_caret(3);
         buf.insert_text("!");
-        buf.save(dir.path()).unwrap();
+        buf.save(dir.path(), false).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "old!"
@@ -1053,18 +1111,27 @@ mod indent_tests {
     #[test]
     fn a_new_line_keeps_the_indentation_of_the_line_it_leaves() {
         let text = "    let a = 1;\n";
-        assert_eq!(indentation_for_a_new_line(text, text.len()), "    ");
+        assert_eq!(
+            indentation_for_a_new_line(text, text.len(), Indent::DEFAULT),
+            "    "
+        );
         let flat = "let a = 1;\n";
-        assert_eq!(indentation_for_a_new_line(flat, flat.len()), "");
+        assert_eq!(
+            indentation_for_a_new_line(flat, flat.len(), Indent::DEFAULT),
+            ""
+        );
     }
 
     #[test]
     fn a_new_line_stands_one_level_deeper_inside_a_block() {
         let opened = "fn a() {\n";
-        assert_eq!(indentation_for_a_new_line(opened, opened.len()), "    ");
+        assert_eq!(
+            indentation_for_a_new_line(opened, opened.len(), Indent::DEFAULT),
+            "    "
+        );
         let inside = "    if x {\n";
         assert_eq!(
-            indentation_for_a_new_line(inside, inside.len()),
+            indentation_for_a_new_line(inside, inside.len(), Indent::DEFAULT),
             "        ",
             "a block inside a block is one level deeper than the line that opened it"
         );
@@ -1074,7 +1141,7 @@ mod indent_tests {
     fn a_new_line_before_a_closing_brace_stands_at_the_braces_own_level() {
         let text = "fn a() {\n    }";
         assert_eq!(
-            indentation_for_a_new_line(text, text.len() - 1),
+            indentation_for_a_new_line(text, text.len() - 1, Indent::DEFAULT),
             "",
             "the closing brace must come back to the level it closes"
         );
@@ -1084,7 +1151,7 @@ mod indent_tests {
     fn a_fresh_line_looks_through_to_the_line_above() {
         let text = "    if x {\n        \n";
         assert_eq!(
-            indentation_for_a_new_line(text, text.len()),
+            indentation_for_a_new_line(text, text.len(), Indent::DEFAULT),
             "        ",
             "Enter twice means the same again, not nothing"
         );

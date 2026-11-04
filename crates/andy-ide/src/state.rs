@@ -301,6 +301,8 @@ pub struct AppState {
     pub hidden: Vec<Tab>,
     /// The folder dialog: a project opened by picking a directory inside the window.
     pub folder: crate::ui::folder::FolderDialog,
+    /// The settings dialog: what the window does, in sections.
+    pub settings: crate::ui::settings::Settings,
     /// The name being written, when the tree asked for one.
     pub naming: Option<Naming>,
     /// A file was opened from another panel, and the editor is wanted in front: a file opened
@@ -350,6 +352,8 @@ pub struct AppState {
     pub lsp: Option<crate::lsp::LanguageService>,
     /// Server name for the status bar, or why there is none.
     pub lsp_status: String,
+    /// The input time of the last autosave, so the setting is a period and not a count of frames.
+    last_autosave: f64,
     /// What the window does about a server that died.
     pub recovery: Recovery,
     /// The caret whose uses were last asked for, and when it got there.
@@ -448,6 +452,7 @@ impl AppState {
             agent: crate::agent::AgentState::default(),
             lsp: None,
             lsp_status: String::new(),
+            last_autosave: 0.0,
             recovery: Recovery::default(),
             highlight_key: None,
             highlight_asked: None,
@@ -474,6 +479,7 @@ impl AppState {
             switch_asked: None,
             editor_asked: false,
             folder: crate::ui::folder::FolderDialog::default(),
+            settings: crate::ui::settings::Settings::default(),
             naming: None,
         };
 
@@ -928,7 +934,8 @@ impl AppState {
         let Some(buffer) = self.buffers.get_mut(&buffer_id) else {
             return;
         };
-        match buffer.save(&root) {
+        let trim = self.config.trim_trailing_whitespace;
+        match buffer.save(&root, trim) {
             Ok(()) => self.status = format!("saved {}", display_name(&buffer.path)),
             Err(error) => self.status = format!("{error:#}"),
         }
@@ -1410,10 +1417,11 @@ impl AppState {
             Some(project) => project.root().to_path_buf(),
             None => PathBuf::new(),
         };
+        let trim = self.config.trim_trailing_whitespace;
         let Some(buffer) = self.buffer_for_mut(path) else {
             return Ok(());
         };
-        buffer.save(&root)?;
+        buffer.save(&root, trim)?;
         self.sync_dirty();
         Ok(())
     }
@@ -1684,11 +1692,12 @@ impl AppState {
         };
         let mut saved = 0;
         let mut failure = None;
+        let trim = self.config.trim_trailing_whitespace;
         for buffer in self.buffers.values_mut() {
             if !buffer.is_dirty() {
                 continue;
             }
-            match buffer.save(&root) {
+            match buffer.save(&root, trim) {
                 Ok(()) => saved += 1,
                 Err(error) => failure = Some(format!("{error:#}")),
             }
@@ -2049,6 +2058,33 @@ impl AppState {
     }
 
     /// Opens a file in a tab and activates it, or focuses its existing tab.
+    /// How a file opened now is indented: the setting the window has at this moment.
+    pub fn indent(&self) -> crate::editor::Indent {
+        crate::editor::Indent {
+            width: self.config.tab_width.max(1) as usize,
+            spaces: self.config.indent_with_spaces,
+        }
+    }
+
+    /// Saves what has edits, when the setting says how often.
+    ///
+    /// The stamp is the input time, so a window that is not drawing does not save either: an autosave
+    /// is a convenience of a window in use, not a service running behind one.
+    pub fn autosave_if_due(&mut self, now: f64) {
+        let every = self.config.autosave_seconds;
+        if every == 0 || now - self.last_autosave < f64::from(every) {
+            return;
+        }
+        self.last_autosave = now;
+        if !self.buffers.values().any(|buffer| buffer.is_dirty()) {
+            return;
+        }
+        let saved = self.save_all();
+        if saved > 0 {
+            self.status = format!("{saved} saved on the way");
+        }
+    }
+
     pub fn open_file(&mut self, rel: &Path) {
         if let Some(index) = self.tabs.find(rel) {
             self.focus_tab(index);
@@ -2067,7 +2103,8 @@ impl AppState {
             }
         };
         match EditorBuffer::load(&root, rel) {
-            Ok(buffer) => {
+            Ok(mut buffer) => {
+                buffer.indent = self.indent();
                 let buffer_id = self.next_buffer_id;
                 self.next_buffer_id += 1;
                 self.buffers.insert(buffer_id, buffer);
@@ -2950,7 +2987,8 @@ impl AppState {
         let Some(buffer) = self.buffers.get_mut(&buffer_id) else {
             return;
         };
-        match buffer.save(&root) {
+        let trim = self.config.trim_trailing_whitespace;
+        match buffer.save(&root, trim) {
             Ok(()) => {
                 self.status = format!("saved {}", display_name(&buffer.path));
                 self.sync_dirty();

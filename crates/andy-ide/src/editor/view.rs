@@ -16,7 +16,6 @@ use ide_git::{LineMark, MarkKind};
 use ide_syntax::{HighlightSpan, TokenKind};
 
 use super::EditorBuffer;
-use super::INDENT_WIDTH as TAB_WIDTH;
 use super::edit::Motion;
 use super::{Ask, on_a_symbol};
 
@@ -724,6 +723,9 @@ fn paint_gutter(
 struct LineLayouts {
     first_line: usize,
     galleys: Vec<Option<Arc<Galley>>>,
+    /// How wide a tab is in this file: the lines were laid out with it, so the arithmetic that turns
+    /// a column into a place on the screen needs the same number.
+    tab: usize,
 }
 
 impl LineLayouts {
@@ -742,6 +744,7 @@ impl LineLayouts {
         Self {
             first_line,
             galleys,
+            tab: buffer.indent.width,
         }
     }
 
@@ -865,13 +868,31 @@ fn line_job(
             continue;
         }
         let plain = text_slice(buffer.text(), cursor, start);
-        push_section(&mut job, plain, palette.foreground, font);
+        push_section(
+            &mut job,
+            plain,
+            palette.foreground,
+            font,
+            buffer.indent.width,
+        );
         let coloured = text_slice(buffer.text(), start, end);
-        push_section(&mut job, coloured, palette.token(span.kind), font);
+        push_section(
+            &mut job,
+            coloured,
+            palette.token(span.kind),
+            font,
+            buffer.indent.width,
+        );
         cursor = end;
     }
     let rest = text_slice(buffer.text(), cursor, line_end);
-    push_section(&mut job, rest, palette.foreground, font);
+    push_section(
+        &mut job,
+        rest,
+        palette.foreground,
+        font,
+        buffer.indent.width,
+    );
     job
 }
 
@@ -1033,7 +1054,11 @@ fn paint_caret(
     let x = match galley {
         Some(galley) => {
             galley
-                .pos_from_cursor(CCursor::new(expanded_column(text, col)))
+                .pos_from_cursor(CCursor::new(expanded_column(
+                    text,
+                    col,
+                    buffer.indent.width,
+                )))
                 .min
                 .x
         }
@@ -1092,7 +1117,7 @@ fn position_to_line_col(
     match layouts.galley(line) {
         Some(galley) => {
             let shown = galley.cursor_from_pos(Vec2::new(x, 0.0)).index.0;
-            (line, original_column(text, shown))
+            (line, original_column(text, shown, buffer.indent.width))
         }
         // An empty line has no galley, and there is nothing to hit.
         None => (line, 0),
@@ -1105,7 +1130,7 @@ fn x_for_col(layouts: &LineLayouts, text: &str, line: usize, col: usize, char_w:
     match layouts.galley(line) {
         Some(galley) => {
             galley
-                .pos_from_cursor(CCursor::new(expanded_column(text, col)))
+                .pos_from_cursor(CCursor::new(expanded_column(text, col, layouts.tab)))
                 .min
                 .x
         }
@@ -1113,24 +1138,24 @@ fn x_for_col(layouts: &LineLayouts, text: &str, line: usize, col: usize, char_w:
     }
 }
 
-/// Column in the laid-out text, where a tab occupies `TAB_WIDTH` cells.
-fn expanded_column(text: &str, col: usize) -> usize {
+/// Column in the laid-out text, where a tab occupies `tab` cells.
+fn expanded_column(text: &str, col: usize, tab: usize) -> usize {
     let mut shown = 0;
     for (index, ch) in text.chars().enumerate() {
         if index >= col {
             break;
         }
-        shown += if ch == '\t' { TAB_WIDTH } else { 1 };
+        shown += if ch == '\t' { tab } else { 1 };
     }
     shown
 }
 
 /// Column of the source text nearest to a column of the laid-out text.
-fn original_column(text: &str, shown: usize) -> usize {
+fn original_column(text: &str, shown: usize, tab: usize) -> usize {
     let mut cells = 0;
     let mut col = 0;
     for ch in text.chars() {
-        let width = if ch == '\t' { TAB_WIDTH } else { 1 };
+        let width = if ch == '\t' { tab } else { 1 };
         if cells + width > shown {
             // Inside this character: pick whichever edge is closer.
             return if shown - cells <= width / 2 {
@@ -1145,11 +1170,11 @@ fn original_column(text: &str, shown: usize) -> usize {
     col
 }
 
-fn push_section(job: &mut LayoutJob, text: &str, color: Color32, font: &FontId) {
+fn push_section(job: &mut LayoutJob, text: &str, color: Color32, font: &FontId, tab: usize) {
     if text.is_empty() {
         return;
     }
-    let expanded: String = text.replace('\t', &" ".repeat(TAB_WIDTH));
+    let expanded: String = text.replace('\t', &" ".repeat(tab));
     let start = job.text.len();
     job.text.push_str(&expanded);
     job.sections.push(LayoutSection {
@@ -1383,6 +1408,7 @@ fn handle_input(ui: &mut Ui, buffer: &mut EditorBuffer) -> (bool, bool) {
                         let indent = crate::editor::indentation_for_a_new_line(
                             buffer.text(),
                             buffer.caret_byte(),
+                            buffer.indent,
                         );
                         buffer.insert_text(&format!("\n{indent}"));
                         changed = true;
@@ -1479,25 +1505,25 @@ mod geometry_tests {
     #[test]
     fn a_tab_takes_four_cells() {
         let text = "\tab";
-        assert_eq!(expanded_column(text, 0), 0);
-        assert_eq!(expanded_column(text, 1), 4);
-        assert_eq!(expanded_column(text, 3), 6);
+        assert_eq!(expanded_column(text, 0, 4), 0);
+        assert_eq!(expanded_column(text, 1, 4), 4);
+        assert_eq!(expanded_column(text, 3, 4), 6);
     }
 
     #[test]
     fn a_click_inside_a_tab_picks_the_nearer_edge() {
         let text = "\tab";
-        assert_eq!(original_column(text, 1), 0);
-        assert_eq!(original_column(text, 2), 0);
-        assert_eq!(original_column(text, 3), 1);
-        assert_eq!(original_column(text, 4), 1);
+        assert_eq!(original_column(text, 1, 4), 0);
+        assert_eq!(original_column(text, 2, 4), 0);
+        assert_eq!(original_column(text, 3, 4), 1);
+        assert_eq!(original_column(text, 4, 4), 1);
     }
 
     #[test]
     fn columns_round_trip_for_plain_text() {
         let text = "fn main() {";
         for col in 0..=text.chars().count() {
-            assert_eq!(original_column(text, expanded_column(text, col)), col);
+            assert_eq!(original_column(text, expanded_column(text, col, 4), 4), col);
         }
     }
 }

@@ -405,6 +405,16 @@ cargo build
 cargo run -p andy-ide -- --project ~/projects/RUST/andy-ide
 ```
 
+`Ctrl` `,` — or `settings…` in the `View` menu — opens the settings: one dialog with a
+section on the left and that section on the right. `View` holds the theme and the scale
+of the whole window; `Editor` the width of an indent step, whether a step is spaces,
+whether a saved file loses its trailing whitespace, and how often what has edits is
+written by itself; `Panels` the panels of this project, the switches of its tree and
+preview, and `Put back` for the layout this build starts with; `About` the version and
+where the window keeps its files, with a door to the log. Nothing waits for an `Apply`:
+a change is written the moment it is made — the window's part into `config.toml`, the
+project's into `.andy-ide/workspace.json` — because a window that keeps a value nobody
+confirmed is a window whose file and screen disagree.
 Started without `--project`, the editor opens the project that was open last, and skips
 the remembered ones whose directory is gone. The `Project` menu holds the list, a folder
 dialog for a project that is not in it, and a cross on every row. `Open folder…` opens

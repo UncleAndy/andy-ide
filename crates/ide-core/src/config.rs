@@ -30,8 +30,23 @@ pub enum Theme {
 pub struct Config {
     pub theme: Theme,
     pub font_size: f32,
+    /// How wide one indent step is, in columns; also how wide a tab is drawn.
     pub tab_width: u8,
+    /// Whether an indent step is written with spaces; a tab otherwise.
+    pub indent_with_spaces: bool,
     pub show_hidden: bool,
+    /// Take the trailing whitespace off every line when a file is saved.
+    pub trim_trailing_whitespace: bool,
+    /// Save every file that has edits this often, in seconds; zero is never.
+    pub autosave_seconds: u32,
+    /// The program the terminal runs; empty means `$SHELL`.
+    pub terminal_shell: String,
+    /// How many lines the terminal keeps behind the screen.
+    pub scrollback: usize,
+    /// Whether a finished turn or a waiting agent is announced by the desktop.
+    pub notifications: bool,
+    /// Whether a language server that dies is brought back on its own.
+    pub auto_reconnect: bool,
     /// Open the window maximized, as it was when it was last closed.
     pub window_maximized: bool,
     /// Keys this version does not know about, kept verbatim.
@@ -45,7 +60,14 @@ impl Default for Config {
             theme: Theme::Dark,
             font_size: 14.0,
             tab_width: 4,
+            indent_with_spaces: true,
             show_hidden: false,
+            trim_trailing_whitespace: false,
+            autosave_seconds: 0,
+            terminal_shell: String::new(),
+            scrollback: 2000,
+            notifications: true,
+            auto_reconnect: true,
             window_maximized: false,
             extra: BTreeMap::new(),
         }
