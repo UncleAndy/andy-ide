@@ -5499,6 +5499,81 @@ mod the_git_panel {
     }
 
     #[test]
+    fn a_tag_is_not_pushed_out_of_the_row_by_the_names_before_it() {
+        // A release commit carries five names: `HEAD`, the branch, the remote's default name, the remote
+        // branch and the tag. The row showed four, and the tag — the one name a person looks for on a
+        // release — was the fifth, dropped without a word.
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(&root, "second");
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(&root, &["tag", "-a", "v0.1.0", "-m", "andy-ide 0.1.0"]);
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        let names: Vec<String> = gui.app().state.git.commits[0]
+            .refs
+            .iter()
+            .map(|mark| mark.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["HEAD", "main", "origin/HEAD", "origin/main", "tag: v0.1.0"],
+            "the pointers of the newest commit are wrong or out of order"
+        );
+        assert!(
+            gui.harness.query_by_label("tag: v0.1.0").is_some(),
+            "the tag is not drawn beside the commit it names"
+        );
+    }
+
+    #[test]
+    fn the_names_a_row_has_no_room_for_are_counted() {
+        // Three more branches on one commit: five names fit, the rest are counted — a row that quietly
+        // forgets a name is a row that says the wrong thing about where the work is.
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(&root, "second");
+        for name in ["one", "two", "three", "four", "five"] {
+            git(&root, &["branch", name, "HEAD"]);
+        }
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        let names = gui.app().state.git.commits[0].refs.len();
+        assert!(
+            names > 5,
+            "the fixture did not make more names than fit: {names}"
+        );
+        assert!(
+            gui.harness
+                .query_by_label(&format!("+{}", names - 5))
+                .is_some(),
+            "the names that do not fit are not counted: {names} names, five shown"
+        );
+    }
+
+    #[test]
     fn the_history_names_the_pointers_and_is_walked_with_the_keys() {
         let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
         let root = gui._project.path().to_path_buf();

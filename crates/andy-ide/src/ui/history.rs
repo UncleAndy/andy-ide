@@ -15,10 +15,16 @@ const HEAD_CHIP: Color32 = Color32::from_rgb(78, 154, 92);
 const LOCAL_CHIP: Color32 = Color32::from_rgb(120, 160, 210);
 const REMOTE_CHIP: Color32 = Color32::from_rgb(150, 152, 156);
 const TAG_CHIP: Color32 = Color32::from_rgb(198, 120, 221);
+/// The mark standing for the names a row had no room for.
+const CHIP_REST: Color32 = Color32::from_rgb(140, 148, 162);
 
-/// How many names one row shows before it stops: a commit that is a dozen branches at once is a
-/// curiosity, and the chips would leave no room for the message.
-const CHIPS_SHOWN: usize = 4;
+/// How many names one row shows before it counts the rest.
+///
+/// Five is not a round number by accident: a release commit carries `HEAD`, the branch, the remote's
+/// default name (`origin/HEAD`), the remote branch and the tag — exactly five, and four dropped the
+/// tag, which is the one name a person looks for on a release. A commit that is more than that is a
+/// curiosity; the rest are counted rather than lost.
+const CHIPS_SHOWN: usize = 5;
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.git.refresh(false);
@@ -179,6 +185,24 @@ fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
                     );
                     for mark in commit.refs.iter().take(CHIPS_SHOWN) {
                         chip(ui, mark);
+                    }
+                    // What does not fit is counted, never dropped in silence: a name nobody can see is
+                    // a name nobody knows is there.
+                    if commit.refs.len() > CHIPS_SHOWN {
+                        let rest: Vec<&str> = commit.refs[CHIPS_SHOWN..]
+                            .iter()
+                            .map(|mark| mark.name.as_str())
+                            .collect();
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("+{}", rest.len()))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(CHIP_REST),
+                            )
+                            .selectable(false),
+                        )
+                        .on_hover_text(rest.join("\n"));
                     }
                     ui.add_space(6.0);
                     ui.add(
