@@ -417,8 +417,10 @@ layout this build starts with; `About` the version and where the window keeps it
 with a door to the log. The dialog takes the room the window has — most of its width up
 to a width that still reads, and all of its height, minus a margin — so a section is
 read without a scrollbar standing where empty space was; at a scale large enough that
-the window has fewer points, the window is the limit and the section scrolls. Nothing
-waits for an `Apply`: a change is written the moment it is made — the window's part into
+the window has fewer points, the window is the limit and the section scrolls; the dialog
+is bounded on both sides, so changing the scale while it stands open moves it to the
+middle of the new window instead of leaving its top above the screen. Nothing waits for
+an `Apply`: a change is written the moment it is made — the window's part into
 `config.toml`, the project's into `.andy-ide/workspace.json` — because a window that
 keeps a value nobody confirmed is a window whose file and screen disagree. `Tools` holds
 the language servers — each one's command and arguments can be replaced and put back,

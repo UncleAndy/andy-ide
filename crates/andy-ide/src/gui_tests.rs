@@ -6089,6 +6089,70 @@ mod the_settings {
     }
 
     #[test]
+    fn a_scale_change_does_not_push_the_dialog_off_the_window() {
+        // The dialog asks the window for its room every frame, but the modal's area hands the content
+        // the size it had on the frame before: a dialog that only said how small it may be kept the
+        // size of the old scale and, being centred, hung off the top of the window that just got
+        // smaller — the section names and the first rows were above the screen.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Panels));
+        gui.settle();
+        gui.settle();
+
+        for zoom in [2.0, 1.0, 3.0] {
+            gui.harness.ctx.set_zoom_factor(zoom);
+            gui.settle();
+            gui.settle();
+
+            let screen = gui.harness.ctx.content_rect();
+            let heading = gui.harness.get_by_label("Settings").rect();
+            let close = gui.harness.get_by_label("Close").rect();
+            assert!(
+                heading.top() >= screen.top() - 0.5 && heading.left() >= screen.left() - 0.5,
+                "at {zoom}× the dialog starts at {:?}, outside a window of {:?}",
+                heading.left_top(),
+                screen.size()
+            );
+            assert!(
+                close.bottom() <= screen.bottom() + 0.5 && close.right() <= screen.right() + 0.5,
+                "at {zoom}× the dialog ends at {:?}, outside a window of {:?}",
+                close.right_bottom(),
+                screen.size()
+            );
+        }
+
+        // And a dialog opened *at* a large scale, not only one left open through a change: the room
+        // comes from the window, so opening it later must not be the worse case.
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+        assert!(!gui.app().state.settings.open, "the dialog did not close");
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Panels));
+        gui.settle();
+        gui.settle();
+        let screen = gui.harness.ctx.content_rect();
+        let heading = gui.harness.get_by_label("Settings").rect();
+        let close = gui.harness.get_by_label("Close").rect();
+        assert!(
+            heading.left_top().x >= screen.left() - 0.5
+                && heading.left_top().y >= screen.top() - 0.5
+                && close.right_bottom().x <= screen.right() + 0.5
+                && close.right_bottom().y <= screen.bottom() + 0.5,
+            "a dialog opened at {:.0}% stands outside the window: {:?} to {:?} in {:?}",
+            gui.harness.ctx.zoom_factor() * 100.0,
+            heading.left_top(),
+            close.right_bottom(),
+            screen.size()
+        );
+    }
+
+    #[test]
     fn the_dialog_never_asks_for_more_than_the_window_has() {
         // A window is the same pixels at every scale and fewer points the bigger the scale, so the room
         // is worked out from what is there — the old `min_size(760, 520)` stood half off the screen at

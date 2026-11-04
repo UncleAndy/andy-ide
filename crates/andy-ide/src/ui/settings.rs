@@ -131,7 +131,11 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, dock: &mut egui_dock::Doc
     let body = (room.y - FOOT).max(120.0);
     let mut close = false;
     Modal::new(Id::new("andy-ide-settings")).show(ctx, |ui| {
+        // Both bounds, not only the least: the modal's area hands the content the size it had on the
+        // last frame, so a dialog that says only how small it may be keeps the size it had before the
+        // scale changed — and, being centred, hangs off the top of a window that just got smaller.
         ui.set_min_size(room);
+        ui.set_max_size(room);
         ui.horizontal(|ui| {
             // The list of sections: a column of its own, told the same height as the body, so the
             // separator between the two runs the whole way down.
