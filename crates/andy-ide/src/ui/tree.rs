@@ -115,6 +115,10 @@ fn draw_entries(
                     .clone()
                     .context_menu(|ui| row_menu(ui, state, &entry.rel, false));
                 if label.double_clicked() {
+                    // The file is opened where it is read, not where the row is: a row clicked in the
+                    // tree with the editor put away used to open a tab nobody could see, and one
+                    // clicked with the terminal in the centre opened a file behind the terminal.
+                    state.editor_asked = true;
                     asked.push(entry.rel.clone());
                 }
             }

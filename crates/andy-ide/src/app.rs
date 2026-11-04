@@ -363,6 +363,14 @@ impl App {
         }
 
         self.state.apply_pending();
+        // A file asked for from another panel is put in front of the person: the editor panel comes
+        // back if it was put away, and comes to the front if something else was standing there. The
+        // dock was drawn above, before the row was clicked, so the next frame is the one that shows
+        // it — and the frame is asked for, or an idle window would keep the change until a keystroke.
+        if std::mem::take(&mut self.state.editor_asked) {
+            show_panel(&mut self.dock, &mut self.state, Tab::Editor);
+            ui.ctx().request_repaint();
+        }
         // The panel is cheap to keep pointed at the right repository: only a change
         // of project does any work here, and only the panel re-reads the status.
         let root = self.state.project.as_ref().map(|project| project.root());

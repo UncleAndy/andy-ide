@@ -172,6 +172,9 @@ pub struct AppState {
     pub folder: crate::ui::folder::FolderDialog,
     /// The name being written, when the tree asked for one.
     pub naming: Option<Naming>,
+    /// A file was opened from another panel, and the editor is wanted in front: a file opened
+    /// while the terminal stood in the centre is a file the person cannot see.
+    pub editor_asked: bool,
     /// A project the person asked to open from the `Project` menu.
     ///
     /// The menu knows the state, and a move to another project also rearranges the window: the
@@ -334,6 +337,7 @@ impl AppState {
             last_state: None,
             last_write: 0.0,
             switch_asked: None,
+            editor_asked: false,
             folder: crate::ui::folder::FolderDialog::default(),
             naming: None,
         };
@@ -443,6 +447,8 @@ impl AppState {
                             NamingKind::File => {
                                 let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
                                 self.open_file(&rel);
+                                // A file made from the tree is a file made to be written in.
+                                self.editor_asked = true;
                                 self.status = format!("{name} created");
                             }
                             _ => {
@@ -2523,6 +2529,9 @@ impl AppState {
     /// A compiler prints `src/main.rs:12:5`, and that is where the user wants to be:
     /// the tab opens on the line, not at the top of the file.
     pub fn follow_file_link(&mut self, path: &str, line: u32, column: u32) {
+        // A link is followed to be read: the editor comes to the front the way it does when a file
+        // is opened from the tree.
+        self.editor_asked = true;
         let named = PathBuf::from(path);
         let root = self
             .project

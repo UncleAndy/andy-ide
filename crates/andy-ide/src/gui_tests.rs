@@ -6063,6 +6063,104 @@ mod the_project_tree {
             .to_path_buf()
     }
 
+    /// The panel standing in front of the person, as the dock has it.
+    fn in_front(gui: &mut Gui) -> Option<crate::ui::Tab> {
+        gui.app_mut()
+            .dock
+            .find_active_focused()
+            .map(|(_, tab)| *tab)
+    }
+
+    #[test]
+    fn a_file_opened_from_the_tree_is_brought_in_front() {
+        // A file clicked in the tree is a file read in the editor: a tab opened behind the terminal
+        // is a file the person cannot see.
+        let mut gui = Gui::new(
+            &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+
+        // The terminal is the panel in front.
+        let terminal = gui
+            .app_mut()
+            .dock
+            .find_tab(&Tab::Terminal)
+            .expect("the terminal tab");
+        {
+            let app = gui.app_mut();
+            app.dock.set_focused_node_and_surface(terminal.node_path());
+            let _ = app.dock.set_active_tab(terminal);
+        }
+        gui.settle();
+        assert_eq!(
+            in_front(&mut gui),
+            Some(Tab::Terminal),
+            "the terminal was not put in front, so the check proves nothing"
+        );
+
+        // The row is double clicked, twice at the same spot as a hand would.
+        gui.harness.get_by_label("b.rs").click();
+        gui.settle();
+        gui.harness.get_by_label("b.rs").click();
+        gui.settle();
+        gui.settle();
+
+        assert_eq!(
+            gui.app()
+                .state
+                .tabs
+                .active()
+                .map(|index| gui.app().state.tabs.items()[index].path.clone()),
+            Some(std::path::PathBuf::from("b.rs")),
+            "the file clicked in the tree is not the one in front"
+        );
+        assert_eq!(
+            in_front(&mut gui),
+            Some(Tab::Editor),
+            "the editor did not come to the front of a file opened from the tree"
+        );
+    }
+
+    #[test]
+    fn a_file_opened_from_the_tree_brings_a_put_away_editor_back() {
+        // The editor put away is the harder half: the panel is not merely behind something, it is
+        // not in the dock at all, and a tab opened into nothing is a tab nobody sees.
+        let mut gui = Gui::new(
+            &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+            Some("a.rs"),
+        );
+        gui.settle();
+        {
+            let app = gui.app_mut();
+            crate::app::hide_panel(&mut app.dock, &mut app.state, Tab::Editor);
+        }
+        gui.settle();
+        assert!(
+            gui.app().dock.find_tab(&Tab::Editor).is_none(),
+            "the editor was not put away"
+        );
+
+        gui.app_mut()
+            .state
+            .pending
+            .push(crate::state::Action::OpenFile(std::path::PathBuf::from(
+                "b.rs",
+            )));
+        gui.app_mut().state.editor_asked = true;
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            gui.app().dock.find_tab(&Tab::Editor).is_some(),
+            "the editor did not come back when a file was opened"
+        );
+        assert!(
+            !gui.app().state.hidden.contains(&Tab::Editor),
+            "the workspace still thinks the editor is put away"
+        );
+    }
+
     #[test]
     fn a_file_is_made_from_the_tree_menu_and_opens_in_a_tab() {
         // The menu is where a person starts a file, and a file made there is a file open: a file
