@@ -1,0 +1,287 @@
+name: release
+
+# One tag, one release: pushing `v0.1.0` builds every platform, and the artifacts are gathered into a
+# single GitHub release. The tag must agree with the version in Cargo.toml — a release named 0.1.0 whose
+# window says 0.0.9 is a release nobody can make sense of later.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "leave the release as a draft"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The exact revision the lock file was made for: a release built from a resolved-again lock file is a
+  # release of a different program.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  # The version, and whether the tag is the one the code says it is.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::the tag is $GITHUB_REF_NAME and Cargo.toml says $version"
+              exit 1
+            fi
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "building andy-ide $version"
+
+  # The gates a release has to pass: the same three the developer runs, on a machine that is not his.
+  test:
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: libraries the window needs to compile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The language-server checks need rust-analyzer and a warm index, and are left to the machine that
+      # runs them serially; everything else has to be green here.
+      - run: cargo test --workspace --no-fail-fast -- --skip real_
+
+  linux:
+    needs: [version, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu the window is expected to run on: glibc 2.35. A tarball built here runs on
+          # everything newer, which a build on `ubuntu-latest` would not.
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          # The arm runners are free for public repositories; a private one fails this job and the rest
+          # of the release still lands.
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: libraries the window needs to compile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p andy-ide
+      - name: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.version.outputs.version }}"
+          name="andy-ide-${version}-${{ matrix.arch }}-unknown-linux-gnu"
+          mkdir -p "dist/$name"
+          install -m755 target/release/andy-ide "dist/$name/andy-ide"
+          install -m644 README.md LICENSE LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          install -m644 assets/andy-ide.desktop "dist/$name/andy-ide.desktop"
+          install -m644 assets/andy-ide.png "dist/$name/andy-ide.png"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          ./target/release/andy-ide --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  # One file a person can download and run: no unpacking, no library hunt.
+  appimage:
+    needs: [version, test]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: libraries the window needs to compile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev \
+            file desktop-file-utils zsync
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p andy-ide
+      - name: pack
+        env:
+          ARCH: x86_64
+        run: |
+          ./packaging/linux-appimage.sh target/release/andy-ide \
+            "${{ needs.version.outputs.version }}" dist
+      - name: look inside the AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(ls dist/*.AppImage)
+          # An AppImage that does not unpack is an AppImage nobody can run; and a window that is not in
+          # it is a release that is only a file.
+          "$appimage" --appimage-extract > /dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/andy-ide
+          test -f squashfs-root/andy-ide.desktop
+          find squashfs-root/usr/lib -maxdepth 1 -type f -printf '%f\n' | sort | head -20
+          ( cd dist && sha256sum "$(basename "$appimage")" > "$(basename "$appimage").sha256" )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage*
+          if-no-files-found: error
+
+  windows:
+    needs: [version, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p andy-ide
+      - name: pack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ needs.version.outputs.version }}"
+          $name = "andy-ide-$version-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/andy-ide.exe "dist/$name/"
+          Copy-Item README.md, LICENSE, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Get-FileHash "dist/$name.zip" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $name.zip" } |
+            Set-Content -Encoding ascii "dist/$name.zip.sha256"
+          ./target/release/andy-ide.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip*
+          if-no-files-found: error
+
+  macos:
+    needs: [version, test]
+    # An Apple-silicon runner builds both architectures: the second one through its own SDK, which is
+    # what a cross-build for `x86_64-apple-darwin` needs.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+      - name: both architectures, then one binary
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked -p andy-ide --target aarch64-apple-darwin
+          cargo build --release --locked -p andy-ide --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/andy-ide \
+            target/x86_64-apple-darwin/release/andy-ide \
+            -output dist/andy-ide
+          file dist/andy-ide
+          lipo -info dist/andy-ide
+      - name: bundle and sign
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          ./packaging/macos-app.sh dist/andy-ide "${{ needs.version.outputs.version }}" dist
+          ./dist/andy-ide --version
+      # Secrets cannot be read in an `if:` — the variable is passed in and the step decides for itself.
+      - name: notarise, when a key is in the secrets
+        env:
+          MACOS_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: |
+          if [ -z "${MACOS_NOTARY_PROFILE:-}" ]; then
+            echo "no notary profile: the bundle is signed and left unnotarised"
+            exit 0
+          fi
+          xcrun notarytool submit "dist/andy-ide-${{ needs.version.outputs.version }}-universal.app.zip" \
+            --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+          xcrun stapler staple "dist/andy-ide-${{ needs.version.outputs.version }}-universal.app"
+      - name: checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/*.app.zip; do
+            shasum -a 256 "$archive" > "$archive.sha256"
+            cat "$archive.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.app.zip*
+          if-no-files-found: error
+
+  # The release itself: every artifact of every job, one set of checksums, one page with notes.
+  publish:
+    needs: [version, linux, appimage, windows, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: one set of checksums over everything
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' \) \
+            -exec cp {} release/ \;
+          ( cd release && sha256sum -b ./* > SHA256SUMS && cat SHA256SUMS )
+          ls -la release
+      - name: notes
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          if [ -f "docs/release-notes/$version.md" ]; then
+            cp "docs/release-notes/$version.md" notes.md
+          else
+            printf '# andy-ide %s\n' "$version" > notes.md
+          fi
+      - name: create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+        run: |
+          set -euo pipefail
+          tag=${TAG:-v${{ needs.version.outputs.version }}}
+          # A release that already exists is added to, not replaced: re-running a failed publish must not
+          # be an error, and the tag it belongs to must not be moved.
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            args=(--title "andy-ide $tag" --notes-file notes.md)
+            if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
+            gh release create "$tag" "${args[@]}" release/*
+          fi

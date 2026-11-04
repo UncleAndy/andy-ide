@@ -24,6 +24,31 @@ agent is a configuration entry rather than a code change.
                  fs watch                     git    (ide-git)
 ```
 
+## Download
+
+The releases are built on GitHub runners from the tag of the version, and every file has
+a checksum in `SHA256SUMS` beside it: [**the latest
+release**](https://github.com/UncleAndy/andy-ide/releases/latest).
+
+| Platform | File |
+|:--|:--|
+| Linux x86_64 | `andy-ide-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `andy-ide-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux, any desktop | `andy-ide-<version>-x86_64.AppImage` |
+| Windows x86_64 | `andy-ide-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS, both architectures | `andy-ide-<version>-universal.app.zip` |
+
+The AppImage is one file: `chmod +x` it and run it, the window system's own libraries
+are the only thing it wants from the host. The tarball is built on Ubuntu 22.04, so it
+needs glibc 2.35 or newer. The Windows build is not signed with a commercial certificate
+and the macOS bundle is ad-hoc signed unless the repository carries an Apple Developer
+ID: the first launch of each says so, and [the release
+notes](docs/release-notes/0.1.0.md) say exactly what to do about it.
+
+From a checkout, `cargo run -p andy-ide -- --project <dir>`, or through the flake — `##
+Build and run` below. `andy-ide --version` and `andy-ide --help` answer without a
+window.
+
 ## Status
 
 Milestone M1 (framework and editing) is complete: window with dock panels, project tree,
@@ -477,6 +502,10 @@ docs/                       specification and acceptance reports
 ## Documentation
 
 - `docs/TZ_andy_ide_v0.1.md` — specification (Russian)
+- `CHANGELOG.md` — what each release carries
+- `docs/RELEASE.md` — how a release is cut: the tag, the workflow, the secrets, what is not in the
+  pipeline
+- `docs/release-notes/<version>.md` — the body of a release page, written before the tag
 
 ## License
 

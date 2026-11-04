@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
-repository = "https://github.com/uncleandyv/andy-ide"
+repository = "https://github.com/UncleAndy/andy-ide"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -31,6 +31,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # keystroke used to cost tens of milliseconds at `opt-level = 0`. Dependencies
 # are built optimized, our own crates lightly, so `cargo run` stays usable
 # without the compile time of a full release build.
+# The window that is shipped, not the one that is debugged: debug information is half of the
+# 59 MB a release binary weighs, and nobody unpacks an archive to read it. Symbols stay, so a
+# backtrace from a crash is still names rather than addresses.
+[profile.release]
+strip = "debuginfo"
+
 [profile.dev]
 opt-level = 1
 

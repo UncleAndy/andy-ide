@@ -1,0 +1,12 @@
+#!/bin/sh
+# The entry point of the AppImage.
+#
+# The libraries the window system opens at run time — libwayland-client, libxkbcommon, libX11, libGL —
+# are found through LD_LIBRARY_PATH, and winit opens them with `dlopen` rather than linking them: a
+# library that is missing from this path is not an error at load time, it is a window that does not
+# open. So the AppDir's own directory comes first, and the host's libraries after it: the GL driver and
+# the desktop's own integration must stay the host's, everything we shipped wins.
+here=$(dirname "$(readlink -f "$0")")
+export LD_LIBRARY_PATH="$here/usr/lib:$here/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$here/usr/bin:$PATH"
+exec "$here/usr/bin/andy-ide" "$@"

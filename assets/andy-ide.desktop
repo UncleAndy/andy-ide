@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Andy IDE
+GenericName=Code Editor
+Comment=An editor with a terminal, git and an agent beside the text
+Exec=andy-ide %F
+Icon=andy-ide
+Terminal=false
+Categories=Development;IDE;TextEditor;
+Keywords=editor;ide;code;rust;git;
+StartupNotify=true
+StartupWMClass=andy-ide
+MimeType=text/plain;inode/directory;

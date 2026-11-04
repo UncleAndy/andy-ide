@@ -18,15 +18,49 @@ mod ui;
 
 use std::path::PathBuf;
 
+/// What `--help` prints.
+///
+/// A window is not the only thing a program is asked for: a package script asks which version it is,
+/// and a person who has just unpacked an archive asks what to type. Both answers have to come without
+/// a display and without a window.
+const HELP: &str = "\
+andy-ide — an editor in a window, with a terminal, git and an agent beside the text.
+
+Usage: andy-ide [--project <dir>] [--file <path>]
+
+  --project <dir>   the project to open; the directory the command was given in otherwise
+  --file <path>     a file to open in the editor
+  -h, --help        this text
+  -V, --version     the version, and the commit the build was made from
+
+The window keeps its settings in $XDG_CONFIG_HOME/andy-ide/config.toml (~/.config/andy-ide), the
+project's own in <project>/.andy-ide/, and its log in $XDG_STATE_HOME/andy-ide/andy-ide.log.
+";
+
+/// The line `--version` prints: the number, and the commit the build was made from.
+fn version_line() -> String {
+    format!(
+        "andy-ide {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("ANDY_IDE_COMMIT")
+    )
+}
+
 /// Command line of the application.
 #[derive(Debug, Default)]
 struct Args {
     project: Option<PathBuf>,
     file: Option<PathBuf>,
+    help: bool,
+    version: bool,
 }
 
 impl Args {
-    /// Parses `--project <path>` and `--file <path>`; unknown arguments are ignored.
+    /// Parses `--project <path>`, `--file <path>`, `--help` and `--version`; unknowns are ignored.
+    ///
+    /// Ignoring an unknown argument is deliberate: the window is started from launchers, from menus and
+    /// from scripts written for other editors, and a flag nobody recognises is a worse reason to refuse
+    /// to open than a flag nobody needed.
     fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
         let mut parsed = Args::default();
         let mut iter = args.into_iter();
@@ -34,6 +68,8 @@ impl Args {
             match arg.as_str() {
                 "--project" => parsed.project = iter.next().map(PathBuf::from),
                 "--file" => parsed.file = iter.next().map(PathBuf::from),
+                "-h" | "--help" => parsed.help = true,
+                "-V" | "--version" => parsed.version = true,
                 _ => {}
             }
         }
@@ -72,6 +108,19 @@ fn options(config: &ide_core::Config) -> eframe::NativeOptions {
 }
 
 fn main() -> eframe::Result<()> {
+    let args = Args::parse(std::env::args().skip(1));
+
+    // Asked before anything is opened: a `--version` that starts a log file, a notification probe and a
+    // window is a `--version` that hangs a packaging script.
+    if args.help {
+        print!("{HELP}");
+        return Ok(());
+    }
+    if args.version {
+        println!("{}", version_line());
+        return Ok(());
+    }
+
     // The log of the window: a file that is rotated at ten megabytes, and the standard error.
     log::init();
 
@@ -79,7 +128,6 @@ fn main() -> eframe::Result<()> {
         crate::notify::probe();
     }
 
-    let args = Args::parse(std::env::args().skip(1));
     let project = project_to_open(args.project.clone(), std::env::current_dir().ok());
     // Who this window is and which desk it can reach, said once at the start. A notification the
     // desk takes and never shows is otherwise a mystery: the id it answers with says a daemon heard,
@@ -125,6 +173,31 @@ mod tests {
             options(&config).viewport.maximized,
             Some(true),
             "the window was left maximized and the backend was not told"
+        );
+    }
+
+    #[test]
+    fn the_command_line_answers_what_and_which() {
+        // The two flags a release is asked for: a package script reads `--version`, a person reads
+        // `--help`, and neither may need a display.
+        let version = Args::parse(["--version"].iter().map(|s| s.to_string()));
+        assert!(version.version && !version.help);
+
+        let help = Args::parse(["-h"].iter().map(|s| s.to_string()));
+        assert!(help.help && !help.version);
+
+        assert!(
+            super::HELP.contains("--project") && super::HELP.contains("--file"),
+            "the help text does not name the flags it has"
+        );
+        let line = super::version_line();
+        assert!(
+            line.starts_with("andy-ide ") && line.contains(env!("CARGO_PKG_VERSION")),
+            "the version line does not carry the version: {line}"
+        );
+        assert!(
+            line.contains('(') && line.ends_with(')'),
+            "the version line does not carry the commit: {line}"
         );
     }
 

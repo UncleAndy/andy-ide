@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The icon of the window: a dark sheet with a title bar and lines of code, one of them being typed at
+  a caret. Drawn as rectangles rather than letters, because a letter needs a font the rasteriser may
+  not have, and because this shape is still readable at 32 points.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2B3344"/>
+      <stop offset="1" stop-color="#1B202B"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3B465C"/>
+      <stop offset="1" stop-color="#2B3344"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The sheet, with the corners of a modern window. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#sheet)"/>
+  <rect x="96" y="96" width="832" height="832" rx="96" fill="#161A22"/>
+
+  <!-- The title bar, and the three lights every window of this kind carries. -->
+  <rect x="96" y="96" width="832" height="136" rx="96" fill="url(#bar)"/>
+  <rect x="96" y="200" width="832" height="32" fill="url(#bar)"/>
+  <circle cx="176" cy="164" r="18" fill="#FF6159"/>
+  <circle cx="236" cy="164" r="18" fill="#FFBD2E"/>
+  <circle cx="296" cy="164" r="18" fill="#28C840"/>
+
+  <!-- Lines of code: the first two whole, the third being typed at a caret. -->
+  <rect x="176" y="316" width="220" height="34" rx="17" fill="#7AA2F7"/>
+  <rect x="416" y="316" width="308" height="34" rx="17" fill="#9ECE6A"/>
+
+  <rect x="176" y="402" width="140" height="34" rx="17" fill="#BB9AF7"/>
+  <rect x="336" y="402" width="392" height="34" rx="17" fill="#7DCFFF"/>
+
+  <rect x="176" y="488" width="96" height="34" rx="17" fill="#E0AF68"/>
+  <rect x="292" y="488" width="248" height="34" rx="17" fill="#A9B1D6"/>
+  <rect x="560" y="476" width="18" height="58" rx="6" fill="#FF757F"/>
+
+  <rect x="176" y="574" width="332" height="34" rx="17" fill="#565F89"/>
+  <rect x="176" y="660" width="204" height="34" rx="17" fill="#565F89"/>
+
+  <!-- The status line at the foot: a window says what it is doing. -->
+  <rect x="176" y="806" width="672" height="6" rx="3" fill="#2B3344"/>
+  <rect x="176" y="806" width="268" height="6" rx="3" fill="#28C840"/>
+</svg>

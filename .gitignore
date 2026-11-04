@@ -29,3 +29,6 @@ rustc-ice-*.txt
 /result
 /result-*
 *.log
+
+# The packages a release build leaves behind.
+/dist
