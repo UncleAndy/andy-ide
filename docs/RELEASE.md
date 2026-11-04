@@ -22,6 +22,12 @@ GitHub runners and gathers the results into one release page; nothing is uploade
      cargo test -p andy-ide --bin andy-ide real_ -- --test-threads=1'
    ```
 
+The toolchain is the one in `rust-toolchain.toml` (1.95.0), installed by `rustup` on the runner — the
+same toolchain the gates above use, but not necessarily the same patched point release as a local nix
+toolchain. A lint the runner's `clippy` knows and this one does not is a red build: the fix belongs in the
+code, not in the workflow, and `RUSTFLAGS`/`-A` in the workflow is how a release quietly starts shipping
+code the maintainer never saw.
+
 ## The tag
 
 ```sh
