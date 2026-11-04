@@ -63,9 +63,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # The language-server checks need rust-analyzer and a warm index, and are left to the machine that
-      # runs them serially; everything else has to be green here.
-      - run: cargo test --workspace --no-fail-fast -- --skip real_
+      # A `rust-analyzer` on `PATH` is not a working server: a rustup proxy whose toolchain has no
+      # `rust-analyzer` component starts happily and leaves without a word, and the check that needs a
+      # server then fails in a way that says nothing. The component is installed and asked its version
+      # before anything else runs, so a missing server is a red step with an obvious message.
+      - name: the language server one check needs
+        run: |
+          rustup component add rust-analyzer
+          rust-analyzer --version
+      # The one check that starts a real server, alone and with its output: `--nocapture` is what turns a
+      # failure into a sentence about the server rather than a line number.
+      - name: the check that starts a real server
+        run: cargo test -p ide-lsp --test rust_analyzer -- --nocapture
+      # Everything else, without the checks that want a language server of the `andy-ide` crate (they are
+      # the serialized ones, run on a machine that has rust-analyzer and the CPU for it).
+      - run: cargo test --workspace --no-fail-fast -- --skip real_ --skip rust_analyzer_answers
 
   linux:
     needs: [version, test]

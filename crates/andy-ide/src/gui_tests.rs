@@ -6676,8 +6676,14 @@ mod the_language_server {
             .to_path_buf();
         gui.app_mut().state.lsp = Some(a_broken_server(&root));
         gui.app_mut().state.lsp_status = format!("stand-in{}", crate::state::PROCESSING);
-        gui.settle();
-        gui.settle();
+        // The worker reports its exit on a thread of its own, so two frames are enough on a quiet machine
+        // and not enough on a loaded one: this check turned red in CI while nothing was wrong. The errand
+        // is "the dead client is dropped", and the bound is the promise, not the frame count.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while gui.app().state.lsp.is_some() && std::time::Instant::now() < deadline {
+            gui.settle();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         assert!(
             gui.app().state.lsp.is_none(),

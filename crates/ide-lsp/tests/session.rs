@@ -214,6 +214,37 @@ fn a_server_that_is_not_there_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn a_server_that_leaves_before_answering_is_not_waited_out() {
+    // A program that starts and goes at once is not a rare shape: a rustup proxy whose toolchain has no
+    // `rust-analyzer` component is on `PATH`, starts, and exits without a word. The handshake used to wait
+    // its whole patience — three minutes for `initialize` — for an answer that could not come, and a
+    // release check spent exactly that long on it.
+    static DEPARTING: ServerConfig = ServerConfig {
+        name: "departing",
+        command: "true",
+        args: &[],
+        language_id: "rust",
+        extensions: &["rs"],
+        markers: &[],
+    };
+    let dir = project();
+    let started = Instant::now();
+    let error = match LspSession::start(&DEPARTING, dir.path()) {
+        Ok(_) => panic!("a server that has left cannot answer"),
+        Err(error) => error,
+    };
+    let waited = started.elapsed();
+    assert!(
+        format!("{error:#}").contains("the server is gone"),
+        "the handshake said {error:#} instead of naming the departed server"
+    );
+    assert!(
+        waited < Duration::from_secs(10),
+        "the handshake waited {waited:?} for a server that left at once"
+    );
+}
+
+#[test]
 fn an_unknown_server_request_does_not_stop_the_session() {
     let dir = project();
     let mut session = LspSession::start(&FAKE, dir.path()).unwrap();

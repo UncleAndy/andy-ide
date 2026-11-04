@@ -30,6 +30,12 @@ toolchain. A lint the runner's `clippy` knows and this one does not is a red bui
 the code, not in the workflow, and `RUSTFLAGS` or `-A` in the workflow is how a release quietly starts
 shipping code the maintainer never saw.
 
+The `test` job also needs a language server: one check starts a real `rust-analyzer` and asks it for a
+definition. The job installs the component (`rustup component add rust-analyzer`) and asks it its
+version before anything else runs — a `rust-analyzer` on `PATH` is not a working server, and a rustup
+proxy whose toolchain has no component starts happily and leaves without a word. That check runs alone
+and with `--nocapture`, so a failure is a sentence about the server rather than a line number.
+
 ## The tag
 
 ```sh

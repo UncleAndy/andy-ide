@@ -183,6 +183,18 @@ impl ServerProcess {
                         }
                         bail!("{method} was abandoned: the application is closing");
                     }
+                    // The reader thread ends when the pipe does, and the pipe of a server that left
+                    // closes with it — including a server that answered nothing first. Without this the
+                    // caller waits out the whole patience for an answer that cannot come: `initialize`
+                    // has three minutes of it, and a release check spent all three on a program that had
+                    // exited in the first millisecond (a rustup proxy whose toolchain has no
+                    // `rust-analyzer` component is exactly that: on `PATH`, starts, leaves).
+                    if !self.alive.load(Ordering::Relaxed) {
+                        if let Ok(mut pending) = self.pending.lock() {
+                            pending.remove(&id);
+                        }
+                        bail!("{method} got no answer: the server is gone");
+                    }
                     if Instant::now() >= deadline {
                         if let Ok(mut pending) = self.pending.lock() {
                             pending.remove(&id);

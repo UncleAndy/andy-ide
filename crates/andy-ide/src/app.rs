@@ -3784,10 +3784,16 @@ mod server_warming_tests {
             app.state.poll_lsp();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        // A line that did not clear is a question about the server, and the next reader of this failure
+        // needs the answer in the message: whether the client is still held at all, and what it says of
+        // itself. The first CI run of this check cost a round trip to learn nothing but the status.
         assert!(
             app.state.lsp_status.is_empty(),
-            "the status line went on saying {:?} after the server was up",
-            app.state.lsp_status
+            "the status line went on saying {:?} after the server was up (client held: {}, \n\
+             timeout: {:?})",
+            app.state.lsp_status,
+            app.state.lsp.is_some(),
+            std::time::Duration::from_secs(90)
         );
     }
 }
