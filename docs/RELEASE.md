@@ -1,17 +1,19 @@
 # Publishing a release
 
-One tag, one release. Pushing a tag that matches the version in `Cargo.toml` builds every platform on
-GitHub runners and gathers the results into one release page; nothing is uploaded by hand.
+One tag, one release. Pushing a tag that matches the version in `Cargo.toml` builds every
+platform on GitHub runners and gathers the results into one release page; nothing is
+uploaded by hand.
 
 ## Before the tag
 
-1. **The version.** `version = "0.1.0"` stands in `[workspace.package]` of `Cargo.toml`, and every crate
-   takes it from there (`version.workspace = true`). The workflow reads that line and refuses to build
-   when the tag disagrees with it.
-2. **The notes.** `docs/release-notes/<version>.md` becomes the body of the release page. If the file is
-   missing the page is a single heading with the version in it — write the file.
+1. **The version.** `version = "0.1.0"` stands in `[workspace.package]` of `Cargo.toml`, and every
+   crate takes it from there (`version.workspace = true`). The workflow reads that line and refuses
+   to build when the tag disagrees with it: a release named 0.1.0 whose window says 0.0.9 cannot be
+   made sense of later.
+2. **The notes.** `docs/release-notes/<version>.md` becomes the body of the release page. Without
+   the file the page is a single heading with the version in it, which is a page nobody reads.
 3. **The changelog.** `CHANGELOG.md` gets a section for the version, with the date.
-4. **The gates, on this machine** (they also run in the workflow, on a machine that is not this one):
+4. **The gates, on this machine.** They also run in the workflow, on a machine that is not this one:
 
    ```sh
    nix develop --command bash -lc '
@@ -24,9 +26,9 @@ GitHub runners and gathers the results into one release page; nothing is uploade
 
 The toolchain is the one in `rust-toolchain.toml` (1.95.0), installed by `rustup` on the runner — the
 same toolchain the gates above use, but not necessarily the same patched point release as a local nix
-toolchain. A lint the runner's `clippy` knows and this one does not is a red build: the fix belongs in the
-code, not in the workflow, and `RUSTFLAGS`/`-A` in the workflow is how a release quietly starts shipping
-code the maintainer never saw.
+toolchain. A lint the runner's `clippy` knows and this one does not is a red build: the fix belongs in
+the code, not in the workflow, and `RUSTFLAGS` or `-A` in the workflow is how a release quietly starts
+shipping code the maintainer never saw.
 
 ## The tag
 
@@ -36,7 +38,7 @@ git push origin main
 git push origin v0.1.0
 ```
 
-The second push is the release: `.github/workflows/release.yml` runs on `v*`.
+The last push is the release: `.github/workflows/release.yml` runs on `v*`.
 
 ## What the workflow builds
 
@@ -44,46 +46,52 @@ The second push is the release: `.github/workflows/release.yml` runs on `v*`.
 |:--|:--|:--|
 | `version` | ubuntu-24.04 | the version, and the check that the tag is that version |
 | `test` | ubuntu-22.04 | `fmt`, `clippy -D warnings`, and the deterministic tests |
-| `linux` | ubuntu-22.04 and ubuntu-24.04-arm | `andy-ide-<version>-{x86_64,aarch64}-unknown-linux-gnu.tar.gz` |
+| `linux` | ubuntu-22.04, ubuntu-24.04-arm | `andy-ide-<version>-{x86_64,aarch64}-unknown-linux-gnu.tar.gz` |
 | `appimage` | ubuntu-22.04 | `andy-ide-<version>-x86_64.AppImage`, unpacked once to prove it holds the program |
 | `windows` | windows-latest | `andy-ide-<version>-x86_64-pc-windows-msvc.zip` |
-| `macos` | macos-14 | both architectures, `lipo`-ed into one, `andy-ide-<version>-universal.app.zip` |
+| `macos` | macos-14 | both architectures `lipo`-ed into one, `andy-ide-<version>-universal.app.zip` |
 | `publish` | ubuntu-24.04 | one `SHA256SUMS`, the notes, one release page |
 
-Ubuntu 22.04 is not an accident: glibc 2.35 is the oldest the release is expected to run on, and a binary
-built against it also runs on everything newer. A build on `ubuntu-latest` would require the newest glibc
-of everybody who downloads it.
+Ubuntu 22.04 is not an accident: glibc 2.35 is the oldest the release is expected to run on, and a
+binary built against it also runs on everything newer. A build on `ubuntu-latest` would ask the newest
+glibc of everybody who downloads it.
 
-The arm runners (`ubuntu-24.04-arm`) are free for public repositories. On a private one that job fails and
-the rest of the release still lands.
+The arm runners (`ubuntu-24.04-arm`) are free for public repositories. On a private one that job fails
+and the rest of the release still lands.
 
 ## Draft or published
 
 A tag push publishes at once. `Actions` → `release` → `Run workflow` builds the same thing from `main`
-without a tag and leaves it as a **draft** (`draft: true` by default), which is the way to see the
-artifacts before anybody else does. A draft is a real release nobody can see until `Publish` is pressed.
+without a tag and leaves it as a **draft** (`draft: true` by default), which is the way to look at the
+artifacts before anybody else does; a draft is a real release that nobody can see until `Publish` is
+pressed.
 
-Re-running a failed `publish` job adds to the release that already exists (`gh release upload --clobber`)
-instead of failing on its existence; tags are never moved by the workflow.
+Re-running a failed `publish` job adds to the release that already exists (`gh release upload
+--clobber`) instead of failing on its existence, and the workflow never moves a tag.
 
 ## Signing macOS
 
 Two secrets, both optional:
 
-- `MACOS_SIGN_IDENTITY` — a Developer ID Application certificate in the runner's keychain
-  (`security import` in a step before the bundle, which the workflow does not do: it expects the
-  certificate to be there already, e.g. through a keychain step of your own). Without it the bundle is
-  signed ad-hoc (`codesign --sign -`) and runs after `xattr -d com.apple.quarantine`.
-- `MACOS_NOTARY_PROFILE` — a `notarytool` keychain profile. When it is set the zip is submitted,
-  waited on, and the bundle stapled.
+- `MACOS_SIGN_IDENTITY` — a Developer ID Application certificate, already in the runner's keychain.
+  Without it the bundle is signed ad-hoc (`codesign --sign -`) and runs after `xattr -d
+  com.apple.quarantine`.
+- `MACOS_NOTARY_PROFILE` — a `notarytool` keychain profile. When it is set, the zip is submitted, waited
+  on, and the bundle stapled.
 
-Neither is needed for the release to exist. Without them the README tells the person what to do on the
-first launch, and says why.
+Neither is needed for the release to exist. Without them the release notes tell the person what to do on
+the first launch, and say why.
 
 ## What is not in the pipeline
 
-- No Windows code signing (an `.exe` signed with a commercial certificate would cost a subscription);
-  SmartScreen says so once.
-- No `.deb`/`.rpm`/flatpak. The AppImage and the tarball are the two ways in; a package needs a
-  maintainer for each distribution, and that is a different job from publishing a build.
-- No update channel. The AppImage can carry a `zsync` file later; nothing reads it today.
+- No Windows code signing: an `.exe` signed with a commercial certificate is a subscription, and
+  SmartScreen says so once instead.
+- No `.deb`, `.rpm` or flatpak. The AppImage and the tarball are the two ways in; a package needs a
+  maintainer for each distribution, which is a different job from publishing a build.
+- No update channel. The AppImage can carry a `zsync` file later; nothing reads one today.
+- The AppImage and the macOS bundle can only be built on a runner or a desktop of that system. This
+  machine cannot check them: its compiler is Nix's, so the interpreter of the binary points into
+  `/nix/store` and `linuxdeploy`'s `ldd` gives up, and the sandbox has no `/bin/sh`, which the AppImage
+  tools need to start. What is checked here is everything before that: the tools are downloaded and
+  unpacked, the AppDir is assembled, and the workflow itself unpacks the finished AppImage and looks for
+  the window inside it.
