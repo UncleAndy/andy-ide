@@ -449,8 +449,11 @@ impl App {
         self.state.apply_pending();
 
         // The hint is asked for after the editor drew this frame, so the spot the
-        // pointer is over is the one on screen, and painted above everything.
-        if let Some(wait) = self.state.track_hover(ui.ctx().pointer_hover_pos(), now) {
+        // pointer is over is the one on screen, and painted above everything — but not above a dialog:
+        // a card lying over a modal hides the switch it stands on and takes the click meant for it.
+        if self.state.a_dialog_is_open() {
+            self.state.hover.look_at(None, now);
+        } else if let Some(wait) = self.state.track_hover(ui.ctx().pointer_hover_pos(), now) {
             ui.ctx().request_repaint_after(wait);
         }
         if let Some(wait) = self.state.track_completion(now) {
@@ -460,7 +463,11 @@ impl App {
         if let Some(wait) = self.state.track_highlights(now) {
             ui.ctx().request_repaint_after(wait);
         }
-        self.state.hover.show(ui.ctx());
+        // The card is not drawn under a dialog at all: its area is a layer of its own, above the modal,
+        // and a layer that is there for a frame is a layer that takes the click meant for a switch.
+        if !self.state.a_dialog_is_open() {
+            self.state.hover.show(ui.ctx());
+        }
 
         // A window is started from a terminal, so its stderr is where a person can read this without digging
         // for a log file: which place the pointer is over, and the hint's own text once the server has
@@ -1055,34 +1062,23 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             }
         });
 
+        // What is left is about the window and the file in front of it. The switches of the project —
+        // hidden files, the preview, the hints — belong to the project and are set where the project is:
+        // the tree's own header, and the settings. Every line starts with a capital, the way the other
+        // menus do.
         ui.menu_button("View", |ui| {
-            if ui
-                .checkbox(&mut state.tree.show_hidden, "hidden files")
-                .changed()
-            {
-                state.status = "hidden files toggled".to_owned();
-            }
-            if ui
-                .checkbox(&mut state.preview_open, "markdown preview")
-                .changed()
-            {
-                state.status = "markdown preview toggled".to_owned();
-            }
-            if ui.checkbox(&mut state.hints, "Show hints").changed() {
-                state.status = "hints toggled".to_owned();
-            }
-            if ui.button("find in file	Ctrl+F").clicked() {
+            if ui.button("Find in file	Ctrl+F").clicked() {
                 crate::ui::search::open(state, false);
             }
-            if ui.button("replace in file	Ctrl+H").clicked() {
+            if ui.button("Replace in file	Ctrl+H").clicked() {
                 crate::ui::search::open(state, true);
             }
-            if ui.button("quick open	Ctrl+P").clicked() {
+            if ui.button("Quick open	Ctrl+P").clicked() {
                 state.quick_open.open();
                 ui.close();
             }
             if ui
-                .button("settings\u{2026}\tCtrl+,")
+                .button("Settings\u{2026}	Ctrl+,")
                 .on_hover_text("Theme, scale, indentation, saving, the panels of this project")
                 .clicked()
             {
@@ -1092,12 +1088,12 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
             ui.separator();
             // The window, not what is in it. The key is named beside it, the way the panels name
             // theirs.
-            if ui.button("full screen\tF11").clicked() {
+            if ui.button("Full screen	F11").clicked() {
                 state.fullscreen_asked = true;
                 ui.close();
             }
             let mut dark = state.config.theme == ide_core::Theme::Dark;
-            if ui.checkbox(&mut dark, "dark theme").changed() {
+            if ui.checkbox(&mut dark, "Dark theme").changed() {
                 state.config.theme = if dark {
                     ide_core::Theme::Dark
                 } else {

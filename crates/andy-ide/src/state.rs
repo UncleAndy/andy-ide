@@ -2071,6 +2071,22 @@ impl AppState {
     }
 
     /// Opens a file in a tab and activates it, or focuses its existing tab.
+    /// Whether a dialog of the window's own covers what is behind it.
+    ///
+    /// A hint is drawn above everything, because it is about the text the pointer rests on — but a
+    /// dialog covers that text, and a card of the hint's own lying over a modal is both a lie about what
+    /// is under the pointer and a lid on the dialog's own controls: the click on a switch under the card
+    /// went to the card.
+    pub fn a_dialog_is_open(&self) -> bool {
+        self.settings.open
+            || self.folder.open
+            || self.naming.is_some()
+            || self.prompt.is_some()
+            || self.rename.open
+            || self.symbols.open
+            || self.quick_open.open
+    }
+
     /// Hands the terminal the settings it cannot read for itself: the program a new session runs and
     /// how much it keeps above the screen.
     ///

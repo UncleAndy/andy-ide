@@ -87,24 +87,24 @@ the file at its line in the editor.
 Every panel of the window is a place, not a document, and every one of them can be put
 away: the `Panels` menu lists them all with the key that calls each one, and the `×` on
 a tab means the same thing. It is a menu of its own, apart from `View`: a panel is not a
-way of looking at a file, and among the switches that are, it was the one line that
-could empty half the window. Putting a panel away is not throwing it out — a shell keeps
-running, a conversation keeps its words, the changes of a repository keep their places —
-and the panel comes back where it was: into the leaf it was taken from, beside the panels
-it stood with, which is the arrangement a person made. Only a panel whose leaf is gone
-goes where its kind belongs — the files on the left, the code in the middle, everything
-else along the bottom beside the problems — and that arrangement is kept with the
-project, so a window reopened puts a put-away panel back where it stood. Which panels are on
-screen, and where each of them stands, are remembered with the project in `.andy-ide`:
-the layout is written out together with the list of what was put away, so the next
-launch is the window that was left — and so is a move to that project through the
-`Project` menu, which brings its panels, their places and the agent that was on duty in
-it, rather than a window built again from the defaults. A layout is read back, not
-rebuilt — a panel that was dragged somewhere of its own stays there, and only a panel
-the layout has never heard of is put where its kind belongs.
-A project opened for the first time starts without the `Diff` and `History` panels: the Git
-panel says the same things from inside itself, and a window with fewer tabs is a window
-where the ones that are there can be read.
+way of looking at a file, and it was the one line there that could empty half the
+window. Putting a panel away is not throwing it out — a shell keeps running, a
+conversation keeps its words, the changes of a repository keep their places — and the
+panel comes back where it was: into the leaf it was taken from, beside the panels it
+stood with, which is the arrangement a person made. Only a panel whose leaf is gone goes
+where its kind belongs — the files on the left, the code in the middle, everything else
+along the bottom beside the problems — and that arrangement is kept with the project, so
+a window reopened puts a put-away panel back where it stood. Which panels are on screen,
+and where each of them stands, are remembered with the project in `.andy-ide`: the
+layout is written out together with the list of what was put away, so the next launch is
+the window that was left — and so is a move to that project through the `Project` menu,
+which brings its panels, their places and the agent that was on duty in it, rather than
+a window built again from the defaults. A layout is read back, not rebuilt — a panel
+that was dragged somewhere of its own stays there, and only a panel the layout has never
+heard of is put where its kind belongs. A project opened for the first time starts
+without the `Diff` and `History` panels: the Git panel says the same things from inside
+itself, and a window with fewer tabs is a window where the ones that are there can be
+read.
 
 The tree is a place to work in, not only to read: the `New` menu in its header makes a
 file or a folder in the project root, and every row has a menu of its own — a new file
@@ -405,33 +405,36 @@ cargo build
 cargo run -p andy-ide -- --project ~/projects/RUST/andy-ide
 ```
 
-`Ctrl` `,` — or `settings…` in the `View` menu — opens the settings: one dialog with a
-section on the left and that section on the right. `View` holds the theme and the scale
-of the whole window — a row of sizes from 75 % to 200 %, each press landing on one of
-them, because a slider moves its handle to wherever the pointer pressed and either
-magnified the window or shrank it under a touch that meant "about here"; `Editor` the
-width of an indent step, whether a step is spaces, whether a saved file loses its
-trailing whitespace, and how often what has edits is written by itself; `Panels` the
-panels of this project, the switches of its tree and preview, and `Put back` for the
-layout this build starts with; `About` the version and where the window keeps its files,
-with a door to the log. The dialog takes the room the window has — most of its width up
-to a width that still reads, and all of its height, minus a margin — so a section is
-read without a scrollbar standing where empty space was; at a scale large enough that
-the window has fewer points, the window is the limit and the section scrolls; the dialog
-is bounded on both sides, so changing the scale while it stands open moves it to the
-middle of the new window instead of leaving its top above the screen. Nothing waits for
-an `Apply`: a change is written the moment it is made — the window's part into
-`config.toml`, the project's into `.andy-ide/workspace.json` — because a window that
-keeps a value nobody confirmed is a window whose file and screen disagree. `Tools` holds
-the language servers — each one's command and arguments can be replaced and put back,
-the installed ones say so, and `Restart the server` starts the one in front again
-without waiting for the recovery counter — and the terminal's shell and scrollback (both
-about the next session, never the one already running). `Agents` is `agents.toml` as a
-form: the entries, their commands, arguments and environment, written as they are
-edited; beside it the two switches of the agent itself, whether a crash is started again
-on its own and whether the desktop is told when an agent needs a person. `Keys` lists
-every key the window answers to, read from the one table in the code; changing them is a
-separate piece of work.
+`Ctrl` `,` — or `Settings…` in the `View` menu — opens the settings: one dialog with a
+section on the left and that section on the right. `View` keeps the commands — `Find in
+file`, `Replace in file`, `Quick open`, `Settings…`, `Full screen` — and the theme; the
+scale of the whole window sits in the settings' `View` section, a row of sizes from 75 %
+to 200 %, each press landing on one of them, because a slider moves its handle to
+wherever the pointer pressed and either magnified the window or shrank it under a touch
+that meant "about here"; `Editor` the width of an indent step, whether a step is spaces,
+whether a saved file loses its trailing whitespace, how often what has edits is written
+by itself, and the hints that follow the pointer, which are held with the project rather
+than the window; `Panels` the panels of this project, the switches of its tree and
+preview, and `Put back` for the layout this build starts with; `About` the version and
+where the window keeps its files, with a door to the log. The dialog takes the room the
+window has — most of its width up to a width that still reads, and all of its height,
+minus a margin — so a section is read without a scrollbar standing where empty space
+was; at a scale large enough that the window has fewer points, the window is the limit
+and the section scrolls; the dialog is bounded on both sides, so changing the scale
+while it stands open moves it to the middle of the new window instead of leaving its top
+above the screen. Nothing waits for an `Apply`: a change is written the moment it is
+made — the window's part into `config.toml`, the project's into
+`.andy-ide/workspace.json` — because a window that keeps a value nobody confirmed is a
+window whose file and screen disagree. `Tools` holds the language servers — each one's
+command and arguments can be replaced and put back, the installed ones say so, and
+`Restart the server` starts the one in front again without waiting for the recovery
+counter — and the terminal's shell and scrollback (both about the next session, never
+the one already running). `Agents` is `agents.toml` as a form: the entries, their
+commands, arguments and environment, written as they are edited; beside it the two
+switches of the agent itself, whether a crash is started again on its own and whether
+the desktop is told when an agent needs a person. `Keys` lists every key the window
+answers to, read from the one table in the code; changing them is a separate piece of
+work.
 
 Started without `--project`, the editor opens the project that was open last, and skips
 the remembered ones whose directory is gone. The `Project` menu holds the list, a folder

@@ -2392,9 +2392,24 @@ mod the_hint {
             "the hint did not show before the switch went off"
         );
 
-        gui.harness.get_by_label("View").click();
+        // The switch is in the settings, under `Editor`, and the card standing behind the dialog does
+        // not take the press meant for it: a hint is a layer of its own and it used to be the topmost
+        // thing on the screen. The dialog is closed before the screen is read, because a card that is
+        // not drawn has nothing to look for.
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Editor));
         gui.settle();
-        gui.harness.get_by_label("Show hints").click();
+        gui.harness
+            .get_by_label("Show hints under the pointer")
+            .click();
+        gui.settle();
+        assert!(
+            !gui.app().state.hints,
+            "the switch in the settings did not turn the hints off"
+        );
+        gui.harness.key_press(egui::Key::Escape);
         gui.settle();
 
         assert!(
@@ -3541,19 +3556,35 @@ mod opening_a_panel {
     }
 
     #[test]
-    fn the_view_menu_switches_the_hints() {
+    fn the_editor_section_switches_the_hints() {
+        // The hints are a switch of the project, and a menu that looks like it changes the whole window
+        // is the wrong place for one: it stands in the settings, under `Editor`.
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         gui.settle();
         assert!(gui.app().state.hints, "the hints start off");
 
         gui.harness.get_by_label("View").click();
         gui.settle();
-        gui.harness.get_by_label("Show hints").click();
+        assert!(
+            gui.harness.query_by_label("Show hints").is_none(),
+            "the hints are still a line of the View menu"
+        );
+        gui.harness.key_press(egui::Key::Escape);
+        gui.settle();
+
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Editor));
+        gui.settle();
+        gui.harness
+            .get_by_label("Show hints under the pointer")
+            .click();
         gui.settle();
 
         assert!(
             !gui.app().state.hints,
-            "the View menu switch did not turn the hints off"
+            "the switch in the settings did not turn the hints off"
         );
     }
 

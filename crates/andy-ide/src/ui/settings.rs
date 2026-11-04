@@ -281,6 +281,16 @@ fn editor_section(ui: &mut egui::Ui, state: &mut AppState) {
     ui.weak("Files already open keep the indentation they were opened with.");
     ui.add_space(8.0);
 
+    ui.label("This project");
+    if ui
+        .checkbox(&mut state.hints, "Show hints under the pointer")
+        .on_hover_text("Held with the project, in .andy-ide/workspace.json")
+        .changed()
+    {
+        state.status = "hints toggled".to_owned();
+    }
+    ui.add_space(8.0);
+
     ui.label("Saving");
     if ui
         .checkbox(
