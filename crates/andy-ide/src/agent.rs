@@ -1494,6 +1494,16 @@ impl AgentState {
         self.worker.is_some()
     }
 
+    /// Whether the agent is in hand: a process, a start on its way, or a restart it has asked for.
+    ///
+    /// The difference from [`AgentState::running`] is the loop a broken command puts the panel in:
+    /// between one attempt and the next there is no process at all, and a panel that said `Start`
+    /// there had no way out of the loop — every press began the same attempt again, and the field
+    /// the command is written in was the one thing out of reach.
+    pub fn in_hand(&self) -> bool {
+        self.worker.is_some() || self.connecting || self.retry_at.is_some()
+    }
+
     /// Ends the conversation.
     pub fn stop(&mut self) {
         self.last_word = None;

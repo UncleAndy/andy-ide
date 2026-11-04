@@ -1171,20 +1171,24 @@ fn header(ui: &mut Ui, state: &mut AppState) {
             state.agent.switch_agent(&named);
         }
 
-        let running = state.agent.running();
-        let label = if running { "Stop" } else { "Start" };
+        // The button says what the panel is doing, not only what a process is doing: between one
+        // attempt of the reconnect loop and the next there is no process, and `Start` sitting there
+        // was a button that could only begin the same broken attempt again.
+        let in_hand = state.agent.in_hand();
+        let label = if in_hand { "Stop" } else { "Start" };
         if ui
             .button(label)
-            .on_hover_text("Start or stop the agent process")
+            .on_hover_text("Start the agent, or stop it and the attempts to bring it back")
             .clicked()
         {
-            if running {
+            if in_hand {
                 state.agent.stop();
                 state.agent.status = "stopped".to_owned();
             } else {
                 state.agent.start();
             }
         }
+        let running = state.agent.running();
         let sessions_button = ui
             .add_enabled(running, egui::Button::new("Sessions"))
             .on_hover_text("Move to another conversation this project kept");
@@ -1237,15 +1241,17 @@ fn header(ui: &mut Ui, state: &mut AppState) {
     // because that is when the next setup happens. There is no separate field for the
     // terminal: the terminal belongs to the agent, and the editor only has to say where
     // the project is and that files are worked on through it.
-    let running = state.agent.running();
-    if running {
+    // The row the agent is set up at comes back the moment it is no longer in hand: while it is
+    // trying, the command is what is being tried, and it is not edited under the attempt's feet.
+    let in_hand = state.agent.in_hand();
+    if in_hand {
         return;
     }
     ui.horizontal(|ui| {
         ui.label("Name");
         let name_width = (ui.available_width() * 0.3).max(60.0);
         ui.add_enabled(
-            !running,
+            !in_hand,
             egui::TextEdit::singleline(&mut state.agent.name)
                 .hint_text("Hermes")
                 .desired_width(name_width),
@@ -1256,7 +1262,7 @@ fn header(ui: &mut Ui, state: &mut AppState) {
         ui.label("Command");
         let width = (ui.available_width() - 8.0).max(80.0);
         ui.add_enabled(
-            !running,
+            !in_hand,
             egui::TextEdit::singleline(&mut state.agent.command)
                 .hint_text("hermes acp")
                 .desired_width(width),

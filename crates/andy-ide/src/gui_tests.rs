@@ -6362,6 +6362,60 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_agent_can_be_stopped_while_it_keeps_trying_to_come_back() {
+        // A command that cannot start leaves the panel in a loop: an attempt, a wait, an attempt
+        // again. Between one attempt and the next there is no process at all, and a `Start` there
+        // was a button that could only begin the same broken attempt — the way out is `Stop`, and
+        // the command is edited after it, not under the loop's feet.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.app_mut().state.agent.command = "/nonexistent/agent --acp".to_owned();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the panel trying to come back", |gui| {
+            gui.app().state.agent.waiting_to_reconnect()
+        });
+
+        // While the loop runs, the way out is on screen, and the command is out of reach.
+        assert!(
+            gui.harness.query_by_label("Start").is_none(),
+            "the button says Start while the panel is still trying"
+        );
+        assert!(
+            gui.harness.query_by_label("Stop").is_some(),
+            "there is no Stop in the reconnect loop"
+        );
+        assert!(
+            gui.harness.query_by_label("Command").is_none(),
+            "the command is being edited under the attempt's feet"
+        );
+
+        gui.harness.get_by_label("Stop").click();
+        gui.settle();
+
+        assert!(
+            !gui.app().state.agent.waiting_to_reconnect(),
+            "the loop went on after Stop"
+        );
+        assert_eq!(gui.app().state.agent.status, "stopped");
+        // The row the agent is set up at is back, so the command can be corrected.
+        assert!(
+            gui.harness.query_by_label("Command").is_some(),
+            "the command cannot be corrected after Stop"
+        );
+
+        // And nothing starts again by itself: the wait the loop asked for was thrown away.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        gui.settle();
+        gui.settle();
+        assert!(
+            !gui.app().state.agent.waiting_to_reconnect() && !gui.app().state.agent.running(),
+            "the agent came back on its own after it was stopped"
+        );
+    }
+
+    #[test]
     fn a_project_opened_from_the_menu_comes_back_with_its_own_panels() {
         // Two projects, two windows: which panels are on screen and which switches are on belong to
         // the project, and a move through the `Project` menu is a move between them, not a window
