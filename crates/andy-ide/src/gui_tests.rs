@@ -5542,6 +5542,40 @@ mod the_git_panel {
     }
 
     #[test]
+    fn a_tag_survives_a_row_full_of_branches() {
+        // The tag is a version and the branches are where the work is: when the row is full it is a
+        // branch that gives way, never the tag. `v0.1.0` disappeared behind five branch names once —
+        // a release commit that looks untagged.
+        let mut gui = managed(&[("a.txt", "one\n")], Some("a.txt"));
+        let root = gui._project.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(&root, "second");
+        for name in ["one", "two", "three", "four", "five"] {
+            git(&root, &["branch", name, "HEAD"]);
+        }
+        git(&root, &["tag", "-a", "v0.1.0", "-m", "andy-ide 0.1.0"]);
+        gui.app_mut().state.git.refresh(true);
+        gui.settle();
+
+        show_panel(&mut gui);
+        gui.harness.get_by_label("History").click();
+        gui.settle();
+        gui.settle();
+
+        assert!(
+            gui.harness.query_by_label("tag: v0.1.0").is_some(),
+            "the tag gave way to the branches"
+        );
+        let names = gui.app().state.git.commits[0].refs.len();
+        assert!(
+            gui.harness
+                .query_by_label(&format!("+{}", names - 5))
+                .is_some(),
+            "the names that do not fit are not counted: {names} names, five shown"
+        );
+    }
+
+    #[test]
     fn the_names_a_row_has_no_room_for_are_counted() {
         // Three more branches on one commit: five names fit, the rest are counted — a row that quietly
         // forgets a name is a row that says the wrong thing about where the work is.

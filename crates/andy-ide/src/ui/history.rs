@@ -22,9 +22,33 @@ const CHIP_REST: Color32 = Color32::from_rgb(140, 148, 162);
 ///
 /// Five is not a round number by accident: a release commit carries `HEAD`, the branch, the remote's
 /// default name (`origin/HEAD`), the remote branch and the tag — exactly five, and four dropped the
-/// tag, which is the one name a person looks for on a release. A commit that is more than that is a
-/// curiosity; the rest are counted rather than lost.
+/// tag, which is the one name a person looks for on a release.
 const CHIPS_SHOWN: usize = 5;
+
+/// The names a row shows, and how many it had to leave out.
+///
+/// What gives way is decided by kind, not by position: a remote-tracking name first (`origin/HEAD` is
+/// a name for another name, and `origin/main` says where the remote is, not what this commit is), then
+/// the branches. A tag is a version and is never dropped for a branch — a release commit whose tag is
+/// the sixth name is a commit that looks untagged, which is exactly what happened to `v0.1.0`.
+fn shown_refs(refs: &[RefMark]) -> (Vec<&RefMark>, usize) {
+    if refs.len() <= CHIPS_SHOWN {
+        return (refs.iter().collect(), 0);
+    }
+    let mut keep: Vec<&RefMark> = refs.iter().collect();
+    for kind in [RefKind::Remote, RefKind::Local] {
+        while keep.len() > CHIPS_SHOWN {
+            let Some(position) = keep.iter().rposition(|mark| mark.kind == kind) else {
+                break;
+            };
+            keep.remove(position);
+        }
+    }
+    // More tags than there are places: the last of them give way after all, because a row is one row.
+    keep.truncate(CHIPS_SHOWN);
+    let dropped = refs.len() - keep.len();
+    (keep, dropped)
+}
 
 pub fn panel(ui: &mut Ui, state: &mut AppState) {
     state.git.refresh(false);
@@ -183,19 +207,22 @@ fn commit_row(ui: &mut Ui, selected: bool, commit: &Commit) -> egui::Response {
                         egui::Label::new(RichText::new(&commit.short).monospace().color(HASH))
                             .selectable(false),
                     );
-                    for mark in commit.refs.iter().take(CHIPS_SHOWN) {
+                    let (shown, dropped) = shown_refs(&commit.refs);
+                    for mark in &shown {
                         chip(ui, mark);
                     }
                     // What does not fit is counted, never dropped in silence: a name nobody can see is
                     // a name nobody knows is there.
-                    if commit.refs.len() > CHIPS_SHOWN {
-                        let rest: Vec<&str> = commit.refs[CHIPS_SHOWN..]
+                    if dropped > 0 {
+                        let rest: Vec<&str> = commit
+                            .refs
                             .iter()
+                            .filter(|mark| !shown.iter().any(|kept| std::ptr::eq(*kept, *mark)))
                             .map(|mark| mark.name.as_str())
                             .collect();
                         ui.add(
                             egui::Label::new(
-                                RichText::new(format!("+{}", rest.len()))
+                                RichText::new(format!("+{dropped}"))
                                     .monospace()
                                     .size(10.0)
                                     .color(CHIP_REST),
