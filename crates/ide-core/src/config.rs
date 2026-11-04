@@ -25,6 +25,20 @@ pub enum Theme {
 ///
 /// `default` at the container level makes every missing key fall back to
 /// [`Config::default`], so a file may set only what it needs.
+/// A language server as a person wrote it down: the name the registry uses, and the command and
+/// arguments that replace the ones built into the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerSetting {
+    /// The server's name in the registry: `rust-analyzer`, `pyright`, `gopls`, `clangd`.
+    pub name: String,
+    /// The program to run; empty keeps the built-in one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+    /// Its arguments; empty keeps the built-in ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -47,6 +61,8 @@ pub struct Config {
     pub notifications: bool,
     /// Whether a language server that dies is brought back on its own.
     pub auto_reconnect: bool,
+    /// Language servers whose commands a person has replaced, by name.
+    pub servers: Vec<ServerSetting>,
     /// Open the window maximized, as it was when it was last closed.
     pub window_maximized: bool,
     /// Keys this version does not know about, kept verbatim.
@@ -68,6 +84,7 @@ impl Default for Config {
             scrollback: 2000,
             notifications: true,
             auto_reconnect: true,
+            servers: Vec::new(),
             window_maximized: false,
             extra: BTreeMap::new(),
         }

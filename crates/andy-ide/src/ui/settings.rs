@@ -20,14 +20,20 @@ pub enum Section {
     View,
     Editor,
     Panels,
+    Tools,
+    Agent,
+    Keys,
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 7] = [
         Section::View,
         Section::Editor,
         Section::Panels,
+        Section::Tools,
+        Section::Agent,
+        Section::Keys,
         Section::About,
     ];
 
@@ -36,16 +42,25 @@ impl Section {
             Section::View => "View",
             Section::Editor => "Editor",
             Section::Panels => "Panels",
+            Section::Tools => "Tools",
+            Section::Agent => "Agents",
+            Section::Keys => "Keys",
             Section::About => "About",
         }
     }
 }
 
-/// The dialog itself: whether it is open, and which section is in front.
+/// The dialog itself: whether it is open, which section is in front, and what is being typed.
 #[derive(Debug, Default)]
 pub struct Settings {
     pub open: bool,
     pub section: Option<Section>,
+    /// The arguments of a language server as they are being typed, by server name.
+    ///
+    /// A field bound to a `Vec` rebuilt on every frame loses a trailing space while the person types
+    /// it, which is the one keystroke that separates two arguments. The line is kept here, converted
+    /// when it changes.
+    server_args: std::collections::BTreeMap<String, String>,
 }
 
 impl Settings {
@@ -98,6 +113,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, dock: &mut egui_dock::Doc
                         Section::View => view_section(ui, state, ctx),
                         Section::Editor => editor_section(ui, state),
                         Section::Panels => panels_section(ui, state, dock),
+                        Section::Tools => tools_section(ui, state),
+                        Section::Agent => agent_section(ui, state),
+                        Section::Keys => keys_section(ui),
                         Section::About => about_section(ui, state, ctx),
                     });
                 ui.add_space(8.0);
@@ -250,6 +268,301 @@ fn panels_section(ui: &mut egui::Ui, state: &mut AppState, dock: &mut egui_dock:
     if changed {
         state.status = "the project's switches".to_owned();
     }
+}
+
+/// The programs the window runs on the project's behalf: the language servers and the terminal.
+fn tools_section(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label("Language servers");
+    ui.weak(
+        "A server that is not installed is reported in the status bar instead of being fatal: \
+         editing works without one.",
+    );
+    ui.add_space(4.0);
+    for server in ide_lsp::SERVERS {
+        let installed = ide_lsp::is_installed(server);
+        egui::CollapsingHeader::new(format!(
+            "{} — {}",
+            server.name,
+            if installed {
+                "installed"
+            } else {
+                "not installed"
+            }
+        ))
+        .id_salt(("settings_server", server.name))
+        .show(ui, |ui| {
+            lower_the_server(ui, state, server);
+        });
+    }
+    ui.add_space(6.0);
+    let running = state.lsp_status.trim().to_owned();
+    ui.horizontal(|ui| {
+        if ui
+            .button("Restart the server")
+            .on_hover_text("Drops the running server and starts it again for the file in front")
+            .clicked()
+        {
+            state.restart_lsp_now();
+        }
+        if running.is_empty() {
+            ui.weak("nothing is running");
+        } else {
+            ui.weak(format!("now: {running}"));
+        }
+    });
+    ui.add_space(10.0);
+
+    ui.label("Terminal");
+    ui.horizontal(|ui| {
+        ui.label("Shell");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut state.config.terminal_shell)
+                    .hint_text("$SHELL")
+                    .desired_width(240.0),
+            )
+            .on_hover_text("The program a new session runs; empty means the shell $SHELL names")
+            .changed()
+        {
+            state.save_config();
+        }
+    });
+    let mut kept = state.config.scrollback as i32;
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::DragValue::new(&mut kept)
+                    .range(100..=100_000)
+                    .suffix(" lines"),
+            )
+            .on_hover_text("How much a session keeps above the screen")
+            .changed()
+        {
+            state.config.scrollback = kept.clamp(100, 100_000) as usize;
+            state.save_config();
+        }
+        ui.label("kept above the screen");
+    });
+    ui.weak("A shell already running keeps running: both of these are about the next one.");
+}
+
+/// One language server's command and arguments, with the way back to the built-in ones.
+fn lower_the_server(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    server: &'static ide_lsp::ServerConfig,
+) {
+    let built_in = format!("{} {}", server.command, server.args.join(" "));
+    ui.weak(format!("built in: {built_in}"));
+    let setting = state
+        .config
+        .servers
+        .iter_mut()
+        .find(|setting| setting.name == server.name);
+    let mut edited = false;
+    match setting {
+        None => {
+            ui.horizontal(|ui| {
+                if ui.button("Run something else").clicked() {
+                    state.config.servers.push(ide_core::ServerSetting {
+                        name: server.name.to_owned(),
+                        command: server.command.to_owned(),
+                        args: server.args.iter().map(|arg| (*arg).to_owned()).collect(),
+                    });
+                    state.save_config();
+                }
+            });
+        }
+        Some(setting) => {
+            ui.horizontal(|ui| {
+                ui.label("Command");
+                edited |= ui
+                    .add(egui::TextEdit::singleline(&mut setting.command).desired_width(300.0))
+                    .changed();
+            });
+            let args_line = state
+                .settings
+                .server_args
+                .entry(server.name.to_owned())
+                .or_insert_with(|| setting.args.join(" "));
+            ui.horizontal(|ui| {
+                ui.label("Arguments");
+                let response = ui.add(egui::TextEdit::singleline(args_line).desired_width(300.0));
+                if response.changed() {
+                    setting.args = args_line.split_whitespace().map(str::to_owned).collect();
+                    edited = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Back to the built-in ones")
+                    .on_hover_text("Forgets this server's command and arguments")
+                    .clicked()
+                {
+                    let name = server.name;
+                    state.config.servers.retain(|setting| setting.name != name);
+                    state.settings.server_args.remove(name);
+                    state.save_config();
+                }
+            });
+        }
+    }
+    if edited {
+        state.save_config();
+    }
+}
+
+/// The agents of this project: the entries of `agents.toml`, as a form.
+fn agent_section(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label("Talking to an agent");
+    let mut reconnect = state.config.auto_reconnect;
+    if ui
+        .checkbox(&mut reconnect, "Start an agent again when it falls over")
+        .on_hover_text("Off, a crash waits for a person to start it")
+        .changed()
+    {
+        state.config.auto_reconnect = reconnect;
+        state.agent.auto_reconnect = reconnect;
+        state.save_config();
+    }
+    let mut notices = state.config.notifications;
+    if ui
+        .checkbox(&mut notices, "Notify the desktop when an agent needs me")
+        .on_hover_text("Notices are held back while the panel is in front of you")
+        .changed()
+    {
+        state.config.notifications = notices;
+        state.save_config();
+    }
+    ui.add_space(10.0);
+
+    let Some(root) = state
+        .project
+        .as_ref()
+        .map(|project| project.root().to_path_buf())
+    else {
+        ui.weak("Open a project to see the agents it knows.");
+        return;
+    };
+    let place = ide_agents::registry::locate(Some(&root), &state.config_dir);
+    ui.weak(place.display().to_string());
+    // A project that has never had the file gets the ones the window would have used: a form that
+    // shows nothing for a project with an agent running in it is a form that lies.
+    let mut registry = match ide_agents::Registry::load_or_write(&place) {
+        Ok(registry) => registry,
+        Err(error) => {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("cannot read it: {error}"),
+            );
+            return;
+        }
+    };
+
+    let mut changed = false;
+    let mut drop: Option<String> = None;
+    for spec in registry.agents.iter_mut() {
+        egui::CollapsingHeader::new(spec.name.clone())
+            .id_salt(("settings_agent", spec.name.clone()))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut spec.name).desired_width(200.0))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Command");
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut spec.command).desired_width(300.0))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Arguments");
+                    let mut line = spec.args.join(" ");
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut line).desired_width(300.0))
+                        .changed()
+                    {
+                        spec.args = line.split_whitespace().map(str::to_owned).collect();
+                        changed = true;
+                    }
+                });
+                for (key, value) in spec.env.iter_mut() {
+                    ui.horizontal(|ui| {
+                        ui.label(key.as_str());
+                        changed |= ui
+                            .add(egui::TextEdit::singleline(value).desired_width(240.0))
+                            .changed();
+                    });
+                }
+                if ui.button("Forget this agent").clicked() {
+                    drop = Some(spec.name.clone());
+                }
+            });
+    }
+    if let Some(name) = drop {
+        registry.agents.retain(|spec| spec.name != name);
+        changed = true;
+    }
+    if ui.button("Another agent").clicked() {
+        registry.agents.push(ide_agents::AgentSpec {
+            name: format!("agent-{}", registry.agents.len() + 1),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+        });
+        changed = true;
+    }
+    if changed {
+        // Written where the window reads it, so the panel and the file cannot disagree.
+        match registry.save(&place) {
+            Ok(()) => state.status = format!("{} written", place.display()),
+            Err(error) => state.status = format!("cannot write {}: {error}", place.display()),
+        }
+    }
+}
+
+/// Every key the window answers to, as the table in the code has it.
+fn keys_section(ui: &mut egui::Ui) {
+    ui.label("Keys");
+    ui.weak("Read from the one table the window answers to; changing them is not here yet.");
+    ui.add_space(4.0);
+    egui::Grid::new("settings_keys")
+        .num_columns(2)
+        .spacing([18.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for (shortcut, command) in crate::app::KEYS {
+                ui.strong(format_shortcut(*shortcut));
+                ui.label(command.name());
+                ui.end_row();
+            }
+        });
+}
+
+/// One key in words: `Ctrl+S`, `Ctrl+Shift+P`, `F5`.
+pub(crate) fn format_shortcut(shortcut: egui::KeyboardShortcut) -> String {
+    let mut said = String::new();
+    for (held, name) in [
+        (egui::Modifiers::COMMAND, "Ctrl"),
+        (egui::Modifiers::CTRL, "Ctrl"),
+        (egui::Modifiers::ALT, "Alt"),
+        (egui::Modifiers::SHIFT, "Shift"),
+    ] {
+        if shortcut.modifiers.matches_logically(held) && !said.contains(name) {
+            if !said.is_empty() {
+                said.push('+');
+            }
+            said.push_str(name);
+        }
+    }
+    let key = format!("{:?}", shortcut.logical_key);
+    if !said.is_empty() {
+        said.push('+');
+    }
+    said.push_str(&key);
+    said
 }
 
 /// What this build is, and where it keeps what it knows.

@@ -6228,6 +6228,112 @@ mod the_settings {
     }
 }
 
+/// The rest of the settings: the servers, the agents, the keys.
+mod the_other_settings {
+    use super::*;
+
+    #[test]
+    fn a_server_runs_with_the_command_and_arguments_the_settings_name() {
+        // The table in `ide-lsp` is data, and the settings are the one place a person can change it
+        // without a build. What is checked here is that the server the window starts is the one the
+        // setting describes — and that the entry keeps its other fields.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let built_in = ide_lsp::server_for(std::path::Path::new("a.rs")).expect("a server");
+
+        // Nothing written down: the built-in server, untouched.
+        let plain = gui.app_mut().state.server_as_configured(built_in);
+        assert_eq!(plain.command, built_in.command);
+        assert_eq!(plain.language_id, built_in.language_id);
+
+        // Written down: the command and the arguments are the setting's, and the rest is the
+        // registry's — a server that forgot its extensions would be a server for no file.
+        gui.app_mut()
+            .state
+            .config
+            .servers
+            .push(ide_core::ServerSetting {
+                name: built_in.name.to_owned(),
+                command: "/usr/bin/rust-analyzer-elsewhere".to_owned(),
+                args: vec!["--wait".to_owned()],
+            });
+        let configured = gui.app_mut().state.server_as_configured(built_in);
+        assert_eq!(configured.command, "/usr/bin/rust-analyzer-elsewhere");
+        assert_eq!(configured.args, &["--wait"]);
+        assert_eq!(configured.extensions, built_in.extensions);
+        assert_eq!(configured.markers, built_in.markers);
+
+        // Asked twice, the same instance: a running service borrows it, so the answer must not move.
+        let again = gui.app_mut().state.server_as_configured(built_in);
+        assert!(std::ptr::eq(configured, again));
+    }
+
+    #[test]
+    fn the_agents_section_writes_what_it_is_given_to_the_file() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        let root = gui
+            .app()
+            .state
+            .project
+            .as_ref()
+            .expect("a project")
+            .root()
+            .to_path_buf();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Agent));
+        gui.settle();
+
+        gui.harness.get_by_label("Another agent").click();
+        gui.settle();
+
+        let place = ide_agents::registry::locate(Some(&root), &gui.app().state.config_dir);
+        let written = std::fs::read_to_string(&place).expect("the form wrote the file");
+        assert!(
+            written.contains("agent-"),
+            "the new entry did not reach {}: {written}",
+            place.display()
+        );
+        let read = ide_agents::Registry::load(&place).expect("reading it back");
+        assert!(
+            read.agents
+                .iter()
+                .any(|spec| spec.name.starts_with("agent-")),
+            "the entry is in the text but not in the file the window reads: {written}"
+        );
+    }
+
+    #[test]
+    fn the_keys_section_shows_every_key_the_window_answers_to() {
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::Keys));
+        gui.settle();
+
+        // One row per command in the one table, in the window's own words: a key that works but is
+        // not listed is a key nobody finds.
+        assert_eq!(
+            crate::ui::settings::format_shortcut(egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::S
+            )),
+            "Ctrl+S"
+        );
+        for (_, command) in crate::app::KEYS {
+            assert!(
+                gui.harness.query_by_label(command.name()).is_some(),
+                "`{}` is not in the keys table on screen",
+                command.name()
+            );
+        }
+    }
+}
+
 /// The language server: a process this window does not own, which can die.
 mod the_language_server {
     use super::*;
@@ -6335,6 +6441,34 @@ mod the_language_server {
             gui.app().state.status.contains("keeps stopping"),
             "the window does not say it gave up: {:?}",
             gui.app().state.status
+        );
+    }
+
+    #[test]
+    fn asking_for_a_restart_does_not_wait_for_the_counter() {
+        // The counter is what keeps a server that dies on start from being started at the speed of
+        // the display. A person who asks is not that loop: the button works after the window gave up.
+        let mut gui = Gui::new(&[("a.txt", "text\n")], Some("a.txt"));
+        gui.settle();
+        gui.app_mut().state.lsp_status = "stand-in".to_owned();
+        for _ in 0..=crate::state::Recovery::LIMIT {
+            gui.app_mut().state.server_gone();
+        }
+        assert!(gui.app().state.status.contains("keeps stopping"));
+
+        gui.app_mut().state.restart_lsp_now();
+        assert!(
+            !gui.app().state.lsp_status.is_empty(),
+            "the window said nothing after a restart was asked for"
+        );
+        assert!(
+            !gui.app().state.recovery.waiting()
+                || gui.app().state.status.contains("keeps stopping"),
+            "the restart left the window in neither state"
+        );
+        assert!(
+            gui.app().state.recovery.attempts() < crate::state::Recovery::LIMIT,
+            "the counter was not put back, so the next death ends the trying at once"
         );
     }
 }

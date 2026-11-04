@@ -54,6 +54,18 @@ impl Session {
         cols: u16,
         rows: u16,
     ) -> Result<Self> {
+        Self::spawn_with(program, args, cwd, cols, rows, SCROLLBACK)
+    }
+
+    /// Starts `program` with as many lines kept above the screen as the window's settings say.
+    pub fn spawn_with(
+        program: &str,
+        args: &[String],
+        cwd: Option<&std::path::Path>,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
+    ) -> Result<Self> {
         let size = PtySize {
             rows: rows.max(1),
             cols: cols.max(1),
@@ -93,7 +105,11 @@ impl Session {
 
         let rows = std::num::NonZeroU16::new(size.rows).unwrap_or(std::num::NonZeroU16::MIN);
         let cols = std::num::NonZeroU16::new(size.cols).unwrap_or(std::num::NonZeroU16::MIN);
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            rows,
+            cols,
+            scrollback.max(1),
+        )));
         let alive = Arc::new(AtomicBool::new(true));
         let watcher: Arc<Mutex<Option<Change>>> = Arc::new(Mutex::new(None));
         {
@@ -153,23 +169,41 @@ impl Session {
 
     /// Starts the user's shell in `cwd`, or a sensible shell when `SHELL` is unset.
     pub fn shell_in(cols: u16, rows: u16, cwd: Option<&std::path::Path>) -> Result<Self> {
+        Self::shell_as(None, SCROLLBACK, cols, rows, cwd)
+    }
+
+    /// Starts the shell the settings name, keeping `scrollback` lines above the screen.
+    ///
+    /// An empty `program` means the shell `$SHELL` names: the setting overrides the environment and
+    /// does not replace it, so a window nobody configured opens what the person's login shell is.
+    pub fn shell_as(
+        program: Option<&str>,
+        scrollback: usize,
+        cols: u16,
+        rows: u16,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let named = program.map(str::trim).filter(|name| !name.is_empty());
         // The sandbox this was written in has no `/bin/sh` at all, so the shell is looked
         // for rather than assumed; a bare name goes through `PATH`.
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-            for candidate in [
-                "/run/current-system/sw/bin/bash",
-                "/bin/bash",
-                "/bin/sh",
-                "bash",
-                "sh",
-            ] {
-                if !candidate.starts_with('/') || std::path::Path::new(candidate).exists() {
-                    return candidate.to_owned();
+        let shell = match named {
+            Some(name) => name.to_owned(),
+            None => std::env::var("SHELL").unwrap_or_else(|_| {
+                for candidate in [
+                    "/run/current-system/sw/bin/bash",
+                    "/bin/bash",
+                    "/bin/sh",
+                    "bash",
+                    "sh",
+                ] {
+                    if !candidate.starts_with('/') || std::path::Path::new(candidate).exists() {
+                        return candidate.to_owned();
+                    }
                 }
-            }
-            "sh".to_owned()
-        });
-        let mut session = Self::spawn_in(&shell, &[], cwd, cols, rows)?;
+                "sh".to_owned()
+            }),
+        };
+        let mut session = Self::spawn_with(&shell, &[], cwd, cols, rows, scrollback)?;
         // Interactive and colourful, the way a person expects a terminal tab to open.
         session.write(b"")?;
         Ok(session)

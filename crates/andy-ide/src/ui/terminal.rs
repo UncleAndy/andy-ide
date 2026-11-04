@@ -67,6 +67,10 @@ pub struct Terminal {
     /// started from. Set by the application, which is the only thing that knows which
     /// project is open.
     pub cwd: Option<std::path::PathBuf>,
+    /// The program a new session runs; empty means the shell `$SHELL` names.
+    pub shell: String,
+    /// How many lines above the screen a session keeps.
+    pub scrollback: usize,
     /// Whether keys typed in this frame belong to the terminal.
     pub focused: bool,
     /// When a key was last handed to the shell, in the window's own seconds.
@@ -139,6 +143,8 @@ impl Terminal {
             cols: 80,
             rows: 24,
             cwd: None,
+            shell: String::new(),
+            scrollback: ide_term::SCROLLBACK,
             focused: false,
             last_key_at: None,
             shown: false,
@@ -171,7 +177,13 @@ impl Terminal {
     /// A second shell is a second `Session`, not a second view of the first: it has
     /// its own process, its own screen and its own selection.
     pub fn new_pane(&mut self) {
-        match Session::shell_in(self.cols, self.rows, self.cwd.as_deref()) {
+        match Session::shell_as(
+            Some(&self.shell),
+            self.scrollback,
+            self.cols,
+            self.rows,
+            self.cwd.as_deref(),
+        ) {
             Ok(session) => {
                 // Numbered from the start: the dock tab is called `Terminal`, and two
                 // things with one name cannot be told apart by the tests or the eye.

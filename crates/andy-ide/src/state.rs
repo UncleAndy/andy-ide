@@ -163,6 +163,14 @@ impl Recovery {
     pub fn waiting(&self) -> bool {
         self.at.is_some()
     }
+
+    /// How many times in a row the server has died: what the giving up is counted against.
+    ///
+    /// Read by the checks: the window itself only needs the count to decide, not to say.
+    #[cfg(test)]
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
 }
 
 #[cfg(test)]
@@ -354,6 +362,10 @@ pub struct AppState {
     pub lsp_status: String,
     /// The input time of the last autosave, so the setting is a period and not a count of frames.
     last_autosave: f64,
+    /// Servers as the settings describe them, by name: a running service borrows its configuration
+    /// for as long as it lives, so an override has to outlive the frame that made it.
+    configured_servers:
+        std::collections::HashMap<String, (String, Vec<String>, &'static ide_lsp::ServerConfig)>,
     /// What the window does about a server that died.
     pub recovery: Recovery,
     /// The caret whose uses were last asked for, and when it got there.
@@ -453,6 +465,7 @@ impl AppState {
             lsp: None,
             lsp_status: String::new(),
             last_autosave: 0.0,
+            configured_servers: std::collections::HashMap::new(),
             recovery: Recovery::default(),
             highlight_key: None,
             highlight_asked: None,
@@ -2058,6 +2071,25 @@ impl AppState {
     }
 
     /// Opens a file in a tab and activates it, or focuses its existing tab.
+    /// Hands the terminal the settings it cannot read for itself: the program a new session runs and
+    /// how much it keeps above the screen.
+    ///
+    /// A shell already running keeps running: the setting is about the next one, and saying so is the
+    /// dialog's job, not the panel's.
+    pub fn sync_terminal_settings(&mut self) {
+        if self.terminal.shell != self.config.terminal_shell {
+            self.terminal.shell = self.config.terminal_shell.clone();
+        }
+        self.terminal.scrollback = self.config.scrollback.max(1);
+        // The agent is told the same way, and for the same reason: its worker runs on another thread
+        // and reads these two, so the window writes them where the worker looks.
+        self.agent.auto_reconnect = self.config.auto_reconnect;
+        self.agent.notifications.store(
+            self.config.notifications,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// How a file opened now is indented: the setting the window has at this moment.
     pub fn indent(&self) -> crate::editor::Indent {
         crate::editor::Indent {
@@ -2134,6 +2166,81 @@ impl AppState {
     ///
     /// Called by the first question about a file, and by the editor warming the server the moment it shows
     /// one; a file no known server handles is left alone, and the handshake happens on the worker thread.
+    /// The server as the settings describe it: the same server, with the command and arguments a
+    /// person wrote down in place of the built-in ones.
+    ///
+    /// `LanguageService` keeps a reference to its configuration for as long as the process runs, so
+    /// the override cannot be a value on the stack: one instance per distinct setting is handed out
+    /// and kept, and editing the setting again replaces that entry instead of adding another.
+    pub(crate) fn server_as_configured(
+        &mut self,
+        server: &'static ide_lsp::ServerConfig,
+    ) -> &'static ide_lsp::ServerConfig {
+        let Some(setting) = self
+            .config
+            .servers
+            .iter()
+            .find(|setting| setting.name == server.name)
+        else {
+            return server;
+        };
+        let command = setting.command.trim();
+        if command.is_empty() && setting.args.is_empty() {
+            return server;
+        }
+        let command = if command.is_empty() {
+            server.command.to_owned()
+        } else {
+            command.to_owned()
+        };
+        let args: Vec<String> = if setting.args.is_empty() {
+            server.args.iter().map(|arg| (*arg).to_owned()).collect()
+        } else {
+            setting.args.clone()
+        };
+        if let Some((known_command, known_args, configured)) =
+            self.configured_servers.get(server.name)
+            && *known_command == command
+            && *known_args == args
+        {
+            return configured;
+        }
+        let configured: &'static ide_lsp::ServerConfig =
+            Box::leak(Box::new(ide_lsp::ServerConfig {
+                name: server.name,
+                command: Box::leak(command.clone().into_boxed_str()),
+                args: Box::leak(
+                    args.iter()
+                        .map(|arg| Box::leak(arg.clone().into_boxed_str()) as &'static str)
+                        .collect::<Vec<&'static str>>()
+                        .into_boxed_slice(),
+                ),
+                language_id: server.language_id,
+                extensions: server.extensions,
+                markers: server.markers,
+            }));
+        self.configured_servers
+            .insert(server.name.to_owned(), (command, args, configured));
+        configured
+    }
+
+    /// Starts the language server again from scratch, for the file in front.
+    ///
+    /// The recovery of a server that died waits and then gives up; a person who asks does not wait:
+    /// whatever the counter says, the client is dropped and the server started now.
+    pub fn restart_lsp_now(&mut self) {
+        let path = self.active_buffer().map(|buffer| buffer.path.clone());
+        self.lsp = None;
+        self.recovery = Recovery::default();
+        self.lsp_status.clear();
+        if let Some(path) = path {
+            self.ensure_lsp(&path);
+            if self.lsp.is_some() {
+                self.replay_documents();
+            }
+        }
+    }
+
     fn ensure_lsp(&mut self, rel: &Path) {
         if self.lsp.is_some() {
             return;
@@ -2144,6 +2251,7 @@ impl AppState {
             self.lsp_status = format!("no language server for {}", display_name(rel));
             return;
         };
+        let server = self.server_as_configured(server);
         let Some(root) = self
             .project
             .as_ref()

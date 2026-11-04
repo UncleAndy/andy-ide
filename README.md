@@ -414,7 +414,17 @@ preview, and `Put back` for the layout this build starts with; `About` the versi
 where the window keeps its files, with a door to the log. Nothing waits for an `Apply`:
 a change is written the moment it is made — the window's part into `config.toml`, the
 project's into `.andy-ide/workspace.json` — because a window that keeps a value nobody
-confirmed is a window whose file and screen disagree.
+confirmed is a window whose file and screen disagree. `Tools` holds the language servers
+— each one's command and arguments can be replaced and put back, the installed ones say
+so, and `Restart the server` starts the one in front again without waiting for the
+recovery counter — and the terminal's shell and scrollback (both about the next session,
+never the one already running). `Agents` is `agents.toml` as a form: the entries, their
+commands, arguments and environment, written as they are edited; beside it the two
+switches of the agent itself, whether a crash is started again on its own and whether
+the desktop is told when an agent needs a person. `Keys` lists every key the window
+answers to, read from the one table in the code; changing them is a separate piece of
+work.
+
 Started without `--project`, the editor opens the project that was open last, and skips
 the remembered ones whose directory is gone. The `Project` menu holds the list, a folder
 dialog for a project that is not in it, and a cross on every row. `Open folder…` opens

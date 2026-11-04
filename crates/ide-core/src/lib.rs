@@ -11,7 +11,7 @@ pub mod tabs;
 pub mod watch;
 pub mod workspace;
 
-pub use config::{Config, Theme};
+pub use config::{Config, ServerSetting, Theme};
 pub use project::{Entry, EntryKind, Project, TreeOptions};
 pub use quickopen::{FileIndex, FileIndexCache, SearchHit};
 pub use session::{RECENT_LIMIT, Recent, Session, TabState};

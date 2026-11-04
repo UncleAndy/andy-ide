@@ -371,6 +371,7 @@ impl App {
         // due, and the window says what it did.
         self.state
             .autosave_if_due(ui.ctx().input(|input| input.time));
+        self.state.sync_terminal_settings();
         // A file asked for from another panel is put in front of the person: the editor panel comes
         // back if it was put away, and comes to the front if something else was standing there. The
         // dock was drawn above, before the row was clicked, so the next frame is the one that shows
@@ -728,8 +729,8 @@ impl Command {
         }
     }
 
-    /// The row in words, for the checks that read the table the way the window does.
-    #[cfg(test)]
+    /// The command in words: what the keys section of the settings shows, and what the checks that
+    /// read the table the way the window does look for.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Command::CloseTab => "close the tab",

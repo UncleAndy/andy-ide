@@ -473,6 +473,9 @@ pub struct AgentState {
     /// Where the person is, as far as the window can tell: filled in by every frame it draws, and read
     /// by the worker, which is the thread that decides whether a notice is worth sending.
     pub(crate) looking: Arc<Mutex<crate::notify::Looking>>,
+    /// Whether the desktop is told anything at all: the window's setting, read by the worker on the
+    /// same thread that decides whether a notice is worth sending.
+    pub(crate) notifications: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<Worker>,
     root: Option<PathBuf>,
     /// Where the agents are kept for this project, once a project is known.
@@ -557,6 +560,7 @@ impl Default for AgentState {
             connects: 0,
             notifier: Arc::new(crate::notify::System),
             looking: Arc::new(Mutex::new(crate::notify::Looking::default())),
+            notifications: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             waker: Waker::default(),
             worker: None,
             root: None,
@@ -764,6 +768,7 @@ impl AgentState {
         let telling = Telling {
             desk: Arc::clone(&self.notifier),
             looking: Arc::clone(&self.looking),
+            notifications: Arc::clone(&self.notifications),
         };
         let started = std::thread::Builder::new()
             .name(format!("agent-{name}"))
@@ -1767,12 +1772,20 @@ struct Telling {
     desk: Arc<dyn crate::notify::Surface>,
     /// Where the person is, written by the window on every frame it draws.
     looking: Arc<Mutex<crate::notify::Looking>>,
+    /// Whether the desktop is told anything at all.
+    notifications: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Telling {
     /// Where the person is now, as far as the window last said.
     fn where_is_the_person(&self) -> crate::notify::Looking {
         self.looking.lock().map(|held| *held).unwrap_or_default()
+    }
+
+    /// Whether notices are wanted at all.
+    fn wanted(&self) -> bool {
+        self.notifications
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1785,9 +1798,16 @@ impl Telling {
 fn tell_the_desk(
     desk: &dyn crate::notify::Surface,
     looking: crate::notify::Looking,
+    wanted: bool,
     want: crate::notify::Want,
     detail: &str,
 ) -> Option<Result<u32, String>> {
+    if !wanted {
+        // Switched off in the settings: silence is what was asked for, and the log says it was a
+        // choice and not a desk that refused.
+        tracing::info!(?want, %detail, "notifications are off; nothing was sent");
+        return None;
+    }
     if !crate::notify::should_tell(looking) {
         // Said out loud, and said with the circumstances: without this line a notice nobody received
         // cannot be told from an agent that never asked.
@@ -2001,7 +2021,10 @@ fn work(
             // to come back to the window, which is the one moment it is of no use.
             if let Some((want, detail)) = asking_for(&event) {
                 let looking = telling.where_is_the_person();
-                if let Some(told) = tell_the_desk(telling.desk.as_ref(), looking, want, &detail) {
+                let wanted = telling.wanted();
+                if let Some(told) =
+                    tell_the_desk(telling.desk.as_ref(), looking, wanted, want, &detail)
+                {
                     let (title, _) = want.message(&detail);
                     if !replies.send(Reply::Told { title, told }) {
                         return;
@@ -2104,6 +2127,27 @@ mod grouping_tests {
     }
 
     #[test]
+    fn notices_switched_off_reach_no_one_even_from_afar() {
+        // The setting is the window's answer to "do not interrupt me", and it has to hold in the one
+        // case where the desk would otherwise be told: the person is away from the panel.
+        let desk = crate::notify::Written::default();
+        let away = crate::notify::Looking {
+            focused: false,
+            panel_in_front: false,
+        };
+        let want = crate::notify::Want::Asks;
+        assert!(
+            tell_the_desk(&desk, away, false, want, "Build failed; may I look?").is_none(),
+            "a notice went out with the setting off"
+        );
+        assert!(
+            desk.shown().is_empty(),
+            "the desk was given a notice with the setting off: {:?}",
+            desk.shown()
+        );
+    }
+
+    #[test]
     fn nothing_is_told_while_the_person_is_looking_at_the_panel() {
         let desk = crate::notify::Written::default();
         let want = crate::notify::Want::Asks;
@@ -2115,7 +2159,7 @@ mod grouping_tests {
             panel_in_front: true,
         };
         assert!(
-            tell_the_desk(&desk, here, want, question).is_none(),
+            tell_the_desk(&desk, here, true, want, question).is_none(),
             "the desk was told about a question already on the screen"
         );
         assert!(
@@ -2130,7 +2174,7 @@ mod grouping_tests {
             panel_in_front: true,
         };
         assert!(
-            tell_the_desk(&desk, away, want, question).is_some(),
+            tell_the_desk(&desk, away, true, want, question).is_some(),
             "a person away from a window showing the panel was told nothing"
         );
 
@@ -2140,7 +2184,7 @@ mod grouping_tests {
             panel_in_front: false,
         };
         assert!(
-            tell_the_desk(&desk, behind, want, question).is_some(),
+            tell_the_desk(&desk, behind, true, want, question).is_some(),
             "a question behind another tab was not told"
         );
 
