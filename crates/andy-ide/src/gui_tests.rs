@@ -6101,6 +6101,143 @@ mod the_agent_panel {
         Some(gui)
     }
 
+    /// A second project on disk, with the record of a window it had: the panels it keeps off
+    /// screen, the switches of its view, and the agent that was on duty in it.
+    fn second_project(
+        agent: Option<&std::path::Path>,
+        hidden: &[&str],
+        hints: bool,
+    ) -> tempfile::TempDir {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".andy-ide")).unwrap();
+        std::fs::write(project.path().join("b.rs"), "fn b() {}\n").unwrap();
+        if let Some(agent) = agent {
+            std::fs::write(
+                project.path().join(".andy-ide").join("agents.toml"),
+                format!(
+                    "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                    agent.to_string_lossy()
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                project.path().join(".andy-ide").join("agent-session.json"),
+                "{\"sessions\": {\"stand-in\": \"kept-7\"}}\n",
+            )
+            .unwrap();
+        }
+        let workspace = ide_core::Workspace::open(&project.path().canonicalize().unwrap()).unwrap();
+        workspace
+            .write_state(&ide_core::WorkspaceState {
+                // The project was working on a file of its own: what a move to it has to bring
+                // back, besides the panels.
+                tabs: vec![std::path::PathBuf::from("b.rs")],
+                hidden: Some(hidden.iter().map(|slug| (*slug).to_owned()).collect()),
+                view: [("hints".to_owned(), hints)].into_iter().collect(),
+                agent: agent.map(|_| "stand-in".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        project
+    }
+
+    /// Puts the project in front through the menu a person uses, not by asking the state directly:
+    /// the panels and the agent are the window's, and the window is what has to be moved.
+    fn open_from_the_menu(gui: &mut Gui, project: &std::path::Path) {
+        gui.app_mut().state.recent.add(project.to_path_buf());
+        gui.settle();
+        gui.harness.get_by_label("Project").click();
+        gui.settle();
+        let label = crate::state::display_name(project);
+        gui.harness.get_by_label(&label).click();
+        gui.settle();
+        gui.settle();
+    }
+
+    #[test]
+    fn a_project_opened_from_the_menu_comes_back_with_its_own_panels() {
+        // Two projects, two windows: which panels are on screen and which switches are on belong to
+        // the project, and a move through the `Project` menu is a move between them, not a window
+        // built again from the defaults.
+        let second = second_project(None, &["diff", "history", "problems"], false);
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        assert!(
+            gui.app().dock.find_tab(&Tab::Problems).is_some(),
+            "the first project starts without its problems panel"
+        );
+        assert!(
+            gui.app().state.hints,
+            "the first project starts without hints"
+        );
+
+        open_from_the_menu(&mut gui, second.path());
+
+        assert_eq!(
+            gui.app()
+                .state
+                .project
+                .as_ref()
+                .and_then(|project| project.root().file_name()),
+            second.path().canonicalize().unwrap().file_name(),
+            "the menu did not put the second project in front"
+        );
+        assert!(
+            gui.app().state.hidden.contains(&Tab::Problems),
+            "the panels of the project that came in front were not read"
+        );
+        assert!(
+            gui.app().dock.find_tab(&Tab::Problems).is_none(),
+            "a panel the project keeps off screen is on screen"
+        );
+        assert!(
+            !gui.app().state.hints,
+            "the switches of the project that came in front were not read"
+        );
+        // And the files of the project in front are the ones on screen.
+        assert!(
+            gui.app()
+                .state
+                .tabs
+                .items()
+                .iter()
+                .any(|item| item.path.file_name().is_some_and(|name| name == "b.rs")),
+            "the tabs of the project that came in front were not restored"
+        );
+    }
+
+    #[test]
+    fn a_project_opened_from_the_menu_opens_the_agent_that_was_on_duty() {
+        // The project keeps the agent that was working in it, the way it keeps its panels: a move
+        // through the menu puts that agent back to work, with the conversation it was holding.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let second = second_project(Some(&agent), &["diff", "history"], true);
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        assert!(
+            !gui.app().state.agent.has_connected(),
+            "an agent was opened before the project that keeps one was in front"
+        );
+
+        open_from_the_menu(&mut gui, second.path());
+
+        wait(&mut gui, "the agent of the project coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        assert_eq!(
+            gui.app().state.agent.name,
+            "stand-in",
+            "the agent on duty in the project was not the one opened"
+        );
+        assert_eq!(
+            gui.app().state.agent.session.as_deref(),
+            Some("kept-7"),
+            "the conversation the project kept was not picked up"
+        );
+        gui.app_mut().state.agent.stop();
+    }
+
     /// Starts the panel's stand-in agent and asks it for a choice, up to the point where the
     /// card is on screen and the agent is waiting.
     fn ask_for_a_choice(gui: &mut Gui) {

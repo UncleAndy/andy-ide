@@ -137,6 +137,12 @@ pub struct AppState {
     /// The panels the person has put away, in the order they were put away. What is not here is
     /// on screen: a panel that is written down is a panel the dock does not hold.
     pub hidden: Vec<Tab>,
+    /// A project the person asked to open from the `Project` menu.
+    ///
+    /// The menu knows the state, and a move to another project also rearranges the window: the
+    /// panels, their places and the agent are the window's, not the state's. The request is left
+    /// here for the frame that draws the menu, which holds both.
+    pub switch_asked: Option<PathBuf>,
     /// A question waiting for an answer; the interface draws it as a modal.
     pub prompt: Option<Prompt>,
     /// Set when the user chose to leave; the next frame closes the window.
@@ -292,6 +298,7 @@ impl AppState {
             index_job: None,
             last_state: None,
             last_write: 0.0,
+            switch_asked: None,
         };
 
         // Launched without a project argument, the editor opens the one the user

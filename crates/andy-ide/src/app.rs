@@ -44,47 +44,73 @@ impl App {
         project: Option<PathBuf>,
         file: Option<PathBuf>,
     ) -> Self {
-        let mut state = AppState::with_config_dir(config_dir.clone(), project, file);
-        // What the person put away is part of the project, like the layout: a panel that was left
-        // off screen comes back off screen. A project that has never said comes back with the
-        // panels this build starts without.
-        state.hidden = state
-            .stored_hidden()
-            .unwrap_or_else(|| PUT_AWAY_AT_START.to_vec());
-        // The View switches come back with the project, the way the panels do.
-        if let Some(view) = state.stored_view() {
-            state.apply_view(&view);
-        }
-        let mut dock = state
-            .stored_layout()
-            .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
-            .unwrap_or_else(default_layout);
-        complete(&mut dock, &state.hidden);
-        // The panel reads its agents from the project on the first frame, and a connection
-        // the window opens before that first frame has to ask for them here.
-        state.agent.follow(
-            state.project.as_ref().map(|project| project.root()),
-            &config_dir,
-        );
-        // The agent that was on duty when the window closed comes back on duty: the project
-        // keeps its agent the way it keeps its layout, and the connection is opened the way
-        // a person opening the panel and pressing Start would open it. An agent the project
-        // no longer knows is left alone — the file is the source of what can be started.
-        if let Some(name) = state.stored_agent()
-            && let Some(spec) = state.agent.registry.get(&name)
-        {
-            state.agent.chosen = Some(name);
-            state.agent.name = spec.name.clone();
-            state.agent.command = ide_agents::quote_command(spec);
-            state.agent.start();
-        }
-        Self {
+        let state = AppState::with_config_dir(config_dir, project, file);
+        let mut app = Self {
             state,
-            dock,
+            dock: default_layout(),
             zoom_applied: false,
             frames: 0,
             layout_serialized_at: 0.0,
             notifier: std::sync::Arc::new(crate::notify::System),
+        };
+        // A launch is a project put in front, the same errand as a move through the `Project`
+        // menu: what the project keeps of the window comes back the same way in both.
+        app.adopt_project();
+        app
+    }
+
+    /// Puts another project in front, with everything that project remembers of the window.
+    fn switch_project(&mut self, root: &std::path::Path, now: f64) {
+        // The project being left writes itself down first: the layout of the dock lives in this
+        // window, and the project it leaves must not be the one that pays for the move.
+        let layout = (self.frames > 1)
+            .then(|| serde_json::to_string(&self.dock).ok())
+            .flatten();
+        self.state.save_workspace(layout, now, true);
+        self.state.open_project(root);
+        self.adopt_project();
+    }
+
+    /// Puts back what the project in front keeps of the window: the panels that were on screen and
+    /// where they stood, the switches of the view, and the agent that was on duty.
+    fn adopt_project(&mut self) {
+        // What the person put away is part of the project, like the layout: a panel that was left
+        // off screen comes back off screen. A project that has never said comes back with the
+        // panels this build starts without.
+        self.state.hidden = self
+            .state
+            .stored_hidden()
+            .unwrap_or_else(|| PUT_AWAY_AT_START.to_vec());
+        // The switches of the view come back with the project, the way the panels do.
+        if let Some(view) = self.state.stored_view() {
+            self.state.apply_view(&view);
+        }
+        self.dock = self
+            .state
+            .stored_layout()
+            .and_then(|layout| serde_json::from_str::<DockState<Tab>>(&layout).ok())
+            .unwrap_or_else(default_layout);
+        complete(&mut self.dock, &self.state.hidden);
+        self.put_the_agent_on_duty();
+    }
+
+    /// Opens the agent the project had on duty, if the project still names one it can start.
+    ///
+    /// `follow` is what stops the agent of the project being left and reads the agents of the one
+    /// in front; the connection is then opened the way a person pressing Start would open it. An
+    /// agent the project no longer knows is left alone — the file is the source of what can be
+    /// started.
+    fn put_the_agent_on_duty(&mut self) {
+        let config = self.state.config_dir.clone();
+        let root = self.state.project.as_ref().map(|project| project.root());
+        self.state.agent.follow(root, &config);
+        if let Some(name) = self.state.stored_agent()
+            && let Some(spec) = self.state.agent.registry.get(&name)
+        {
+            self.state.agent.chosen = Some(name);
+            self.state.agent.name = spec.name.clone();
+            self.state.agent.command = ide_agents::quote_command(spec);
+            self.state.agent.start();
         }
     }
 }
@@ -126,6 +152,15 @@ fn default_layout() -> DockState<Tab> {
 /// is already in the layout is not touched at all: where a person dragged it is the layout, and
 /// the layout is what a workspace keeps between launches.
 fn complete(dock: &mut DockState<Tab>, hidden: &[Tab]) {
+    // A panel the project keeps off screen leaves the window even when the layout it was read from
+    // still holds it: the record of what was put away is the later word — a project written by a
+    // build that did not keep one, or one whose layout never reached the disk, is not a reason to
+    // show a panel its person put away.
+    for tab in hidden {
+        if let Some(path) = dock.find_tab(tab) {
+            dock.remove_tab(path);
+        }
+    }
     for tab in Tab::ALL {
         if hidden.contains(&tab) || dock.find_tab(&tab).is_some() {
             continue;
@@ -268,6 +303,11 @@ impl App {
         egui::Panel::top("menu_bar")
             .frame(menu_frame)
             .show(ui, |ui| menu_bar(ui, &mut self.state, &mut self.dock));
+        // A project asked for in the menu is put in front here, while the window and its panels are
+        // both in hand and before anything of the project being left is drawn.
+        if let Some(root) = self.state.switch_asked.take() {
+            self.switch_project(&root, now);
+        }
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             crate::ui::status::bar(ui, &self.state);
         });
@@ -912,7 +952,9 @@ fn menu_bar(ui: &mut egui::Ui, state: &mut AppState, dock: &mut DockState<Tab>) 
                     .on_hover_text(path.display().to_string())
                     .clicked()
                 {
-                    state.open_project(&path);
+                    // The panels and the agent are the window's, and this menu holds only the
+                    // state: the move is asked for here and made by the frame.
+                    state.switch_asked = Some(path);
                     ui.close();
                 }
             }

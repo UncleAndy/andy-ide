@@ -85,9 +85,11 @@ and the panel comes back where its kind belongs: the files on the left, the code
 middle, everything else along the bottom beside the problems. Which panels are on
 screen, and where each of them stands, are remembered with the project in `.andy-ide`:
 the layout is written out together with the list of what was put away, so the next
-launch is the window that was left.
-A layout is read back, not rebuilt — a panel that was dragged somewhere of its own
-stays there, and only a panel the layout has never heard of is put where its kind belongs.
+launch is the window that was left — and so is a move to that project through the
+`Project` menu, which brings its panels, their places and the agent that was on duty in
+it, rather than a window built again from the defaults. A layout is read back, not
+rebuilt — a panel that was dragged somewhere of its own stays there, and only a panel
+the layout has never heard of is put where its kind belongs.
 A project opened for the first time starts without the `Diff` and `History` panels: the Git
 panel says the same things from inside itself, and a window with fewer tabs is a window
 where the ones that are there can be read.

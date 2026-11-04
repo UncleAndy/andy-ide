@@ -604,6 +604,9 @@ impl AgentState {
         self.resumed_from = None;
         self.attempts = 0;
         self.retry_at = None;
+        // The conversations kept were the conversations of the project being left: an id that
+        // outlived its project would reopen a stranger's conversation in the next one.
+        self.kept.clear();
         let Some(root) = self.root.clone() else {
             self.registry = Registry::defaults();
             self.status = "no project: an agent has nowhere to work".to_owned();
