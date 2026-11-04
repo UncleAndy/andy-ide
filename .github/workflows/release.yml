@@ -147,7 +147,9 @@ jobs:
         env:
           ARCH: x86_64
         run: |
-          ./packaging/linux-appimage.sh target/release/andy-ide \
+          # Through `bash`, not `./`: a script checked out without its execute bit fails as
+          # "Permission denied" (126) and takes the whole release with it, which is what happened once.
+          bash packaging/linux-appimage.sh target/release/andy-ide \
             "${{ needs.version.outputs.version }}" dist
       - name: look inside the AppImage
         shell: bash
@@ -222,7 +224,7 @@ jobs:
         env:
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
-          ./packaging/macos-app.sh dist/andy-ide "${{ needs.version.outputs.version }}" dist
+          bash packaging/macos-app.sh dist/andy-ide "${{ needs.version.outputs.version }}" dist
           ./dist/andy-ide --version
       # Secrets cannot be read in an `if:` — the variable is passed in and the step decides for itself.
       - name: notarise, when a key is in the secrets

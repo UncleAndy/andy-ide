@@ -37,7 +37,7 @@ codesign --verify --deep --strict "$app" && echo "signature verified"
 
 mkdir -p "$out"
 name="andy-ide-${version}-universal.app"
-rm -rf "$out/$name"
+rm -rf "${out:?}/$name"
 cp -R "$app" "$out/$name"
 # `ditto` keeps the extended attributes and the signature intact, which a plain `zip` does not: an
 # archive made with `zip` unpacks into a bundle the system refuses to start.
