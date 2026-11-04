@@ -6089,6 +6089,67 @@ mod the_settings {
     }
 
     #[test]
+    fn every_size_the_dialog_offers_lands_on_that_size() {
+        // The scale used to be a slider, and a slider moves its handle to where the pointer pressed: on a
+        // straight 0.2…5.0 groove a press in the middle asked for 260 %, so merely touching the control
+        // either magnified the window or shrank it. Each size is a row of its own now, and this walks them.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::View));
+        gui.settle();
+
+        for stop in crate::ui::settings::SCALE_STOPS {
+            let label = format!("{:.0}%", stop * 100.0);
+            gui.harness.get_by_label(&label).click();
+            gui.settle();
+
+            let zoom = gui.harness.ctx.zoom_factor();
+            assert!(
+                (zoom - stop).abs() < 0.005,
+                "the press on {label} asked the window for {:.0}%",
+                zoom * 100.0
+            );
+            // And it reached the window the next launch reads, not only the widget.
+            let from_config = gui.app().state.config.font_size / crate::state::DEFAULT_FONT_SIZE;
+            assert!(
+                (from_config - stop).abs() < 0.01,
+                "{label} is on screen as {zoom:.2}× and in the settings as {from_config:.2}×"
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_reached_with_the_keys_is_not_pulled_back_by_the_dialog() {
+        // `Ctrl` `+` reaches sizes the row does not offer. Opening the dialog must not treat one as an
+        // error and pull the window to a neighbour: the row shows the size the window is at.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        gui.settle();
+        gui.harness.ctx.set_zoom_factor(3.0);
+        gui.app_mut().state.config.font_size = 3.0 * crate::state::DEFAULT_FONT_SIZE;
+        gui.settle();
+        gui.app_mut()
+            .state
+            .settings
+            .open_at(Some(crate::ui::settings::Section::View));
+        gui.settle();
+        gui.settle();
+
+        let zoom = gui.harness.ctx.zoom_factor();
+        assert!(
+            (zoom - 3.0).abs() < 0.05,
+            "opening the dialog moved the window from 300 % to {:.0}%",
+            zoom * 100.0
+        );
+        assert!(
+            gui.harness.query_by_label("300%").is_some(),
+            "the row does not say the size the window is at"
+        );
+    }
+
+    #[test]
     fn the_panels_section_puts_a_panel_away_and_the_layout_can_be_put_back() {
         let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
         gui.settle();

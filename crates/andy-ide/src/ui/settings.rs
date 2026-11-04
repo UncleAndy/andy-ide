@@ -11,8 +11,14 @@
 
 use egui::{Id, Key, Modal, Modifiers};
 
-use crate::state::{AppState, DEFAULT_FONT_SIZE, MAX_ZOOM, MIN_ZOOM};
+use crate::state::{AppState, DEFAULT_FONT_SIZE};
 use crate::ui::Tab;
+
+/// The sizes the dialog offers by hand. Every press lands on one of them, never between two: a slider
+/// moves its handle to where the pointer pressed, so touching one either magnified the window or shrank
+/// it by a factor nobody asked for. The keys `Ctrl` `+` and `Ctrl` `-` still reach 0.2…5.0 for the screen
+/// that needs it, and a size reached that way is shown in the row rather than rounded to a neighbour.
+pub const SCALE_STOPS: [f32; 7] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
 
 /// A section of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,26 +154,36 @@ fn view_section(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
     }
     ui.add_space(8.0);
 
-    // The scale is the zoom egui applies to everything: the same number `Ctrl`+`+` moves.
+    // The scale is the zoom egui applies to everything: the same number `Ctrl` `+` moves.
     let mut zoom = state.config.font_size / DEFAULT_FONT_SIZE;
     ui.label("Interface scale");
-    let slider = ui.add(
-        egui::Slider::new(&mut zoom, MIN_ZOOM..=MAX_ZOOM)
-            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-            .custom_parser(|text| {
-                text.trim_end_matches('%')
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .map(|percent| percent / 100.0)
-            }),
-    );
-    if slider.changed() {
+    let mut chosen: Option<f32> = None;
+    ui.horizontal_wrapped(|ui| {
+        for stop in SCALE_STOPS {
+            let here = (zoom - stop).abs() < 0.005;
+            if ui
+                .selectable_label(here, format!("{:.0}%", stop * 100.0))
+                .clicked()
+                && !here
+            {
+                chosen = Some(stop);
+            }
+        }
+        // A size the keys reached stands where it is, so the row never shows a size the window is not at.
+        if !SCALE_STOPS.iter().any(|stop| (zoom - stop).abs() < 0.005) {
+            ui.strong(format!("{:.0}%", zoom * 100.0));
+        }
+    });
+    if let Some(stop) = chosen {
+        zoom = stop;
         ctx.set_zoom_factor(zoom);
-        state.config.font_size = zoom * DEFAULT_FONT_SIZE;
+        state.config.font_size = (zoom * DEFAULT_FONT_SIZE * 100.0).round() / 100.0;
         state.save_config();
     }
-    ui.weak("The same scale `Ctrl` `+` and `Ctrl` `-` move, and it is kept for the next launch.");
+    ui.weak(
+        "`Ctrl` `+` and `Ctrl` `-` reach further than these; a size reached that way is kept for the \
+         next launch, like these.",
+    );
 }
 
 /// How the editor writes and saves.
