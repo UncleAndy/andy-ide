@@ -33,6 +33,11 @@ Usage: andy-ide [--project <dir>] [--file <path>]
   -h, --help        this text
   -V, --version     the version, and the commit the build was made from
 
+Started in the home — which is where a desktop launcher puts every program it starts — the window
+opens the newest project of the recent list that no other window has, and keeps one of its own under
+<home>/andy-ide/projects/default when every one of them is open already. One project, one window: a
+project another window has open is not opened again (config.toml: `default_project`).
+
 The window keeps its settings in $XDG_CONFIG_HOME/andy-ide/config.toml (~/.config/andy-ide), the
 project's own in <project>/.andy-ide/, and its log in $XDG_STATE_HOME/andy-ide/andy-ide.log.
 ";
@@ -77,15 +82,6 @@ impl Args {
     }
 }
 
-/// The project to open: the one named, or the place the command was given in.
-///
-/// An editor is opened *in a place*. Naming nothing used to open whichever project was remembered from last
-/// time, so `andy-ide` started inside one project opened another one. Andy: "даже если я нахожусь в другом
-/// проекте и не указываю --project, у меня открывается проект RUST/andy-ide".
-fn project_to_open(named: Option<PathBuf>, here: Option<PathBuf>) -> Option<PathBuf> {
-    named.or(here)
-}
-
 /// The window the native backend is asked for.
 ///
 /// Whether it opens maximized is read from the configuration before the window
@@ -128,13 +124,56 @@ fn main() -> eframe::Result<()> {
         crate::notify::probe();
     }
 
-    let project = project_to_open(args.project.clone(), std::env::current_dir().ok());
+    let config_dir = state::config_dir();
+    let config = ide_core::Config::load_or_default(&config_dir.join("config.toml"));
+
+    // What this launch opens is decided before there is a window: a project another window already
+    // has must not open one at all, and one rule answers every way of starting the program.
+    let recent = ide_core::Recent::load(&config_dir.join("recent.json"));
+    let home = ide_core::launch::home();
+    let house = config
+        .default_project
+        .clone()
+        .or_else(|| ide_core::launch::house(home.as_deref()));
+    let answer = ide_core::launch::decide(
+        args.project.clone(),
+        std::env::current_dir().ok(),
+        recent.list(),
+        house.as_deref(),
+        home.as_deref(),
+    );
+    let (project, lock, how) = match answer {
+        ide_core::launch::Answer::Show { project, how, lock } => {
+            // One form of the path for everything that compares them: the lock, the recent list and
+            // the project itself have to speak of the same directory.
+            let project = std::fs::canonicalize(&project).unwrap_or(project);
+            (Some(project), lock, Some(how))
+        }
+        ide_core::launch::Answer::Busy { project } => {
+            // No window at all: a second one on the same tree is two windows writing one file. From
+            // the launcher there is no terminal to read a reason in, so the desk is told as well.
+            use crate::notify::{Surface, System};
+            eprintln!("andy-ide: {} is open in another window", project.display());
+            tracing::warn!(
+                project = %project.display(),
+                "the project is open in another window"
+            );
+            let body = format!("{} уже открыт в другом окне", project.display());
+            if let Err(error) = System.show("andy-ide уже открыт", &body) {
+                tracing::warn!(%error, "the desk refused the notice");
+            }
+            std::process::exit(1);
+        }
+        ide_core::launch::Answer::Nothing => (None, None, None),
+    };
+
     // Who this window is and which desk it can reach, said once at the start. A notification the
     // desk takes and never shows is otherwise a mystery: the id it answers with says a daemon heard,
     // and only the address says whether that daemon is the one drawing the screen in front of the
     // person. When the two disagree, this line is where the disagreement is legible.
     tracing::info!(
         project = ?project,
+        how = ?how,
         file = ?args.file,
         uid = %std::env::var("UID").unwrap_or_default(),
         user = %std::env::var("USER").unwrap_or_default(),
@@ -144,19 +183,24 @@ fn main() -> eframe::Result<()> {
         "starting andy-ide"
     );
 
-    let config = ide_core::Config::load_or_default(&state::config_dir().join("config.toml"));
     let options = options(&config);
 
     eframe::run_native(
         "Andy IDE",
         options,
-        Box::new(move |_cc| Ok(Box::new(app::App::new(project.clone(), args.file.clone())))),
+        Box::new(move |_cc| {
+            Ok(Box::new(app::App::new(
+                project.clone(),
+                args.file.clone(),
+                lock,
+            )))
+        }),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, options, project_to_open};
+    use super::{Args, options};
     use std::path::PathBuf;
 
     #[test]
@@ -210,27 +254,6 @@ mod tests {
         );
         assert_eq!(args.project, Some(PathBuf::from("/tmp/p")));
         assert_eq!(args.file, Some(PathBuf::from("/tmp/p/a.rs")));
-    }
-
-    #[test]
-    fn a_named_project_wins_over_the_place_the_command_was_given_in() {
-        assert_eq!(
-            project_to_open(
-                Some(PathBuf::from("/tmp/p")),
-                Some(PathBuf::from("/tmp/here"))
-            ),
-            Some(PathBuf::from("/tmp/p"))
-        );
-    }
-
-    #[test]
-    fn without_a_name_the_place_the_command_was_given_in_is_the_project() {
-        assert_eq!(
-            project_to_open(None, Some(PathBuf::from("/tmp/here"))),
-            Some(PathBuf::from("/tmp/here")),
-            "nothing was named and the directory was ignored, so the remembered project would open"
-        );
-        assert_eq!(project_to_open(None, None), None);
     }
 
     #[test]

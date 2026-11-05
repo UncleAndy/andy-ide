@@ -4,6 +4,8 @@
 
 pub mod config;
 pub mod fs;
+pub mod launch;
+pub mod lock;
 pub mod project;
 pub mod quickopen;
 pub mod session;
@@ -12,6 +14,8 @@ pub mod watch;
 pub mod workspace;
 
 pub use config::{Config, ServerSetting, Theme};
+pub use launch::{Answer, How as LaunchKind, decide as decide_launch, house};
+pub use lock::{Locked, ProjectLock};
 pub use project::{Entry, EntryKind, Project, TreeOptions};
 pub use quickopen::{FileIndex, FileIndexCache, SearchHit};
 pub use session::{RECENT_LIMIT, Recent, Session, TabState};

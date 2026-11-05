@@ -5,7 +5,7 @@
 //! one dropping them on save.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,10 @@ pub struct Config {
     pub servers: Vec<ServerSetting>,
     /// Open the window maximized, as it was when it was last closed.
     pub window_maximized: bool,
+    /// The project a launch opens when it names none and no recent project is free.
+    ///
+    /// `None` means the window's own under the home, `<home>/andy-ide/projects/default`.
+    pub default_project: Option<PathBuf>,
     /// Keys this version does not know about, kept verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -86,6 +90,7 @@ impl Default for Config {
             auto_reconnect: true,
             servers: Vec::new(),
             window_maximized: false,
+            default_project: None,
             extra: BTreeMap::new(),
         }
     }

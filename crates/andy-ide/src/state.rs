@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use ide_agents::Usage;
+use ide_core::lock::{Locked, ProjectLock};
 use ide_core::{
     Config, ContextSpan, ExternalChange, FileIndex, FileIndexCache, FsEvent, Project, Recent, Tabs,
     TreeOptions, Workspace, WorkspaceState, decide_external_change, watch_project,
@@ -276,6 +277,13 @@ pub struct AppState {
     pub config: Config,
     pub recent: Recent,
     pub project: Option<Project>,
+    /// The lock this window holds on the project in front, and the project it belongs to.
+    ///
+    /// One project, one window: taken when a project is opened, released when the window moves to
+    /// another one or ends. See [`ide_core::lock`].
+    lock: Option<(PathBuf, ProjectLock)>,
+    /// The lock a launch took before the window existed, waiting for the project it belongs to.
+    reserve: Option<(PathBuf, ProjectLock)>,
     pub tree: TreeState,
     pub tabs: Tabs,
     /// Open documents, keyed by the tab's buffer id.
@@ -417,11 +425,32 @@ pub struct AppState {
 impl AppState {
     /// Same as [`AppState::new`] but with an explicit configuration directory,
     /// which keeps tests away from the real `~/.config`.
+    /// A window from a configuration directory, with no launch behind it.
+    ///
+    /// This is the door the checks use. A real launch decides what to open and brings the lock of
+    /// that decision: [`Self::with_config_dir_and_lock`].
+    #[cfg(test)]
     pub fn with_config_dir(
         config_dir: PathBuf,
         project: Option<PathBuf>,
         file: Option<PathBuf>,
     ) -> Self {
+        Self::with_config_dir_and_lock(config_dir, project, file, None)
+    }
+
+    /// Same, with the lock the launch took before the window existed.
+    pub fn with_config_dir_and_lock(
+        config_dir: PathBuf,
+        project: Option<PathBuf>,
+        file: Option<PathBuf>,
+        lock: Option<ProjectLock>,
+    ) -> Self {
+        // The lock belongs to the project the launch decided on; the first project opened is that
+        // project, so it is kept for it and not taken a second time.
+        let reserve = match (lock, project.as_ref()) {
+            (Some(lock), Some(path)) => Some((path.clone(), lock)),
+            _ => None,
+        };
         let config = Config::load_or_default(&config_dir.join("config.toml"));
         let recent = Recent::load(&config_dir.join("recent.json"));
         let saved_font_size = config.font_size;
@@ -438,6 +467,8 @@ impl AppState {
             signature: crate::ui::signature::Help::new(),
             recent,
             project: None,
+            lock: None,
+            reserve,
             tabs: Tabs::new(),
             buffers: HashMap::new(),
             index: None,
@@ -496,10 +527,9 @@ impl AppState {
             naming: None,
         };
 
-        // Launched without a project argument, the editor opens the one the user
-        // had open last, the way every other IDE does: starting from an empty
-        // window and picking the project again on every launch is busywork.
-        let project = project.or_else(|| Self::last_project(&state.recent));
+        // A launch names its project or opens none: what to open when nothing is named is decided
+        // before the window exists (`ide_core::launch::decide`), because a project another window
+        // already has must not open a window at all.
         if let Some(root) = project {
             state.open_project(&root);
         }
@@ -513,15 +543,6 @@ impl AppState {
             state.open_file(&rel);
         }
         state
-    }
-
-    /// The project to open when the command line named none.
-    ///
-    /// The newest remembered project that still exists wins. A directory that
-    /// was moved or deleted since the last launch is skipped instead of being
-    /// opened into an error, and the older entries get their chance.
-    fn last_project(recent: &Recent) -> Option<PathBuf> {
-        recent.list().iter().find(|path| path.is_dir()).cloned()
     }
 
     /// Opens the folder dialog at the project in front, or at the last one, so the person stands
@@ -788,10 +809,59 @@ impl AppState {
 
     /// Opens a directory as the project: creates `.andy-ide`, shows the cached
     /// file index immediately and starts rebuilding it in the background.
+    /// Takes the lock of the project being opened — or refuses to open it.
+    ///
+    /// `false` means another window holds the project: the window stays where it is and the status
+    /// line says why. A project that cannot be locked at all — read-only, or a directory where the
+    /// file belongs — is opened anyway: a guard must not turn into a wall.
+    fn adopt_lock(&mut self, canonical: &Path) -> bool {
+        if self
+            .lock
+            .as_ref()
+            .is_some_and(|(held, _)| held == canonical)
+        {
+            return true;
+        }
+        if let Some((at, lock)) = self.reserve.take() {
+            if at == canonical {
+                self.lock = Some((canonical.to_path_buf(), lock));
+                return true;
+            }
+            // A launch decides one project and opens it first; anything else means the decision was
+            // overruled here, and the lock that came with it belongs to nothing.
+            tracing::warn!(reserved = %at.display(), opening = %canonical.display(), "the reserved lock is for another project");
+        }
+        match ProjectLock::take(canonical) {
+            Ok(lock) => {
+                self.lock = Some((canonical.to_path_buf(), lock));
+                true
+            }
+            Err(Locked::AnotherWindow) => {
+                self.status = format!("{} is open in another window", canonical.display());
+                tracing::warn!(project = %canonical.display(), "the project is open in another window");
+                false
+            }
+            Err(Locked::Cannot(error)) => {
+                tracing::warn!(
+                    project = %canonical.display(),
+                    %error,
+                    "the project cannot be locked; it is opened without the guard"
+                );
+                self.lock = None;
+                true
+            }
+        }
+    }
+
     pub fn open_project(&mut self, root: &Path) {
         match Project::open(root) {
             Ok(project) => {
                 let canonical = project.root().to_path_buf();
+                // One project, one window: a project another window holds is not opened, and the
+                // project in front stays where it was.
+                if !self.adopt_lock(&canonical) {
+                    return;
+                }
                 // A shell opened from here belongs to this project: the terminal runs
                 // `ls`, `git status` and builds, all of which answer about a directory.
                 self.terminal.cwd = Some(canonical.clone());
@@ -812,8 +882,15 @@ impl AppState {
                 }
 
                 self.start_index_refresh(&canonical);
-                self.recent.add(canonical.clone());
-                let _ = self.recent.save(&self.config_dir.join("recent.json"));
+                // The home is where a person lives, not a project they chose: writing it down would
+                // have the next launch from the launcher open an entire disk again.
+                if ide_core::launch::may_be_a_project(
+                    &canonical,
+                    ide_core::launch::home().as_deref(),
+                ) {
+                    self.recent.add(canonical.clone());
+                    let _ = self.recent.save(&self.config_dir.join("recent.json"));
+                }
 
                 // The server of the project being left is dropped: it was started in another
                 // directory and cannot answer about this one, and `ensure_lsp` would keep it as long as
@@ -3401,6 +3478,48 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn a_project_another_window_holds_is_not_opened() {
+        // One project, one window: the second window says so and keeps the project it already has,
+        // instead of two windows writing the same files.
+        let (dir, mut state) = state_with_project();
+        let other = tempfile::tempdir().unwrap();
+        fs::write(other.path().join("a.txt"), "one\n").unwrap();
+        let held = ide_core::ProjectLock::take(other.path()).expect("the other window takes it");
+
+        let was = state
+            .project
+            .as_ref()
+            .map(|project| project.root().to_path_buf());
+        state.open_project(other.path());
+        assert_eq!(
+            state
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf()),
+            was,
+            "the project in front was replaced by one another window holds"
+        );
+        assert!(
+            state.status.contains("is open in another window"),
+            "the window said nothing about why it did not move: {:?}",
+            state.status
+        );
+
+        // The lock is the whole reason: once the other window lets go, the same call opens it.
+        drop(held);
+        state.open_project(other.path());
+        assert_eq!(
+            state
+                .project
+                .as_ref()
+                .map(|project| project.root().to_path_buf()),
+            Some(other.path().canonicalize().unwrap()),
+            "the project was not opened after the other window let go of it"
+        );
+        drop(dir);
+    }
+
     pub(crate) fn state_with_project() -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -3490,6 +3609,10 @@ mod workspace_tests {
         state.open_file(Path::new("README.md"));
         state.save_workspace(Some("{\"layout\":true}".to_owned()), 10.0, true);
 
+        // A restart is one window ending and another starting: the project's lock goes with the
+        // first, and a second window on the same project is refused on purpose.
+        drop(state);
+
         let mut reopened = AppState::with_config_dir(
             config.path().to_path_buf(),
             Some(project.path().to_path_buf()),
@@ -3543,6 +3666,10 @@ mod workspace_tests {
         }
         assert!(cache.is_file(), "the walk did not write the cache");
 
+        // A restart is one window ending and another starting: the project's lock goes with the
+        // first, and a second window on the same project is refused on purpose.
+        drop(state);
+
         // A second start shows the cached list before the walk finishes.
         let reopened = AppState::with_config_dir(
             config.path().to_path_buf(),
@@ -3589,44 +3716,43 @@ mod launch_tests {
     }
 
     #[test]
-    fn without_a_project_argument_the_last_one_opens() {
+    fn a_window_with_nothing_named_opens_no_project_by_itself() {
+        // Which project a launch with nothing named opens is decided before the window exists
+        // (`ide_core::launch::decide`), because a project another window has must not open a window
+        // at all. The window itself only opens what it is given.
         let config = tempfile::tempdir().unwrap();
         let older = tempfile::tempdir().unwrap();
-        let newer = tempfile::tempdir().unwrap();
-        remembered(config.path(), &[older.path(), newer.path()]);
+        remembered(config.path(), &[older.path()]);
 
         let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
 
-        let opened = state
-            .project
-            .as_ref()
-            .map(|project| project.root().to_path_buf());
-        assert_eq!(
-            opened.as_deref(),
-            Some(newer.path().canonicalize().unwrap().as_path()),
-            "the last project did not open by itself"
+        assert!(
+            state.project.is_none(),
+            "the window chose a project for itself, which is the launch's decision to make"
         );
     }
 
     #[test]
-    fn a_project_that_is_gone_is_skipped() {
+    fn a_project_that_is_gone_is_not_opened() {
+        // A directory that vanished is not opened into an error nobody can act on: nothing is put in
+        // front, and the status line says what happened. (Which remembered project is tried when
+        // nothing is named is `ide_core::launch`, checked there.)
         let config = tempfile::tempdir().unwrap();
-        let alive = tempfile::tempdir().unwrap();
         let gone = config.path().join("gone");
         std::fs::create_dir(&gone).unwrap();
-        remembered(config.path(), &[alive.path(), &gone]);
         std::fs::remove_dir(&gone).unwrap();
 
-        let state = AppState::with_config_dir(config.path().to_path_buf(), None, None);
+        let state =
+            AppState::with_config_dir(config.path().to_path_buf(), Some(gone.clone()), None);
 
-        let opened = state
-            .project
-            .as_ref()
-            .map(|project| project.root().to_path_buf());
-        assert_eq!(
-            opened.as_deref(),
-            Some(alive.path().canonicalize().unwrap().as_path()),
-            "a deleted project was opened or the older one was not tried"
+        assert!(
+            state.project.is_none(),
+            "a directory that is gone was opened"
+        );
+        assert!(
+            state.status.contains("cannot open"),
+            "the window said nothing about a project it could not open: {:?}",
+            state.status
         );
     }
 

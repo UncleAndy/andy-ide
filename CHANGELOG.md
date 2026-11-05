@@ -76,6 +76,9 @@ what is not in it is listed at the end.
   and a delete of a file with unsaved edits is refused.
 - Projects are opened from a list, from a folder dialog the window draws itself, and from the command
   line; a project can be forgotten from the list without touching its directory.
+- A launch that starts in the home — a launcher does — opens the newest recent project no other window
+  has, and keeps one of its own (`~/andy-ide/projects/default`) for when they are all open. One project,
+  one window: a project already open elsewhere is refused instead of being edited twice.
 
 ### Packaging
 

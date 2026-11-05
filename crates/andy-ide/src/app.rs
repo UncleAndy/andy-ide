@@ -34,17 +34,36 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(project: Option<PathBuf>, file: Option<PathBuf>) -> Self {
-        Self::with_config_dir(crate::state::config_dir(), project, file)
+    /// `lock` is the lock the launch took on the project it decided to open, before the window
+    /// existed; the window keeps it for as long as it lives.
+    pub fn new(
+        project: Option<PathBuf>,
+        file: Option<PathBuf>,
+        lock: Option<ide_core::ProjectLock>,
+    ) -> Self {
+        Self::with_config_dir_and_lock(crate::state::config_dir(), project, file, lock)
     }
 
-    /// Same as [`App::new`] with an explicit configuration directory.
+    /// Same as [`App::new`] with an explicit configuration directory and no launch behind it.
+    ///
+    /// This is the door the checks use; a real launch brings the lock of the project it decided.
+    #[cfg(test)]
     pub fn with_config_dir(
         config_dir: PathBuf,
         project: Option<PathBuf>,
         file: Option<PathBuf>,
     ) -> Self {
-        let state = AppState::with_config_dir(config_dir, project, file);
+        Self::with_config_dir_and_lock(config_dir, project, file, None)
+    }
+
+    /// Same, with the lock taken by the launch.
+    pub fn with_config_dir_and_lock(
+        config_dir: PathBuf,
+        project: Option<PathBuf>,
+        file: Option<PathBuf>,
+        lock: Option<ide_core::ProjectLock>,
+    ) -> Self {
+        let state = AppState::with_config_dir_and_lock(config_dir, project, file, lock);
         let mut app = Self {
             state,
             dock: default_layout(),
@@ -1635,6 +1654,10 @@ mod layout_persistence_tests {
             })
             .unwrap();
 
+        // The window closes: a restart is one window ending and another starting, and the lock of
+        // the project goes with the first.
+        drop(app);
+
         let restored = App::with_config_dir(
             config.path().to_path_buf(),
             Some(project.path().to_path_buf()),
@@ -1663,6 +1686,10 @@ mod layout_persistence_tests {
         app.state.preview_open = true;
         app.state.tree.show_hidden = true;
         app.state.save_workspace(None, 100.0, true);
+
+        // The window closes: a restart is one window ending and another starting, and the lock of
+        // the project goes with the first.
+        drop(app);
 
         let restored = App::with_config_dir(
             config.path().to_path_buf(),
@@ -1699,6 +1726,10 @@ mod layout_persistence_tests {
 
         // The window closes, and the workspace is written.
         app.state.save_workspace(None, 100.0, true);
+
+        // The window closes: a restart is one window ending and another starting, and the lock of
+        // the project goes with the first.
+        drop(app);
 
         let restored = App::with_config_dir(
             config.path().to_path_buf(),
@@ -1754,6 +1785,10 @@ mod layout_persistence_tests {
             })
             .unwrap();
 
+        // The window closes: a restart is one window ending and another starting, and the lock of
+        // the project goes with the first.
+        drop(app);
+
         let restored = App::with_config_dir(
             config.path().to_path_buf(),
             Some(project.path().to_path_buf()),
@@ -1790,7 +1825,7 @@ mod layout_persistence_tests {
             })
             .unwrap();
 
-        let app = App::new(Some(project.path().to_path_buf()), None);
+        let app = App::new(Some(project.path().to_path_buf()), None, None);
         let _ = config;
         assert_eq!(app.dock.iter_all_tabs().count(), 6);
     }
@@ -2510,6 +2545,10 @@ mod caret_visibility_tests {
         first.state.save_workspace(None, 100.0, true);
 
         // The next window opens with the same tab, and the caret has to be in sight.
+        // The window closes before the next one opens: a restart is one window, then another, and
+        // the project's lock goes with the first.
+        drop(first);
+
         let mut harness = Harness {
             ctx: egui::Context::default(),
             app: App::with_config_dir(
@@ -2603,6 +2642,10 @@ mod caret_visibility_tests {
             .expect("a file")
             .set_caret(caret);
         first.state.save_workspace(None, 100.0, true);
+
+        // The window closes before the next one opens: a restart is one window, then another, and
+        // the project's lock goes with the first.
+        drop(first);
 
         let mut harness = Harness {
             ctx: egui::Context::default(),
