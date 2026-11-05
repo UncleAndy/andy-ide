@@ -1011,13 +1011,23 @@ impl Terminal {
         const LINES: usize = 3;
         // The raw events, not `smooth_scroll_delta`: a terminal answers the wheel at once, and the
         // smoothed figure is spread over the frames that follow it.
+        //
+        // The unit is what a mouse and a touchpad disagree about, and reading it as points is what
+        // made the wheel do nothing on a real mouse: a wheel reports **lines** (`delta.y` is ±1 for
+        // one notch) while a touchpad reports **points** (tens of them per notch). One notch of the
+        // wheel is `NOTCH` here, so a line counts as a notch and a point as a point.
         let (pointer, scroll) = ui.input(|input| {
             let scroll = input
                 .raw
                 .events
                 .iter()
                 .filter_map(|event| match event {
-                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                        egui::MouseWheelUnit::Line => delta.y * NOTCH,
+                        egui::MouseWheelUnit::Point => delta.y,
+                        // A page is the height of what is scrolled, which is the pane's own screen.
+                        egui::MouseWheelUnit::Page => delta.y * self.rows as f32 * NOTCH,
+                    }),
                     _ => None,
                 })
                 .sum::<f32>();

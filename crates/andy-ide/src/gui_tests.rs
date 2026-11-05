@@ -3248,13 +3248,15 @@ mod the_terminal_stops_and_scrolls {
             "the view stood above the living screen before anything was scrolled"
         );
 
-        let wheel = |delta: f32| egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
+        // A mouse wheel reports **lines**: `delta.y` is ±1 for one notch. Reading that as points was
+        // why the wheel did nothing on a real mouse while the checks (which sent points) were green.
+        let wheel = |unit: egui::MouseWheelUnit, delta: f32| egui::Event::MouseWheel {
+            unit,
             delta: egui::vec2(0.0, delta),
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         };
-        gui.harness.event(wheel(40.0));
+        gui.harness.event(wheel(egui::MouseWheelUnit::Line, 1.0));
         gui.settle();
         gui.settle();
         assert_eq!(
@@ -3263,7 +3265,17 @@ mod the_terminal_stops_and_scrolls {
             "one notch of the wheel did not move the view by three lines"
         );
 
-        gui.harness.event(wheel(-120.0));
+        // A touchpad reports points: about a notch's worth of pixels is a notch here too.
+        gui.harness.event(wheel(egui::MouseWheelUnit::Point, 40.0));
+        gui.settle();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.view(),
+            6,
+            "a touchpad notch did not move the view by three lines"
+        );
+
+        gui.harness.event(wheel(egui::MouseWheelUnit::Line, -3.0));
         gui.settle();
         gui.settle();
         assert_eq!(
