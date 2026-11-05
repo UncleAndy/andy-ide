@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- A launch that starts in the home — which is where a desktop launcher puts every program — opens the
+  newest recent project that no other window has, and keeps one of its own
+  (`~/andy-ide/projects/default`) for when they are all open. One project, one window: a project already
+  open elsewhere is refused instead of being edited twice. Not in `v0.1.0`; it goes out with the next
+  version.
+
 ## [0.1.0] — 2026-11-04
 
 The first release: an editor that is usable for a day's work on a real project, with a language server,
@@ -76,9 +84,6 @@ what is not in it is listed at the end.
   and a delete of a file with unsaved edits is refused.
 - Projects are opened from a list, from a folder dialog the window draws itself, and from the command
   line; a project can be forgotten from the list without touching its directory.
-- A launch that starts in the home — a launcher does — opens the newest recent project no other window
-  has, and keeps one of its own (`~/andy-ide/projects/default`) for when they are all open. One project,
-  one window: a project already open elsewhere is refused instead of being edited twice.
 
 ### Packaging
 
