@@ -157,8 +157,20 @@ impl ServerProcess {
                 .stdin
                 .lock()
                 .map_err(|_| anyhow!("the server's input is gone"))?;
-            write_message(&mut *stdin, &message)
-                .with_context(|| format!("cannot send {method}"))?;
+            if let Err(error) = write_message(&mut *stdin, &message) {
+                // A write to a server that has left fails with a broken pipe, which is the same fact
+                // as an answer that never comes: whoever notices first, the caller is told the server
+                // is gone. Left as a plain send error it reads as a fault of the client, and a check
+                // that waits for the handshake says "cannot send initialize: Broken pipe" about a
+                // program that had already exited.
+                if !self.alive.load(Ordering::Relaxed) {
+                    if let Ok(mut pending) = self.pending.lock() {
+                        pending.remove(&id);
+                    }
+                    bail!("{method} got no answer: the server is gone");
+                }
+                return Err(error).with_context(|| format!("cannot send {method}"));
+            }
         }
 
         // The wait is taken in short steps so that a request cannot keep the caller
@@ -218,7 +230,15 @@ impl ServerProcess {
             .stdin
             .lock()
             .map_err(|_| anyhow!("the server's input is gone"))?;
-        write_message(&mut *stdin, &message).with_context(|| format!("cannot send {method}"))
+        if let Err(error) = write_message(&mut *stdin, &message) {
+            // The same bargain as a request: a pipe that broke under a notification is a server that
+            // left, not a client that cannot write.
+            if !self.alive.load(Ordering::Relaxed) {
+                bail!("{method} was not sent: the server is gone");
+            }
+            return Err(error).with_context(|| format!("cannot send {method}"));
+        }
+        Ok(())
     }
 
     /// Takes one notification the server sent, if any.
