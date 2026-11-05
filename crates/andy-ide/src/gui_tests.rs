@@ -3122,6 +3122,234 @@ mod the_terminal_tab {
     }
 }
 
+/// The terminal stops what it runs, walks its scrollback, and keeps the keyboard where a person
+/// has just put their eyes.
+mod the_terminal_stops_and_scrolls {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn terminal_in_front(gui: &mut Gui) -> egui::Rect {
+        let path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Terminal)
+            .expect("the terminal tab is in the layout");
+        gui.app_mut().dock.set_active_tab(path).unwrap();
+        gui.settle();
+        gui.settle();
+        assert_eq!(gui.app().state.terminal.error, None, "no shell started");
+        gui.app_mut().state.terminal.focused = true;
+        gui.settle();
+        gui.app()
+            .state
+            .terminal
+            .shown_rect
+            .expect("the terminal was not drawn")
+    }
+
+    /// Draws frames until the screen holds `needle`, or gives up after twenty seconds.
+    fn wait_for_screen(gui: &mut Gui, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            gui.settle();
+            if gui.app().state.terminal.contents().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn ctrl_c_reaches_the_program_in_front() {
+        // `Ctrl`+`C` never arrives as a key: the backend turns it into a copy event, because
+        // `is_copy_command` asks `modifiers.command`, and on Linux that is `Ctrl`. The terminal
+        // answered the copy instead of sending byte 3, so a foreground job kept running — which is
+        // what a person reports as "Ctrl-C does not work and the program does not stop".
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_in_front(&mut gui);
+
+        gui.app_mut().state.terminal.write(b"sleep 300\n").unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        gui.settle();
+
+        gui.harness.event(egui::Event::Copy);
+        gui.settle();
+        gui.settle();
+        // The interrupt flushes whatever was typed before it; give the shell the moment it needs to
+        // come back to its prompt before anything else is written.
+        std::thread::sleep(Duration::from_millis(300));
+
+        gui.app_mut()
+            .state
+            .terminal
+            .write(b"echo AFTER-THE-INTERRUPT\n")
+            .unwrap();
+        assert!(
+            wait_for_screen(&mut gui, "AFTER-THE-INTERRUPT"),
+            "nothing came back from the shell after Ctrl-C"
+        );
+        let screen = gui.app().state.terminal.contents();
+        // The line typed is echoed by the terminal driver whether or not it runs; only a command the
+        // shell actually *executed* leaves its output on a line of its own.
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.trim() == "AFTER-THE-INTERRUPT"),
+            "the shell never ran the command after Ctrl-C, so the interrupt did not reach it\n{screen}"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn ctrl_x_reaches_the_terminal_as_its_own_byte() {
+        // `Ctrl`+`X` is handed over as a cut event, and with nothing to cut here the shell is given
+        // byte 24. It is not the interrupt (that is `Ctrl`+`C`) — it is the cancel the terminal
+        // driver acts on — so what a check can see is that the byte arrived at the terminal at all:
+        // the driver echoes a control character as `^X`.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_in_front(&mut gui);
+        // A program that reads nothing: the shell is not at its prompt while this runs, so nothing
+        // typed can be run by mistake and the bytes land in the terminal's own line.
+        gui.app_mut().state.terminal.write(b"sleep 300\n").unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        gui.settle();
+
+        gui.harness.event(egui::Event::Cut);
+        gui.settle();
+        gui.settle();
+
+        let screen = gui.app().state.terminal.contents();
+        assert!(
+            screen.contains("^X"),
+            "Ctrl-X never reached the terminal: nothing was written for it\n{screen}"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_wheel_walks_the_scrollback() {
+        // A shell prompt has no use for the wheel, and the wheel used to vanish there: a person who
+        // scrolled back saw nothing move. Three lines a notch, and scrolling down ends on the living
+        // screen rather than below it.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = terminal_in_front(&mut gui);
+        gui.app_mut().state.terminal.write(b"seq 1 200\n").unwrap();
+        assert!(
+            wait_for_screen(&mut gui, "200"),
+            "the shell printed nothing worth scrolling"
+        );
+
+        gui.harness.event(egui::Event::PointerMoved(rect.center()));
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.view(),
+            0,
+            "the view stood above the living screen before anything was scrolled"
+        );
+
+        let wheel = |delta: f32| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, delta),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        gui.harness.event(wheel(40.0));
+        gui.settle();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.view(),
+            3,
+            "one notch of the wheel did not move the view by three lines"
+        );
+
+        gui.harness.event(wheel(-120.0));
+        gui.settle();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.view(),
+            0,
+            "scrolling down did not come back to the living screen"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn the_wheel_is_the_programs_when_the_program_asked_for_it() {
+        // `less` and `vim` scroll themselves, and a view that moved under them would show rows they
+        // never wrote: with mouse reporting on, the wheel is theirs.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        let rect = terminal_in_front(&mut gui);
+        gui.app_mut().state.terminal.write(b"seq 1 200\n").unwrap();
+        assert!(
+            wait_for_screen(&mut gui, "200"),
+            "the shell printed nothing"
+        );
+        // As `less` does when it starts.
+        gui.app_mut()
+            .state
+            .terminal
+            .write(b"printf '\\033[?1000h'\n")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !gui.app().state.terminal.mouse_enabled() {
+            gui.settle();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            gui.app().state.terminal.mouse_enabled(),
+            "the program never got its mouse reporting turned on"
+        );
+
+        gui.harness.event(egui::Event::PointerMoved(rect.center()));
+        gui.settle();
+        gui.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        gui.settle();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.view(),
+            0,
+            "the view moved under a program that scrolls itself"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+
+    #[test]
+    fn choosing_another_session_takes_the_keyboard() {
+        // The press that picks a session lands on the strip, outside the canvas — which the canvas
+        // reads as "the keys are not mine". A session picked is a session typed into, so the keys
+        // follow the person's choice.
+        let mut gui = Gui::new(&[("a.rs", "fn a() {}\n")], Some("a.rs"));
+        terminal_in_front(&mut gui);
+        gui.app_mut().state.terminal.new_pane();
+        gui.settle();
+        assert_eq!(gui.app().state.terminal.active_pane(), 1);
+
+        // The keyboard taken away, the way a click in the editor takes it away.
+        gui.app_mut().state.terminal.focused = false;
+        gui.settle();
+
+        gui.harness.get_by_label("Terminal 1").click();
+        gui.settle();
+        gui.settle();
+        assert_eq!(
+            gui.app().state.terminal.active_pane(),
+            0,
+            "the session was not switched"
+        );
+        assert!(
+            gui.app().state.terminal.focused,
+            "the session was switched and the keyboard stayed with nobody"
+        );
+        gui.app_mut().state.terminal.restart();
+    }
+}
+
 /// Typing with the terminal focused belongs to the shell and to nobody else.
 mod the_terminal_owns_its_keys {
     use super::*;
@@ -7623,6 +7851,82 @@ mod opening_a_project {
 mod the_agent_panel {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_message_field_takes_the_keyboard_when_the_agent_tab_comes_up() {
+        // A person who switches to the agent means to say something to it: the field holds the keys
+        // without being clicked first. And once the keyboard has been given away it is not taken
+        // back — a field that asked every frame would take it from the editor every frame.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let message = egui::Id::new("agent-message");
+
+        // The panel in front, so its `Start` can be pressed: the field is disabled while no agent
+        // runs, and a disabled field cannot hold the keys.
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.running()
+        });
+
+        // The agent as a tab behind the editor, which is the shape a person described: a layout that
+        // keeps both panels side by side has no tab to switch, and the field is on screen all along.
+        let agent_tab = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Agent)
+            .expect("the agent tab is still in the layout");
+        let editor_path = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Editor)
+            .expect("the editor tab is still in the layout")
+            .node_path();
+        gui.app_mut()
+            .dock
+            .move_tab(agent_tab, (editor_path, egui_dock::TabInsert::Append));
+        let editor_tab = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Editor)
+            .expect("the editor is still there");
+        gui.app_mut().dock.set_active_tab(editor_tab).unwrap();
+        gui.settle();
+        gui.settle();
+        assert!(
+            !gui.harness.ctx.memory(|memory| memory.has_focus(message)),
+            "the field holds the keyboard while the editor is the tab in front"
+        );
+
+        let agent_tab = gui
+            .app_mut()
+            .dock
+            .find_tab(&crate::ui::Tab::Agent)
+            .expect("the agent tab is still there");
+        gui.app_mut().dock.set_active_tab(agent_tab).unwrap();
+        gui.settle();
+        gui.settle();
+        assert!(
+            gui.harness.ctx.memory(|memory| memory.has_focus(message)),
+            "the agent came to the front and its field did not take the keyboard"
+        );
+
+        // A click into the conversation takes the keyboard away, and the panel does not take it back.
+        gui.harness
+            .ctx
+            .memory_mut(|memory| memory.surrender_focus(message));
+        gui.settle();
+        gui.settle();
+        assert!(
+            !gui.harness.ctx.memory(|memory| memory.has_focus(message)),
+            "the field took the keyboard back without anyone asking"
+        );
+        gui.app_mut().state.agent.stop();
+    }
 
     /// The stand-in agent, wherever cargo put it.
     ///

@@ -426,6 +426,12 @@ pub struct AgentState {
     /// chord for that very reason: a stale rectangle would take `Ctrl+C` and `Ctrl+Insert` away from the
     /// file being edited, and the editor would copy nothing at all.
     pub shown: bool,
+    /// The frame the panel was last drawn on.
+    ///
+    /// The panel is drawn only while its tab is in front, so a gap means it has just come up — and
+    /// the message field takes the keyboard then. Counted from egui's own frames rather than from a
+    /// flag two parts of the window would both have to clear in the right order.
+    pub drawn_at: Option<u64>,
     /// Set when the person asked to copy from the panel.
     /// When the turn in flight began, and how long the last one took.
     started: Option<Instant>,
@@ -502,6 +508,7 @@ impl Default for AgentState {
             input: String::new(),
             queued: None,
             wants_focus: false,
+            drawn_at: None,
             wants_copy: false,
             wanting_copy_text: None,
             copied: None,

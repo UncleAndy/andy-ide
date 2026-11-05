@@ -243,6 +243,9 @@ impl Terminal {
         // Read once per frame, before anything is written: a program that has just
         // turned the mode on expects the very next arrow in the new form.
         let app = self.application_cursor();
+        // Read once: the copy and cut events carry no modifiers of their own, and which chord sent
+        // them is the whole difference between copying and stopping a program.
+        let modifiers_now = ui.input(|input| input.modifiers);
         let events = ui.input_mut(|input| Self::split_terminal_events(&mut input.events));
         let mut bytes = Vec::new();
         let mut wanted_view: Option<usize> = None;
@@ -300,9 +303,21 @@ impl Terminal {
                             bytes.extend_from_slice(&input.bytes());
                         }
                     }
-                    // Some backends turn a copy chord into this event instead of a key;
-                    // the panel treats it as its own copy either way.
-                    egui::Event::Copy => self.copy_selection(ui),
+                    // The platform's copy chord never arrives as a key: `egui-winit` turns
+                    // `Ctrl`+`C` into this event, because `is_copy_command` asks
+                    // `modifiers.command`, and on Linux and Windows that is `Ctrl`. A terminal that
+                    // answered a copy with a copy would leave a running program unstoppable, so the
+                    // plain chord is byte 3 and the copy is the one holding `Shift`.
+                    egui::Event::Copy => match chord_of(modifiers_now) {
+                        Chord::Copy => self.copy_selection(ui),
+                        Chord::ToTheShell => bytes.push(0x03),
+                    },
+                    // `Ctrl`+`X` is handed over the same way; with nothing to cut here, the shell is
+                    // given the byte.
+                    egui::Event::Cut if chord_of(modifiers_now) == Chord::ToTheShell => {
+                        bytes.push(0x18)
+                    }
+                    egui::Event::Cut => {}
                     egui::Event::Paste(text) => bytes.extend_from_slice(text.as_bytes()),
                     _ => {}
                 }
@@ -333,6 +348,7 @@ impl Terminal {
                 event,
                 egui::Event::Text(_)
                     | egui::Event::Copy
+                    | egui::Event::Cut
                     | egui::Event::Paste(_)
                     | egui::Event::Key { pressed: true, .. }
             );
@@ -348,7 +364,10 @@ impl Terminal {
     ///
     /// It sits above the screen rather than beside it, so the screen keeps the full
     /// width — the same reason the bottom of the window is one strip of tabs.
-    fn session_strip(&mut self, ui: &mut Ui) {
+    /// Returns whether the session in front was changed: the keys of the window belong to whichever
+    /// session a person has just picked, and the press that picked it landed on the strip — outside
+    /// the canvas — which is what the canvas reads as "the keys are not mine".
+    fn session_strip(&mut self, ui: &mut Ui) -> bool {
         let mut choose = None;
         let mut close = None;
         let mut open = false;
@@ -380,21 +399,26 @@ impl Terminal {
                 open = true;
             }
         });
+        let mut switched = false;
         if let Some(index) = choose {
             self.active = index;
+            switched = true;
         }
         if let Some(index) = close {
             self.close_pane(index);
         }
         if open {
             self.new_pane();
+            // A session opened to be used: the person who pressed `+` is about to type in it.
+            switched = true;
         }
+        switched
     }
 
     /// Draws the screen and lets the user type into it.
     pub fn show(&mut self, ui: &mut Ui) {
         self.shown = true;
-        self.session_strip(ui);
+        let switched = self.session_strip(ui);
         let width = ui.available_width();
         let height = ui.available_height();
         let font = egui::FontId::monospace(13.0);
@@ -461,6 +485,12 @@ impl Terminal {
         });
         if let Some(focused) = focus_after(rect, pressed_at, response.clicked()) {
             self.focused = focused;
+        }
+        // Choosing a session is a person saying where they will type: the press itself landed on the
+        // strip, so `focus_after` read it as "not the terminal" and the keys would stay with nobody
+        // until the canvas was clicked.
+        if switched {
+            self.focused = true;
         }
         let cell_size = egui::vec2(cell_width, cell_height);
         // Whose keys these are. `focused` is the flag the application reads to decide whether the
@@ -840,10 +870,21 @@ impl Terminal {
         let Some(protocol) = self.pane().map(|pane| pane.session.mouse_protocol()) else {
             return;
         };
+        // A program that does not track the mouse has no use for the wheel, and a shell prompt has
+        // none at all: here the wheel is the person's and it walks the scrollback. A program that
+        // does track it — `vim`, `less`, `mc` — scrolls itself, and moving the view under it would
+        // show rows the program never wrote.
+        if !protocol.enabled {
+            self.wheel_the_view(ui, rect);
+            if let Some(pane) = self.pane_mut() {
+                pane.mouse_cell = None;
+            }
+            return;
+        }
         let Some(pane) = self.pane_mut() else {
             return;
         };
-        if !protocol.enabled || cell.x <= 0.0 || cell.y <= 0.0 || cols == 0 || rows == 0 {
+        if cell.x <= 0.0 || cell.y <= 0.0 || cols == 0 || rows == 0 {
             pane.mouse_cell = None;
             return;
         }
@@ -960,6 +1001,56 @@ impl Terminal {
             bytes.extend(mouse::bytes(event, protocol.encoding));
         }
         let _ = pane.session.write(&bytes);
+    }
+
+    /// Walks the scrollback with the wheel: three lines a notch, the remainder kept so a slow wheel
+    /// is not lost. The session's own tab says `(scrolled)` while the view is up — the only thing on
+    /// screen that tells a person the rows they are reading are not the living ones.
+    fn wheel_the_view(&mut self, ui: &Ui, rect: egui::Rect) {
+        const NOTCH: f32 = 40.0;
+        const LINES: usize = 3;
+        // The raw events, not `smooth_scroll_delta`: a terminal answers the wheel at once, and the
+        // smoothed figure is spread over the frames that follow it.
+        let (pointer, scroll) = ui.input(|input| {
+            let scroll = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum::<f32>();
+            (input.pointer.interact_pos(), scroll)
+        });
+        let Some(pointer) = pointer else {
+            return;
+        };
+        if !rect.contains(pointer) || scroll == 0.0 {
+            return;
+        }
+        let kept = self.scrollback;
+        let Some(pane) = self.pane_mut() else {
+            return;
+        };
+        pane.scroll_left += scroll;
+        let notches = (pane.scroll_left.abs() / NOTCH).floor();
+        if notches < 1.0 {
+            return;
+        }
+        let step = notches as usize * LINES;
+        pane.view = if pane.scroll_left > 0.0 {
+            (pane.view + step).min(kept)
+        } else {
+            pane.view.saturating_sub(step)
+        };
+        pane.scroll_left -= NOTCH * notches * pane.scroll_left.signum();
+    }
+
+    /// The wheel's place in the scrollback, for the checks.
+    #[cfg(test)]
+    pub fn view(&self) -> usize {
+        self.pane().map(|pane| pane.view).unwrap_or(0)
     }
 
     /// Sends bytes to the shell in front, as typing does.
@@ -1265,12 +1356,87 @@ fn tab_label(title: &str, view: usize) -> String {
     }
 }
 
+/// What a chord the backend has already decided about means to a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chord {
+    /// The platform's copy: the selection goes to the clipboard and nothing is typed.
+    Copy,
+    /// The terminal's own meaning, which is a byte of its own: 3 for `Ctrl`+`C` (the interrupt the
+    /// terminal driver turns into `SIGINT`) and 24 for `Ctrl`+`X` (the cancel the driver acts on).
+    ToTheShell,
+}
+
+/// Which of the two a `Copy` or `Cut` event is.
+///
+/// Those events carry no modifiers, and which chord sent them is the whole difference between
+/// copying and stopping a program. The backend calls `Ctrl`+`C` a copy because it asks
+/// `modifiers.command`, which on Linux and Windows is `Ctrl` — so a plain `Ctrl`+`C` here means the
+/// interrupt and the copy is the chord holding `Shift`. On macOS the platform key is `Cmd`, which is
+/// `mac_cmd`, and a plain `Ctrl`+`C` there arrives as a key of its own (read by `control_letter`).
+pub fn chord_of(modifiers: Modifiers) -> Chord {
+    if modifiers.shift || modifiers.mac_cmd {
+        Chord::Copy
+    } else {
+        Chord::ToTheShell
+    }
+}
+
 /// Whether the terminal's cursor belongs on screen.
 ///
 /// The program may hide its own cursor; and with the view raised the cursor — which stands on the
 /// living line at the bottom — is not among the rows on screen at all.
 fn cursor_is_drawn(screen_hides_it: bool, view: usize) -> bool {
     !screen_hides_it && view == 0
+}
+
+#[cfg(test)]
+mod chords {
+    use super::{Chord, chord_of};
+    use egui::Modifiers;
+
+    #[test]
+    fn the_plain_copy_chord_is_a_byte_of_its_own() {
+        // `Ctrl`+`C` reaches the panel as a copy event, never as a key — the backend calls it a copy
+        // because `modifiers.command` is `Ctrl` on Linux and Windows. A terminal that copied would
+        // leave a running program unstoppable, so the plain chord has to mean byte 3.
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            chord_of(ctrl),
+            Chord::ToTheShell,
+            "Ctrl+C was read as a copy, so a stuck program cannot be stopped"
+        );
+
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            chord_of(ctrl_shift),
+            Chord::Copy,
+            "Ctrl+Shift+C is the copy chord of this window and was read as an interrupt"
+        );
+
+        // macOS: the platform's copy key is `Cmd`, and `Ctrl`+`C` there comes as a key of its own.
+        let cmd = Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            chord_of(cmd),
+            Chord::Copy,
+            "Cmd+C on macOS was read as an interrupt"
+        );
+        assert_eq!(
+            chord_of(Modifiers::NONE),
+            Chord::ToTheShell,
+            "the chord that comes with no modifier at all is not the interrupt"
+        );
+    }
 }
 
 #[cfg(test)]

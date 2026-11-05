@@ -16,6 +16,18 @@ pub fn panel(ui: &mut Ui, state: &mut AppState) {
     // its conversation would go unread.
     state.agent.shown_rect = Some(ui.max_rect());
     state.agent.shown = true;
+    // A panel drawn after a frame in which it was not drawn has just come to the front, and a person
+    // who switches to the agent means to say something to it: the field takes the keyboard then, and
+    // only then — a field that asked every frame would take it back from the editor every frame.
+    // `at + 1 < frame` and not `at != frame - 1`: a panels is drawn more than once in some frames,
+    // and the second drawing of the same frame is not a coming to the front.
+    let frame = ui.ctx().cumulative_frame_nr();
+    // Only while there is an agent to talk to: the field is disabled without one, and a disabled
+    // field cannot hold the keys — asking for it there left the window asking on every frame.
+    if state.agent.drawn_at.is_none_or(|at| at + 1 < frame) && state.agent.running() {
+        state.agent.wants_focus = true;
+    }
+    state.agent.drawn_at = Some(frame);
     // The copy shortcut was taken before the editor drew, so that it did not copy a line of code
     // instead; here it becomes the event egui's text selection listens for, while the words are drawn.
     //
@@ -1557,7 +1569,6 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         .desired_width(f32::INFINITY);
     let response = ui.add_enabled(!busy, field);
     state.agent.field_rect = Some(response.rect);
-
     // The foot of the panel: one row under the field, the facts about the agent on the left and
     // the button that sends on the right. The height of the foot is then the height of the field
     // plus one row of a fixed height, and the conversation above it cannot change it.
@@ -1612,8 +1623,12 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         // Sending is not leaving the field: the next message is typed here, not into a file.
         state.agent.wants_focus = true;
     }
-    // Asked for on every frame until it is held, not once: a request is not the keyboard, and
-    // a panel drawn later in the same frame asks louder.
+    // Asked for on every frame until it is held, not once: a request is not the keyboard, and a panel
+    // drawn later in the same frame asks louder. It stands *after* the send block on purpose — a
+    // press on `Send` is also "a click anywhere else", and the click rule below would throw the flag
+    // away before it was ever asked for. Nothing raises this while no agent runs: a disabled field
+    // cannot hold the keys, and asking anyway keeps the window repainting for ever
+    // (`ui::agent::panel` asks only while `running()`).
     if state.agent.wants_focus && state.agent.session_rename.is_none() {
         if response.has_focus() {
             state.agent.wants_focus = false;
