@@ -412,10 +412,10 @@ pub struct AgentState {
     pub session_names: std::collections::BTreeMap<String, String>,
     /// The conversations of this project, by session id: the ones the list offers.
     ///
-    /// Two things add up here, and neither overrides the other: what the project wrote down (a
-    /// conversation opened here stays here even when the agent later says it lives elsewhere) and
-    /// what the agent reports for this directory (`adopt_sessions`). The agent's answer alone is
-    /// not enough — it covers every project it serves.
+    /// A conversation is written down when it is opened here, and a visit to one is what binds it:
+    /// the agent's answer is not enough to decide, because it covers every project it serves and
+    /// every conversation had in this directory — including the ones a person never opens again.
+    /// The whole of the agent's list is one row away from the project's own (`all_sessions`).
     pub session_ids: Option<std::collections::BTreeSet<String>>,
     /// The conversation being renamed, and what has been typed for it so far.
     pub session_rename: Option<(String, String)>,
@@ -425,6 +425,11 @@ pub struct AgentState {
     pub sessions_button: Option<egui::Rect>,
     /// Whether the agent has been asked for the list and has not answered yet.
     pub sessions_loading: bool,
+    /// Whether the list shows every conversation the agent serves instead of this project's own.
+    ///
+    /// Not written down: it is a look at the agent's answer, not a thing about the project, and a
+    /// launch opens on the project's own list.
+    pub all_sessions: bool,
     /// The last figure the agent sent for each conversation, by session id, kept with the
     /// workspace.
     ///
@@ -569,6 +574,7 @@ impl Default for AgentState {
             sessions_open: false,
             sessions_button: None,
             sessions_loading: false,
+            all_sessions: false,
             shown_rect: None,
             shown: false,
             started: None,
@@ -998,6 +1004,9 @@ impl AgentState {
     /// window since should be there, and the agent answers from what it already keeps.
     pub fn open_sessions(&mut self) {
         self.sessions_open = true;
+        // Every opening starts at the project's own conversations: a wider look is a thing a
+        // person asked for a moment ago, not a setting of the project.
+        self.all_sessions = false;
         self.sessions_loading = true;
         let Some(worker) = &self.worker else {
             self.sessions_loading = false;
@@ -1064,6 +1073,11 @@ impl AgentState {
             self.sessions_open = false;
             return;
         }
+        // A conversation a person moves to is one of this project's from that moment: the list is
+        // the project's own record, and a visit is what puts a conversation in it.
+        self.session_ids
+            .get_or_insert_with(std::collections::BTreeSet::new)
+            .insert(session.to_owned());
         // The conversation on screen is cleared first: the transcript is about to be replaced by
         // another one, and half of each would read as a single conversation.
         self.clear_panel();
@@ -1679,35 +1693,6 @@ impl AgentState {
         }
     }
 
-    /// Takes the conversations the agent reports for this project's directory.
-    ///
-    /// The agent's answer covers every project it serves, so the record of what belongs here is
-    /// what the list is drawn from; a row the agent places in this directory is one more of them.
-    /// A row it places elsewhere, or one that says nothing about where it lives, is taken for
-    /// nothing: nothing in it says "here".
-    fn adopt_sessions(&mut self, sessions: &[SessionInfo]) {
-        let Some(root) = self.root.as_deref() else {
-            return;
-        };
-        let here = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mine: Vec<String> = sessions
-            .iter()
-            .filter(|session| {
-                session
-                    .cwd
-                    .as_deref()
-                    .is_some_and(|cwd| same_place(cwd, &here))
-            })
-            .map(|session| session.id.clone())
-            .collect();
-        if mine.is_empty() {
-            return;
-        }
-        self.session_ids
-            .get_or_insert_with(std::collections::BTreeSet::new)
-            .extend(mine);
-    }
-
     /// Files one reply from the worker.
     fn take(&mut self, reply: Reply) {
         match reply {
@@ -1857,7 +1842,6 @@ impl AgentState {
                     self.usage = Some(usage);
                 }
                 AgentEvent::Sessions(sessions) => {
-                    self.adopt_sessions(&sessions);
                     self.sessions = sessions;
                     self.sessions_loading = false;
                 }
@@ -2711,16 +2695,6 @@ below.\n{}--- END OF CONTEXT SUMMARY — respond to the message below, not the s
     }
 }
 
-/// Whether the directory the agent names is the one the project stands in.
-///
-/// An agent reports the path it was handed, and a project can be reached by more than one name —
-/// a symlink, a trailing separator, a `..` in the middle — so the two are compared as the file
-/// system resolves them, with `root` already resolved by the caller.
-fn same_place(named: &str, root: &Path) -> bool {
-    let named = Path::new(named);
-    named == root || named.canonicalize().is_ok_and(|named| named == root)
-}
-
 /// The conversations a project has: the ones it wrote down, and the ones it already remembers.
 ///
 /// Written down is `.andy-ide/workspace.json`'s `sessions`; remembered is a name a person gave a
@@ -2734,7 +2708,7 @@ fn record_of(
 ) -> Option<std::collections::BTreeSet<String>> {
     let stored = ide_core::Workspace::open(root)
         .ok()
-        .and_then(|workspace| workspace.read_state().sessions)
+        .and_then(|workspace| workspace.read_state().session_ids)
         .unwrap_or_default();
     let mut mine: std::collections::BTreeSet<String> = stored.into_iter().collect();
     mine.extend(names.keys().cloned());

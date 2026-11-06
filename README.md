@@ -265,10 +265,11 @@ row per name in `agents.toml` — because an id offered to a different agent ask
 stranger to remember somebody else's afternoon, and a single record would be
 taken by whichever entry ran last, leaving the other one with nothing to come back to.
 The project also writes down which conversations are its own, and the `Sessions` list is
-drawn from that record: the agent answers about every project it serves, so its own list
-offered the conversations of all of them at once. A conversation opened here is written
-the moment the agent names it, one the agent reports for this directory is taken as
-well, and one it places elsewhere is not offered.
+drawn from that record: the agent answers about every project it serves, and every
+conversation had in a directory at that — a list drawn from its answer was the list of
+everything. A conversation opened here is written the moment the agent names it, and one
+a person moves to from the agent's own list is written down the same way; the whole of
+that list is one row at the bottom of the panel, so nothing becomes unreachable.
 A start empties the panel first: a restored conversation is replayed by the agent, and
 the words of the one before are not its own — left on screen they read as a history the
 agent in front has never seen.

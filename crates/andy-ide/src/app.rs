@@ -1650,7 +1650,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
-                sessions: None,
+                session_ids: None,
                 company: Default::default(),
             })
             .unwrap();
@@ -1782,7 +1782,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
-                sessions: None,
+                session_ids: None,
                 company: Default::default(),
             })
             .unwrap();
@@ -1823,7 +1823,7 @@ mod layout_persistence_tests {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
-                sessions: None,
+                session_ids: None,
                 company: Default::default(),
             })
             .unwrap();

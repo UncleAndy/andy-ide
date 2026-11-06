@@ -639,14 +639,16 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         .agent
         .sessions
         .iter()
-        // Only the conversations of this project. The agent answers about every project it
-        // serves; which of those are here is the project's own record.
+        // Only the conversations of this project, unless a person asked to see the whole of the
+        // agent's answer: the agent serves every project, and its answer says nothing about which
+        // conversations are this one's — the project's own record does.
         .filter(|session| {
-            state
-                .agent
-                .session_ids
-                .as_ref()
-                .is_some_and(|ids| ids.contains(&session.id))
+            state.agent.all_sessions
+                || state
+                    .agent
+                    .session_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&session.id))
         })
         .map(|session| {
             // The name a person gave the conversation, or the one the agent chose — which is the
@@ -682,6 +684,8 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         rows.insert(0, (current, label, String::new()));
     }
     let mut chosen: Option<String> = None;
+    // The row that shows the whole of the agent's answer, or takes it away again.
+    let mut toggle_all = false;
     // The row being renamed, the name that has been typed for it, and whether the person gave up:
     // the list is drawn from a borrow of the panel's state, so what is typed is kept here and given
     // back at the end of the frame.
@@ -701,10 +705,11 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
     // the rows grew a little, the content grew with them, and the names slid off to the right as
     // soon as the pointer made the panel redraw.
     let width = (ui.ctx().content_rect().width() * 0.34).clamp(280.0, 520.0);
-    // One row of the box goes to the count at the top, so the number is not hidden by the cap.
+    // Two rows are not rows of the list: the count at the top, so the number is not hidden by the
+    // cap, and the switch to the whole of the agent's answer at the bottom.
     let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let margins = ui.spacing().menu_margin.sum().y;
-    let height = ((rows.len() + 1) as f32 * row + margins).min(limit);
+    let height = ((rows.len() + 2) as f32 * row + margins).min(limit);
     let area = egui::Area::new(egui::Id::new("agent-session-list"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::LEFT_BOTTOM)
@@ -733,7 +738,6 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                             } else {
                                 "no other conversation of this project"
                             });
-                            return;
                         }
                         let row_height = row - ui.spacing().item_spacing.y;
                         for (id, title, when) in &rows {
@@ -834,6 +838,36 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
                                 }
                             });
                         }
+                        // The whole of the agent's answer is a row away, never the default: a list
+                        // of every conversation of every project is not a list of this one's, and a
+                        // conversation nobody can reach is the other wrong answer.
+                        ui.separator();
+                        let others = state
+                            .agent
+                            .sessions
+                            .iter()
+                            .filter(|session| {
+                                !state
+                                    .agent
+                                    .session_ids
+                                    .as_ref()
+                                    .is_some_and(|ids| ids.contains(&session.id))
+                            })
+                            .count();
+                        let said = if state.agent.all_sessions {
+                            "only this project's conversations".to_owned()
+                        } else if others == 0 {
+                            "all of the agent's conversations".to_owned()
+                        } else {
+                            format!("all of the agent's conversations (+{others})")
+                        };
+                        let switch = ui.add(
+                            egui::Label::new(egui::RichText::new(said).weak())
+                                .sense(egui::Sense::click()),
+                        );
+                        if switch.clicked() {
+                            toggle_all = true;
+                        }
                     });
             });
         });
@@ -857,6 +891,9 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         state.agent.session_rename = None;
     } else {
         state.agent.session_rename = renaming;
+    }
+    if toggle_all {
+        state.agent.all_sessions = !state.agent.all_sessions;
     }
     if let Some(id) = chosen {
         state.agent.switch_session(&id);

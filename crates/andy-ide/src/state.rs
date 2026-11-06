@@ -2103,7 +2103,7 @@ impl AppState {
             // works without hints does not want them back on the next launch.
             view: self.view_switches(),
             session_names: self.agent.session_names.clone(),
-            sessions: self
+            session_ids: self
                 .agent
                 .session_ids
                 .as_ref()
