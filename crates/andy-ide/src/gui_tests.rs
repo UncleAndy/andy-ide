@@ -11709,6 +11709,72 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_conversation_the_project_kept_is_opened_whatever_the_record_holds() {
+        // The list is the project's own set, and that must never decide what a launch opens: the
+        // conversation kept in `.andy-ide/agent-session.json` is what the project was doing last
+        // time, and a record that does not name it — an empty one, one written by an older build,
+        // one where a person moved elsewhere — cannot be allowed to hide it.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.join(".andy-ide")).unwrap();
+        std::fs::write(
+            root.join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // The agent that was on duty, the conversation it kept, and a record that names something
+        // else entirely.
+        let workspace = ide_core::Workspace::open(&root).unwrap();
+        let mut state = workspace.read_state();
+        state.agent = Some("stand-in".to_owned());
+        state.session_ids = Some(vec!["a-conversation-of-another-day".to_owned()]);
+        workspace.write_state(&state).unwrap();
+        std::fs::write(
+            root.join(".andy-ide").join("agent-session.json"),
+            "{\"sessions\": {\"stand-in\": \"kept-7\"}}\n",
+        )
+        .unwrap();
+
+        let mut gui = Gui {
+            harness: window(&root, config.path(), &[("a.txt", "one\n")], Some("a.txt")),
+            _project: project,
+            _config: None,
+        };
+        // Nothing is pressed: a project that names its agent opens it, and the conversation it kept
+        // comes back with it.
+        wait(&mut gui, "the kept conversation coming back", |gui| {
+            gui.app().state.agent.session.as_deref() == Some("kept-7")
+                && gui.app().state.agent.status.starts_with("ready")
+        });
+        assert!(
+            gui.app().state.agent.status.contains("resumed"),
+            "the conversation was not taken up but begun again: {}",
+            gui.app().state.agent.status
+        );
+        // And it is the project's from then on: the record holds it beside what it already said,
+        // so the list offers it without being asked for the whole of the agent's answer.
+        gui.app_mut().state.save_workspace(None, 100.0, true);
+        let written = ide_core::Workspace::open(&root).unwrap().read_state();
+        let kept = written.session_ids.unwrap_or_default();
+        assert!(
+            kept.iter().any(|id| id == "kept-7"),
+            "the conversation the project kept is not in its record: {kept:?}"
+        );
+        assert!(
+            kept.iter().any(|id| id == "a-conversation-of-another-day"),
+            "the record was thrown away instead of added to: {kept:?}"
+        );
+    }
+
+    #[test]
     fn the_sessions_list_offers_only_the_conversations_of_this_project() {
         // The agent lists every editor conversation it serves — its store knows no projects — so a
         // list drawn straight from that answer offered the conversations of every project at once.
