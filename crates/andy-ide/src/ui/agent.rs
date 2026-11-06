@@ -1506,6 +1506,10 @@ fn input(ui: &mut Ui, state: &mut AppState) {
     const ROWS_SHOWN: usize = 8;
 
     let busy = !state.agent.running();
+    // A compaction holds the field as well as a turn does: the agent is rewriting the conversation
+    // in front of it, and a message typed into that rewrite is a message nobody answers. The field the
+    // person was writing in keeps its words — it is held, not cleared.
+    let held = busy || state.agent.compaction_in_progress();
     // A name of its own, so the keyboard can be asked back for it after a send.
     let id = egui::Id::new("agent-message");
     let has_keyboard = ui.memory(|memory| memory.has_focus(id));
@@ -1567,7 +1571,7 @@ fn input(ui: &mut Ui, state: &mut AppState) {
         .hint_text("Ask the agent\u{2026}")
         .desired_rows(3)
         .desired_width(f32::INFINITY);
-    let response = ui.add_enabled(!busy, field);
+    let response = ui.add_enabled(!held, field);
     state.agent.field_rect = Some(response.rect);
     // The foot of the panel: one row under the field, the facts about the agent on the left and
     // the button that sends on the right. The height of the foot is then the height of the field
@@ -1608,7 +1612,7 @@ fn input(ui: &mut Ui, state: &mut AppState) {
                     {
                         cancels = true;
                     }
-                } else if ui.add_enabled(!busy, egui::Button::new("Send")).clicked() {
+                } else if ui.add_enabled(!held, egui::Button::new("Send")).clicked() {
                     pressed = true;
                 }
             },

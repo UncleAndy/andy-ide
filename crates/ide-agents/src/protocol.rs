@@ -235,6 +235,71 @@ pub fn account_usage_of(message: &serde_json::Value) -> Option<AccountUsage> {
             .unwrap_or(false),
     })
 }
+/// A compaction the agent is running: the id of it, where it stands, and the words it attached.
+///
+/// The protocol grew `compaction_update` for exactly this, and Hermes — which speaks the Python SDK,
+/// where the type is not yet — reports the same facts under `_meta.hermes.compaction`. Both are read
+/// here, so a panel is not made to care which of the two an agent chose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compaction {
+    /// The agent's id for this compaction: the same from its start to its end.
+    pub id: String,
+    /// Where it stands.
+    pub status: CompactionPhase,
+    /// The sentence the agent attached, when it attached one.
+    pub text: String,
+}
+
+/// Where a compaction stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionPhase {
+    /// Running: the agent is summarizing what came before, and a message sent now would land in a
+    /// conversation being rewritten under it.
+    InProgress,
+    /// Finished, and the conversation carries on from the summary.
+    Completed,
+    /// Finished with an error.
+    Failed,
+    /// Given up before it finished.
+    Cancelled,
+}
+
+impl CompactionPhase {
+    /// Whether nothing is running any more, whichever way it ended.
+    pub fn is_over(self) -> bool {
+        !matches!(self, Self::InProgress)
+    }
+}
+
+/// The compaction an agent attached to its update (`_meta.hermes.compaction`), or `None`.
+///
+/// `None` for a block that is not there, one without a name, and a status this version does not
+/// know: an update nobody can act on is not a compaction, and a panel that invented one would hold
+/// its input for a compaction that is not running.
+pub fn compaction_of(message: &Value) -> Option<Compaction> {
+    let block = message.get("_meta")?.get("hermes")?.get("compaction")?;
+    let id = block.get("id")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let status = match block.get("status")?.as_str()? {
+        "in_progress" => CompactionPhase::InProgress,
+        "completed" => CompactionPhase::Completed,
+        "failed" => CompactionPhase::Failed,
+        "cancelled" | "canceled" => CompactionPhase::Cancelled,
+        _ => return None,
+    };
+    Some(Compaction {
+        id: id.to_owned(),
+        status,
+        text: block
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    })
+}
 /// The state of a conversation the agent described when it opened it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionState {
@@ -566,6 +631,61 @@ mod account_usage_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_compaction_is_read_from_the_extension_hermes_sends() {
+        // Hermes speaks the Python SDK, where `compaction_update` is not yet a type, so it puts the
+        // same three facts under `_meta.hermes.compaction`. A panel that only knew the standard's
+        // spelling would render no compaction at all — and would hold nothing while one runs.
+        let update = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"hermes": {"compaction": {
+                "id": "9a1f",
+                "status": "in_progress",
+                "text": "\u{1f5dc} Compacting context\u{2026}"
+            }}}
+        });
+        let compaction = compaction_of(&update).expect("the compaction is not read");
+        assert_eq!(compaction.id, "9a1f");
+        assert_eq!(compaction.status, CompactionPhase::InProgress);
+        assert!(!compaction.status.is_over());
+        assert!(compaction.text.contains("Compacting context"));
+
+        let done =
+            json!({"_meta": {"hermes": {"compaction": {"id": "9a1f", "status": "completed"}}}});
+        assert!(
+            compaction_of(&done)
+                .expect("the end is not read")
+                .status
+                .is_over(),
+            "the end of a compaction is still read as running"
+        );
+        let cancelled =
+            json!({"_meta": {"hermes": {"compaction": {"id": "9a1f", "status": "cancelled"}}}});
+        assert_eq!(
+            compaction_of(&cancelled).map(|read| read.status),
+            Some(CompactionPhase::Cancelled)
+        );
+
+        // Nothing to act on: no block, no name, a status this version has not met. A compaction
+        // invented out of any of these would hold the field for a work that is not running.
+        assert!(compaction_of(&json!({})).is_none());
+        assert!(compaction_of(&json!({"_meta": {"hermes": {}}})).is_none());
+        assert!(
+            compaction_of(
+                &json!({"_meta": {"hermes": {"compaction": {"id": " ", "status": "in_progress"}}}})
+            )
+            .is_none(),
+            "a nameless compaction was read"
+        );
+        assert!(
+            compaction_of(
+                &json!({"_meta": {"hermes": {"compaction": {"id": "x", "status": "paused"}}}})
+            )
+            .is_none(),
+            "a status nobody knows was read as a compaction"
+        );
+    }
 
     #[test]
     fn the_settings_are_read_the_way_hermes_sends_them() {

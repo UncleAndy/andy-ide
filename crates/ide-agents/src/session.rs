@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::protocol::{
-    AgentCommand, ChoiceRequest, PermissionRequest, SessionInfo, SessionState, Usage,
+    AgentCommand, ChoiceRequest, Compaction, PermissionRequest, SessionInfo, SessionState, Usage,
 };
 
 /// How long the agent gets to start and say hello.
@@ -67,6 +67,10 @@ pub enum Event {
     /// away: a person reading an answer wants the answer, and wants the reasoning to
     /// be there when they ask for it.
     Thinking(String),
+    /// A compaction the agent is running: the context is being summarized, and while it is, a
+    /// message would land in a conversation that is being rewritten under it. The end of it comes
+    /// as a later event with the same id.
+    Compaction(Compaction),
     /// A tool call, started or finished.
     ToolCall {
         /// The agent's id for it.

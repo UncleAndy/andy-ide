@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- A context compaction the agent runs on its own initiative is now visible while it runs: a row in the
+  conversation that says the summary is being written, the foot naming the silence instead of blaming the
+  agent for it, and the message field held until it ends — a message typed into a conversation that is being
+  rewritten under it was a message nobody answered. Both spellings of the fact are read: the protocol's own
+  `compaction_update` and the `_meta.hermes.compaction` Hermes sends, whose Python SDK has no such type yet.
 - A launch that starts in the home — which is where a desktop launcher puts every program — opens the
   newest recent project that no other window has, and keeps one of its own
   (`~/andy-ide/projects/default`) for when they are all open. One project, one window: a project already

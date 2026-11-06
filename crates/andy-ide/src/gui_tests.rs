@@ -7865,6 +7865,98 @@ mod the_agent_panel {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn a_compaction_is_shown_while_it_runs_and_holds_the_message() {
+        // The complaint, in order: the agent compressed the context on its own initiative, the panel
+        // said nothing about it, and the commands sent meanwhile came back as a failure on the
+        // fallback model. All three are one thing — nothing on the wire said a compaction was running
+        // — so this is the check that the panel now hears it, writes it down, and holds the field.
+        let Some(mut gui) = with_agent_env(&[("ACP_TEST_COMPACT_MS", "3000")]) else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent starting", |gui| {
+            gui.app().state.agent.running()
+        });
+
+        gui.app_mut().state.agent.input = "compress".to_owned();
+        gui.app_mut().state.agent.send();
+        wait(&mut gui, "the compaction to begin", |gui| {
+            gui.app().state.agent.compaction_in_progress()
+        });
+
+        let about_the_compaction = |gui: &Gui| -> Vec<String> {
+            gui.app()
+                .state
+                .agent
+                .transcript
+                .iter()
+                .filter_map(|line| match line {
+                    crate::agent::Line::Note(text) if text.contains("ompact") => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let rows = about_the_compaction(&gui);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the compaction is not in the history: {:?}",
+            gui.app().state.agent.transcript
+        );
+        assert!(
+            rows[0].starts_with("Compacting the context"),
+            "the row does not say what is happening: {rows:?}"
+        );
+        assert!(
+            gui.app()
+                .state
+                .agent
+                .saying()
+                .contains("compacting the context"),
+            "the foot blames the silence instead of naming the compaction: {:?}",
+            gui.app().state.agent.saying()
+        );
+
+        // A message written now stays where it was written: nothing is sent, nothing is queued for
+        // an agent that is rewriting the conversation under it, and the panel says why.
+        gui.app_mut().state.agent.input = "next".to_owned();
+        gui.app_mut().state.agent.send();
+        assert_eq!(
+            gui.app().state.agent.input,
+            "next",
+            "the message left the field while the context was being rewritten"
+        );
+        assert!(
+            gui.app().state.agent.queued.is_none(),
+            "the message was queued for an agent that is compacting: {:?}",
+            gui.app().state.agent.queued
+        );
+        assert!(
+            gui.app().state.agent.status.contains("compacting"),
+            "the panel did not say why the message was not sent: {:?}",
+            gui.app().state.agent.status
+        );
+
+        wait(&mut gui, "the compaction to end", |gui| {
+            !gui.app().state.agent.compaction_in_progress()
+        });
+        let rows = about_the_compaction(&gui);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the end of the compaction wrote a row of its own: {rows:?}"
+        );
+        assert!(
+            rows[0].contains("complete"),
+            "the row does not say how the compaction ended: {rows:?}"
+        );
+    }
+
+    #[test]
     fn the_message_field_takes_the_keyboard_when_the_agent_tab_comes_up() {
         // A person who switches to the agent means to say something to it: the field holds the keys
         // without being clicked first. And once the keyboard has been given away it is not taken

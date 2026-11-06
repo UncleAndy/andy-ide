@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AvailableCommand, AvailableCommandInput, CancelNotification, ContentBlock,
+    AvailableCommand, AvailableCommandInput, CancelNotification, ClientSessionCapabilities,
+    CompactionCapabilities, CompactionStatus as WireCompactionStatus, ContentBlock,
     CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
     ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
     ErrorCode, Implementation, InitializeRequest, KillTerminalRequest, ListSessionsRequest,
@@ -36,8 +37,8 @@ use futures::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 use futures::{FutureExt, StreamExt};
 
 use crate::protocol::{
-    AgentCommand, ChoiceRequest, ConfigOption, Model, PermissionRequest, SessionInfo, SessionState,
-    Usage, options_of, session_state, sessions_of,
+    AgentCommand, ChoiceRequest, Compaction, CompactionPhase, ConfigOption, Model,
+    PermissionRequest, SessionInfo, SessionState, Usage, options_of, session_state, sessions_of,
 };
 use crate::session::{ANSWER, AgentSpec, Event, HELLO, PermissionPolicy};
 use crate::wire::Wire;
@@ -972,7 +973,15 @@ async fn converse(
                             .read_text_file(false)
                             .write_text_file(false),
                     )
-                    .terminal(false),
+                    .terminal(false)
+                    // Said as well as honoured: this window paints a compaction as a row of its own
+                    // and holds the message field while it runs, so an agent that speaks the
+                    // standard's own `compaction_update` is free to use it (see `event_of`, which
+                    // reads Hermes' `_meta` spelling of the same three facts too).
+                    .session(
+                        ClientSessionCapabilities::new()
+                            .compaction(CompactionCapabilities::new()),
+                    ),
                 ))
                 .block_task()
                 .await?;
@@ -1560,6 +1569,23 @@ fn event_of(update: &SessionUpdate, settings: &Arc<Mutex<SessionState>>) -> Opti
             }
             Some(Event::Setup(known.clone()))
         }
+        // The standard's own compaction update — the one an agent sends a client that advertised
+        // `session.compaction`. Where it is missing (Hermes speaks the Python SDK, which has not got
+        // the type yet) the same three facts arrive under `_meta.hermes.compaction`, on the session
+        // info update, and are read just the same.
+        SessionUpdate::CompactionUpdate(update) => Some(Event::Compaction(Compaction {
+            id: update.compaction_id.to_string(),
+            status: phase_of(&update.status),
+            text: json_of(update)
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        })),
+        SessionUpdate::SessionInfoUpdate(update) => {
+            crate::protocol::compaction_of(&json_of(update)).map(Event::Compaction)
+        }
         SessionUpdate::CurrentModeUpdate(update) => {
             let mut known = settings.lock().ok()?;
             known.current_mode = Some(update.current_mode_id.to_string());
@@ -1568,6 +1594,21 @@ fn event_of(update: &SessionUpdate, settings: &Arc<Mutex<SessionState>>) -> Opti
         other => Some(Event::Other {
             kind: kind_of(other),
         }),
+    }
+}
+
+/// Where a compaction stands, in this project's words.
+///
+/// A status under a reserved `_` name, or one this version has not met, is read as over on purpose:
+/// a panel that held its input for a state it did not understand would hold it for good.
+fn phase_of(status: &WireCompactionStatus) -> CompactionPhase {
+    match status {
+        WireCompactionStatus::InProgress => CompactionPhase::InProgress,
+        WireCompactionStatus::Completed => CompactionPhase::Completed,
+        WireCompactionStatus::Failed => CompactionPhase::Failed,
+        WireCompactionStatus::Cancelled => CompactionPhase::Cancelled,
+        // The standard keeps this enum open for extensions and for statuses still to come.
+        _ => CompactionPhase::Failed,
     }
 }
 

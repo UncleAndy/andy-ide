@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ide_agents::{
-    AgentCommand, ChoiceRequest, ConfigOption, Event as AgentEvent, Mode, Model, PermissionPolicy,
-    PermissionRequest, REASONING, Registry, Session, SessionInfo, THOUGHT_LEVEL, Usage, first_line,
+    AgentCommand, ChoiceRequest, Compaction, CompactionPhase, ConfigOption, Event as AgentEvent,
+    Mode, Model, PermissionPolicy, PermissionRequest, REASONING, Registry, Session, SessionInfo,
+    THOUGHT_LEVEL, Usage, first_line,
 };
 
 /// How long the worker waits for the next thing before checking whether it was told to go.
@@ -304,6 +305,16 @@ pub struct AgentState {
     pub input: String,
     /// What was typed while the agent was still answering, to send when the turn ends.
     pub queued: Option<String>,
+    /// The compaction the agent is in the middle of, when it says it is in one.
+    ///
+    /// Kept after it ends, because how it ended is worth showing: a compaction that failed leaves the
+    /// conversation as it was, and a row that vanished would say it went through.
+    pub compaction: Option<Compaction>,
+    /// Where in the transcript the row for the compaction in flight is, so that its end rewrites that
+    /// row instead of writing a second one about the same thing.
+    compaction_row: Option<usize>,
+    /// When the compaction in flight began, for the line the panel writes while it runs.
+    compaction_began: Option<std::time::Instant>,
     /// Whether the field is asking for the keyboard back after a send.
     pub wants_focus: bool,
     /// Set when the person asked to copy from the panel: the window turns the shortcut
@@ -507,6 +518,9 @@ impl Default for AgentState {
             transcript: Vec::new(),
             input: String::new(),
             queued: None,
+            compaction: None,
+            compaction_row: None,
+            compaction_began: None,
             wants_focus: false,
             drawn_at: None,
             wants_copy: false,
@@ -887,6 +901,14 @@ impl AgentState {
         if text.is_empty() {
             return;
         }
+        if self.compaction_in_progress() {
+            // The agent is rewriting the conversation in front of it. The words stay where they were
+            // typed: refused now is not refused for good, and a queue would hand them to an agent
+            // that has already moved on. Asked of the compaction and not of the worker, because an
+            // announcement of one is proof the agent is up.
+            self.status = "compacting the context \u{2014} send when it is done".to_owned();
+            return;
+        }
         let Some(worker) = &self.worker else {
             self.status = "start the agent first".to_owned();
             return;
@@ -1067,6 +1089,57 @@ impl AgentState {
         self.busy || self.last_word.is_some_and(|when| when.elapsed() < SILENCE)
     }
 
+    /// Whether the agent is summarizing the context right now.
+    ///
+    /// A message sent in the middle of one lands in a conversation that is being rewritten under it,
+    /// so the field waits for the end: the agent said it began, and a panel that let the person type
+    /// into it anyway was a panel that took a command and lost it — which is what a failure and a
+    /// switch to the fallback model looked like from the outside.
+    pub fn compaction_in_progress(&self) -> bool {
+        self.compaction
+            .as_ref()
+            .is_some_and(|compaction| !compaction.status.is_over())
+    }
+
+    /// A compaction the agent announced: a row of its own while it runs, and that same row says how
+    /// it ended — two rows about one compaction read as two compactions.
+    fn took_compaction(&mut self, compaction: Compaction) {
+        if compaction.status.is_over() {
+            let ended = match compaction.status {
+                CompactionPhase::Cancelled => "Context compaction cancelled",
+                CompactionPhase::Failed => "Context compaction failed",
+                _ => "Context compaction complete \u{2014} the conversation carries on",
+            };
+            match self.compaction_row.take() {
+                Some(row) if row < self.transcript.len() => {
+                    self.transcript[row] = Line::Note(ended.to_owned());
+                }
+                _ => self.transcript.push(Line::Note(ended.to_owned())),
+            }
+            self.compaction_began = None;
+        } else {
+            let opening =
+                "Compacting the context \u{2014} the agent is summarizing what came before";
+            if self
+                .compaction_row
+                .is_none_or(|row| row >= self.transcript.len())
+            {
+                self.transcript.push(Line::Note(opening.to_owned()));
+                self.compaction_row = Some(self.transcript.len() - 1);
+            }
+            if self
+                .compaction
+                .as_ref()
+                .is_none_or(|seen| seen.id != compaction.id)
+            {
+                self.compaction_began = Some(std::time::Instant::now());
+            }
+            self.status = "compacting the context".to_owned();
+        }
+        self.compaction = Some(compaction);
+        self.agent_line_open = false;
+    }
+
     /// How long the turn in flight has been quiet: since the agent last said anything, or since the
     /// turn was sent when it has said nothing at all.
     ///
@@ -1083,10 +1156,17 @@ impl AgentState {
     ///
     /// The plain word while the agent answers as usual, and — once the silence has lasted longer
     /// than a person would call ordinary — the length of it, so that a window sitting at
-    /// `answering…` and a window that has stalled can be told apart at a glance. The reason for a
-    /// silence is not ours to know: a compaction, a tool and a slow model look the same from here,
-    /// and the panel says only what it can see.
+    /// `answering…` and a window that has stalled can be told apart at a glance. A tool and a slow
+    /// model look the same from here, and the panel says only what it can see — except for a
+    /// compaction, which the agent announces (the standard's `compaction_update`, or Hermes'
+    /// `_meta.hermes.compaction`) and which is therefore named, with its own clock.
     pub fn saying(&self) -> String {
+        if self.compaction_in_progress() {
+            return match self.compaction_began {
+                Some(began) => format!("compacting the context for {}", clock(began.elapsed())),
+                None => "compacting the context".to_owned(),
+            };
+        }
         match self.quiet_for() {
             Some(quiet) if quiet >= QUIET => {
                 format!(
@@ -1669,6 +1749,7 @@ impl AgentState {
                     }
                     self.agent_line_open = false;
                 }
+                AgentEvent::Compaction(compaction) => self.took_compaction(compaction),
                 AgentEvent::ToolCall { title, status, .. } => {
                     // An update that carries only a new status has no title of its own, and a row for it
                     // said nothing but "(completed)" — the empty lines Andy found under the question. The
@@ -2045,6 +2126,158 @@ fn work(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    fn announced(id: &str, status: ide_agents::CompactionPhase) -> AgentEvent {
+        AgentEvent::Compaction(Compaction {
+            id: id.to_owned(),
+            status,
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn a_compaction_is_one_row_that_says_how_it_ended() {
+        // The person asking "did it compress, and did it work?" has to find the answer where the
+        // conversation is, not in a log: a row when it begins, and the same row when it ends —
+        // two rows about one compaction read as two compactions.
+        use ide_agents::CompactionPhase;
+        let mut agent = AgentState::default();
+        agent.take(Reply::Event(announced("c1", CompactionPhase::InProgress)));
+
+        let rows: Vec<&Line> = agent
+            .transcript
+            .iter()
+            .filter(|line| matches!(line, Line::Note(_)))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the compaction was not written down: {rows:?}"
+        );
+        let Line::Note(opening) = rows[0] else {
+            unreachable!()
+        };
+        assert!(
+            opening.starts_with("Compacting the context"),
+            "the row does not say what is happening: {opening:?}"
+        );
+        assert!(
+            agent.compaction_in_progress(),
+            "a compaction that began is not seen as running"
+        );
+
+        // The heartbeat is the same compaction: it must not add a second row.
+        agent.take(Reply::Event(announced("c1", CompactionPhase::InProgress)));
+        assert_eq!(agent.transcript.len(), 1, "a second row for one compaction");
+
+        agent.take(Reply::Event(announced("c1", CompactionPhase::Completed)));
+        assert_eq!(
+            agent.transcript.len(),
+            1,
+            "the end of the compaction wrote a row of its own: {:?}",
+            agent.transcript
+        );
+        let Line::Note(ended) = &agent.transcript[0] else {
+            panic!("the row about the compaction is gone")
+        };
+        assert!(
+            ended.contains("complete"),
+            "the row does not say it ended: {ended:?}"
+        );
+        assert!(
+            !agent.compaction_in_progress(),
+            "a finished compaction is still seen as running"
+        );
+    }
+
+    #[test]
+    fn a_failed_compaction_says_so_and_lets_go() {
+        // A compaction that failed leaves the conversation as it was. A row that vanished, or one
+        // that said it went through, would both be lies about a turn that is about to be slower.
+        use ide_agents::CompactionPhase;
+        let mut agent = AgentState::default();
+        agent.take(Reply::Event(announced("c1", CompactionPhase::InProgress)));
+        agent.take(Reply::Event(announced("c1", CompactionPhase::Failed)));
+
+        let Line::Note(text) = &agent.transcript[0] else {
+            panic!("no row about the compaction: {:?}", agent.transcript)
+        };
+        assert!(
+            text.contains("failed"),
+            "the row hides the failure: {text:?}"
+        );
+        assert!(!agent.compaction_in_progress());
+    }
+
+    #[test]
+    fn the_panel_names_the_silence_a_compaction_causes() {
+        // A compaction takes a minute or two. `answering… — no word from the agent` is what the panel
+        // said about it, which is what the person read as a failure. It now says what is happening.
+        use ide_agents::CompactionPhase;
+        let mut agent = AgentState {
+            status: "answering\u{2026}".to_owned(),
+            ..AgentState::default()
+        };
+        agent.turn_in_flight_for(std::time::Duration::from_secs(75));
+        assert!(
+            agent.saying().contains("no word"),
+            "the silence of an ordinary turn is no longer reported: {:?}",
+            agent.saying()
+        );
+
+        agent.take(Reply::Event(announced("c1", CompactionPhase::InProgress)));
+        let saying = agent.saying();
+        assert!(
+            saying.starts_with("compacting the context for "),
+            "the panel does not name the compaction: {saying:?}"
+        );
+    }
+
+    #[test]
+    fn a_message_waits_for_the_end_of_the_compaction() {
+        // The complaint, exactly: commands sent while the agent was compacting came back as a failure
+        // and a switch to the fallback model. The words stay in the field, nothing is queued behind
+        // the person's back, and the panel says why.
+        use ide_agents::CompactionPhase;
+        let mut agent = AgentState {
+            input: "посчитай ещё раз".to_owned(),
+            busy: true,
+            ..AgentState::default()
+        };
+        agent.take(Reply::Event(announced("c1", CompactionPhase::InProgress)));
+        agent.send();
+
+        assert!(
+            agent.status.contains("compacting"),
+            "the panel did not say why the message was not sent: {:?}",
+            agent.status
+        );
+        assert_eq!(
+            agent.input, "посчитай ещё раз",
+            "the words left the field while the context was being rewritten"
+        );
+        assert!(
+            agent.queued.is_none(),
+            "the message was queued for an agent that is rewriting the conversation: {:?}",
+            agent.queued
+        );
+
+        // Over, and the same message goes where it was meant to: the refusal was not a loss.
+        agent.transcript.clear();
+        agent.take(Reply::Event(announced("c1", CompactionPhase::Completed)));
+        agent.busy = false;
+        agent.send();
+        assert_eq!(
+            agent.status, "start the agent first",
+            "the message was not taken after the compaction ended: {:?}",
+            agent.status
+        );
     }
 }
 

@@ -738,6 +738,19 @@ fn main() {
                         chunk(&session, "**bold** and `code`");
                         turn_answer(&session, id);
                     }
+                    // A compaction, held open for a while when the check asks for one: the panel is
+                    // meant to show it in the history and hold its field until it ends.
+                    "compress" => {
+                        compaction(&session, "c1", "in_progress");
+                        if let Ok(ms) = std::env::var("ACP_TEST_COMPACT_MS")
+                            && let Ok(ms) = ms.trim().parse::<u64>()
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                        }
+                        compaction(&session, "c1", "completed");
+                        chunk(&session, "Compacted.");
+                        turn_answer(&session, id);
+                    }
                     "ask" => {
                         next_id += 1;
                         let asked = next_id;
@@ -1039,6 +1052,22 @@ fn chunk(session: &str, text: &str) {
             "update": {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": text}
+            }
+        }
+    }));
+}
+
+/// One `session/update` notification carrying a compaction's phase, the way the standard spells it.
+fn compaction(session: &str, id: &str, status: &str) {
+    send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session,
+            "update": {
+                "sessionUpdate": "compaction_update",
+                "compactionId": id,
+                "status": status
             }
         }
     }));
