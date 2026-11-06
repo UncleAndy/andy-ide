@@ -32,3 +32,4 @@ rustc-ice-*.txt
 
 # The packages a release build leaves behind.
 /dist
+/tmp
