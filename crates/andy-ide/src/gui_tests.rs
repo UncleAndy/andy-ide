@@ -11697,6 +11697,147 @@ mod the_agent_panel {
     }
 
     #[test]
+    fn the_sessions_list_offers_only_the_conversations_of_this_project() {
+        // The agent lists every editor conversation it serves — its store knows no projects — so a
+        // list drawn straight from that answer offered the conversations of every project at once.
+        // Which of them are here is the project's own record, kept beside the names and figures.
+        let Some(agent) = stand_in() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.join(".andy-ide")).unwrap();
+        std::fs::write(
+            root.join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        // One conversation written down for this project, and the agent's answer holding more.
+        let workspace = ide_core::Workspace::open(&root).unwrap();
+        let mut state = workspace.read_state();
+        state.sessions = Some(vec!["kept-7".to_owned()]);
+        workspace.write_state(&state).unwrap();
+
+        // The agent is made to say this conversation lives elsewhere: written down, it is still
+        // this project's, and a conversation nobody here opened stays out.
+        std::fs::write(
+            root.join(".andy-ide").join("agents.toml"),
+            format!(
+                "[[agent]]\nname = \"stand-in\"\ncommand = {:?}\nargs = []\n\n\
+                 [agent.env]\nACP_TEST_SESSIONS_ELSEWHERE = \"kept-7\"\n",
+                agent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut gui = Gui {
+            harness: window(&root, config.path(), &[("a.txt", "one\n")], Some("a.txt")),
+            _project: project,
+            _config: None,
+        };
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.harness.get_by_label("Sessions").click();
+        wait(
+            &mut gui,
+            "the conversation of this project to arrive",
+            |gui| painted_text(gui, "renaming a symbol across crates"),
+        );
+        for _ in 0..3 {
+            gui.settle();
+        }
+
+        assert!(
+            !painted_text(&gui, "why the sky is blue"),
+            "a conversation of another project is offered in this one"
+        );
+    }
+
+    #[test]
+    fn a_project_that_never_said_which_conversations_are_its_own_takes_the_ones_had_here() {
+        // A project last opened before this record existed has nothing written down, and hiding
+        // every conversation it ever had would be the wrong way to start. Its own directory is
+        // what the agent reports per conversation, so that is what the first answer is read for.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let root = gui._project.path().canonicalize().unwrap();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        gui.harness.get_by_label("Sessions").click();
+        wait(&mut gui, "the conversations to arrive", |gui| {
+            painted_text(gui, "renaming a symbol across crates")
+        });
+        for _ in 0..3 {
+            gui.settle();
+        }
+        // The conversation had elsewhere stays out, and the ones of this directory come in.
+        assert!(
+            !painted_text(&gui, "why the sky is blue"),
+            "a conversation of another directory was taken for this project's"
+        );
+        gui.app_mut().state.save_workspace(None, 100.0, true);
+        let written = ide_core::Workspace::open(&root).unwrap().read_state();
+        let kept = written.sessions.unwrap_or_default();
+        assert!(
+            kept.iter().any(|id| id == "kept-7") && kept.iter().any(|id| id == "kept-1"),
+            "the conversations had here were not written down: {kept:?}"
+        );
+        assert!(
+            !kept.iter().any(|id| id == "kept-42"),
+            "a conversation of another directory was written down as this project's: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn a_conversation_opened_here_is_written_down_with_the_project() {
+        // Every conversation the panel opens here is the project's, whatever the agent says about
+        // it later: the record is written as the conversation is named, not at exit.
+        let Some(mut gui) = with_agent() else {
+            println!("the stand-in agent is not built: the check was skipped");
+            return;
+        };
+        let root = gui._project.path().canonicalize().unwrap();
+        gui.harness
+            .key_press_modifiers(egui::Modifiers::ALT, egui::Key::Num0);
+        gui.settle();
+        gui.harness.get_by_label("Start").click();
+        wait(&mut gui, "the agent coming up", |gui| {
+            gui.app().state.agent.status.starts_with("ready")
+        });
+        let opened = gui
+            .app()
+            .state
+            .agent
+            .session
+            .clone()
+            .expect("the agent named no conversation");
+        gui.app_mut().state.save_workspace(None, 100.0, true);
+        let written = ide_core::Workspace::open(&root).unwrap().read_state();
+        let kept = written.sessions.unwrap_or_default();
+        assert!(
+            kept.iter().any(|id| id == &opened),
+            "the conversation in front ({opened}) is not in the project's record: {kept:?}"
+        );
+    }
+
+    #[test]
     fn the_conversation_in_front_can_be_renamed_too() {
         // The row for the conversation in front used to be labelled "this conversation" whatever the
         // person called it: a rename looked like nothing had happened, and it looked that way after
@@ -11941,6 +12082,7 @@ mod the_agent_panel {
                 .into_iter()
                 .collect(),
                 session_names: Default::default(),
+                sessions: None,
                 company: Default::default(),
             })
             .unwrap();
@@ -12190,6 +12332,7 @@ mod the_agent_panel {
                 view: Default::default(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                sessions: None,
                 company: Default::default(),
             })
             .unwrap();

@@ -90,6 +90,16 @@ pub struct WorkspaceState {
     /// ACP. The name a person gives is kept here, with the project the conversations were had in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_names: BTreeMap<String, String>,
+    /// The conversations had in this project, by session id — the ones the panel offers.
+    ///
+    /// The agent lists every conversation it serves and knows nothing about projects: Hermes asks
+    /// its store for every editor row, so a panel that drew that answer whole offered the
+    /// conversations of every project at once. What belongs here is the project's own record,
+    /// written as conversations are opened, and `None` is a project that has never said — the
+    /// panel takes the ones the agent reports for this directory and writes them down once, which
+    /// is how a project last opened before this record existed keeps the conversations it had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<String>>,
 }
 
 /// Tokens spent, and the window they were spent from.
@@ -188,6 +198,7 @@ mod tests {
             view: BTreeMap::from([("hints".to_owned(), false)]),
             contexts: Default::default(),
             session_names: Default::default(),
+            sessions: None,
             company: BTreeMap::from([("editor".to_owned(), vec!["problems".to_owned()])]),
         };
         workspace.write_state(&state).unwrap();
@@ -211,6 +222,7 @@ mod tests {
                 view: BTreeMap::new(),
                 contexts: Default::default(),
                 session_names: Default::default(),
+                sessions: None,
                 company: Default::default(),
             })
             .unwrap();

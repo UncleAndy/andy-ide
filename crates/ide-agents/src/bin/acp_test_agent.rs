@@ -350,9 +350,22 @@ fn main() {
                     .skip(start)
                     .take(2)
                     .map(|(id, title, at)| {
+                        // Where each conversation was had. A real agent reports the directory the
+                        // conversation was started in, so most of them are this project's own —
+                        // `kept-42` was had elsewhere, which is what says the list is not asked
+                        // for by directory. `ACP_TEST_SESSIONS_ELSEWHERE` names others.
+                        let elsewhere = std::env::var("ACP_TEST_SESSIONS_ELSEWHERE")
+                            .unwrap_or_default()
+                            .split(',')
+                            .any(|named| named.trim() == id);
+                        let home = if elsewhere || id == "kept-42" || cwd.is_empty() {
+                            "/home/agent/another-project".to_owned()
+                        } else {
+                            cwd.clone()
+                        };
                         json!({
                             "sessionId": id,
-                            "cwd": "/home/agent/another-project",
+                            "cwd": home,
                             "title": title,
                             "updatedAt": at
                         })

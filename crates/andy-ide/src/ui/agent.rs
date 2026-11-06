@@ -639,6 +639,15 @@ fn sessions(ui: &mut Ui, state: &mut AppState) {
         .agent
         .sessions
         .iter()
+        // Only the conversations of this project. The agent answers about every project it
+        // serves; which of those are here is the project's own record.
+        .filter(|session| {
+            state
+                .agent
+                .session_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&session.id))
+        })
         .map(|session| {
             // The name a person gave the conversation, or the one the agent chose — which is the
             // first thing that was said in it, often not what it turned out to be about.
